@@ -167,3 +167,87 @@ async function getLastEmailAccountFromCookie(
     return null;
   }
 }
+
+/**
+ * Get IMAP/SMTP credentials for an email account
+ */
+export async function getImapCredentialsForEmail({
+  emailAccountId,
+}: {
+  emailAccountId: string;
+}): Promise<{
+  email: string;
+  imap: {
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    security: "ssl" | "tls" | "none";
+  };
+  smtp: {
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    security: "ssl" | "tls" | "none";
+  };
+} | null> {
+  const emailAccount = await prisma.emailAccount.findUnique({
+    where: { id: emailAccountId },
+    select: {
+      email: true,
+      account: {
+        select: {
+          provider: true,
+          imapHost: true,
+          imapPort: true,
+          imapUsername: true,
+          imapPassword: true,
+          imapSecurity: true,
+          smtpHost: true,
+          smtpPort: true,
+          smtpUsername: true,
+          smtpPassword: true,
+          smtpSecurity: true,
+        },
+      },
+    },
+  });
+
+  if (!emailAccount?.account) return null;
+  if (emailAccount.account.provider !== "imap") return null;
+
+  const { account } = emailAccount;
+
+  // Validate all required fields are present
+  if (
+    !account.imapHost ||
+    !account.imapPort ||
+    !account.imapUsername ||
+    !account.imapPassword ||
+    !account.smtpHost ||
+    !account.smtpPort ||
+    !account.smtpUsername ||
+    !account.smtpPassword
+  ) {
+    return null;
+  }
+
+  return {
+    email: emailAccount.email,
+    imap: {
+      host: account.imapHost,
+      port: account.imapPort,
+      username: account.imapUsername,
+      password: account.imapPassword,
+      security: (account.imapSecurity as "ssl" | "tls" | "none") || "ssl",
+    },
+    smtp: {
+      host: account.smtpHost,
+      port: account.smtpPort,
+      username: account.smtpUsername,
+      password: account.smtpPassword,
+      security: (account.smtpSecurity as "ssl" | "tls" | "none") || "tls",
+    },
+  };
+}

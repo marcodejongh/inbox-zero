@@ -1,5 +1,11 @@
 {
   "buildCommand": "cd ../.. && turbo run build --filter={apps/web}...",
   "installCommand": "cd ../.. && corepack enable && bash clone-marketing.sh && pnpm install --no-frozen-lockfile",
-  "ignoreCommand": ""
+  "ignoreCommand": "",
+  "crons": [
+    {
+      "path": "/api/cron/imap-poll",
+      "schedule": "*/3 * * * *"
+    }
+  ]
 }

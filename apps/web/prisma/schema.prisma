@@ -18,7 +18,7 @@ model Account {
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
   userId                String
-  provider              String
+  provider              String // "google", "microsoft", or "imap"
   type                  String        @default("oidc") // next-auth deprecated field
   providerAccountId     String
   refresh_token         String?       @db.Text
@@ -31,6 +31,18 @@ model Account {
   session_state         String?
   user                  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   emailAccount          EmailAccount?
+
+  // IMAP/SMTP configuration (only used when provider="imap")
+  imapHost     String?
+  imapPort     Int?
+  imapUsername String? @db.Text
+  imapPassword String? @db.Text
+  imapSecurity String? // "ssl", "tls", "none"
+  smtpHost     String?
+  smtpPort     Int?
+  smtpUsername String? @db.Text
+  smtpPassword String? @db.Text
+  smtpSecurity String? // "ssl", "tls", "none"
 
   @@unique([provider, providerAccountId])
   @@index([userId])
@@ -125,6 +137,8 @@ model EmailAccount {
   watchEmailsSubscriptionId      String? // For Outlook subscription ID
   watchEmailsSubscriptionHistory Json? // Historical Outlook subscription IDs: [{ subscriptionId, createdAt, replacedAt }]
   lastSyncedHistoryId            String?
+  lastImapSync                   DateTime? // Last time IMAP inbox was polled for new emails
+  imapCapabilities               Json? // Cached IMAP server capabilities
   behaviorProfile                Json?
   personaAnalysis                Json? // ai analysis of the user's persona
   role                           String? // the role confirmed by the user - previously `User.surveyRole`

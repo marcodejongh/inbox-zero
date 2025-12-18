@@ -1,12 +1,15 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { toastError } from "@/components/Toast";
 import Image from "next/image";
+import { Mail } from "lucide-react";
 import { TypographyP } from "@/components/Typography";
 import { getAccountLinkingUrl } from "@/utils/account-linking";
+import { Separator } from "@/components/ui/separator";
 
 export function AddAccount() {
   const [isLoadingGoogle, setIsLoadingGoogle] = useState(false);
@@ -65,6 +68,25 @@ export function AddAccount() {
           />
           <span className="ml-2">Add Microsoft Account</span>
         </Button>
+
+        <div className="flex w-full items-center gap-4">
+          <Separator className="flex-1" />
+          <span className="text-xs text-muted-foreground">or</span>
+          <Separator className="flex-1" />
+        </div>
+
+        <Button variant="outline" className="w-full" asChild>
+          <Link href="/accounts/imap">
+            <Mail className="h-5 w-5" />
+            <span className="ml-2">Add IMAP/SMTP Account</span>
+          </Link>
+        </Button>
+
+        <TypographyP className="text-center text-sm text-muted-foreground">
+          Use IMAP/SMTP for self-hosted email servers,
+          <br />
+          Fastmail, ProtonMail Bridge, and other providers.
+        </TypographyP>
 
         <TypographyP className="text-sm text-muted-foreground">
           You will be billed for each account.
