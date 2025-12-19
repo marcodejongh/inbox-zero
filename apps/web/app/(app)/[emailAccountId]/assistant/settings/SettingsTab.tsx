@@ -7,11 +7,13 @@ import { LearnedPatternsSetting } from "@/app/(app)/[emailAccountId]/assistant/s
 import { PersonalSignatureSetting } from "@/app/(app)/[emailAccountId]/assistant/settings/PersonalSignatureSetting";
 import { MultiRuleSetting } from "@/app/(app)/[emailAccountId]/assistant/settings/MultiRuleSetting";
 import { WritingStyleSetting } from "@/app/(app)/[emailAccountId]/assistant/settings/WritingStyleSetting";
+import { FastmailSyncSetting } from "@/app/(app)/[emailAccountId]/assistant/settings/FastmailSyncSetting";
 import { env } from "@/env";
 
 export function SettingsTab() {
   return (
     <div className="space-y-2">
+      <FastmailSyncSetting />
       <DraftReplies />
       <WritingStyleSetting />
       <DraftKnowledgeSetting />

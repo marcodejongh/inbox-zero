@@ -168,6 +168,20 @@ interface JMAPSetResponse<T> {
   notDestroyed?: Record<string, { type: string; description?: string }>;
 }
 
+/**
+ * JMAP /changes response for tracking incremental updates
+ * @see https://jmap.io/spec-core.html#changes
+ */
+interface JMAPChangesResponse {
+  accountId: string;
+  oldState: string;
+  newState: string;
+  hasMoreChanges: boolean;
+  created: string[];
+  updated: string[];
+  destroyed: string[];
+}
+
 // Helper to extract typed response data from JMAP method responses
 // JMAP responses are [methodName, data, callId] tuples where data structure varies by method
 // biome-ignore lint/suspicious/noExplicitAny: JMAP response types are complex and vary by method
@@ -2821,6 +2835,120 @@ export class FastmailProvider implements EmailProvider {
         snippet: e.preview || "",
         subject: e.subject || "",
       }));
+  }
+
+  /**
+   * Get email changes since a given state token.
+   * Uses JMAP's Email/changes endpoint for efficient incremental sync.
+   * @param sinceState - The state token from the last sync (stored in lastSyncedHistoryId)
+   * @returns Object containing new state, arrays of created/updated/destroyed IDs, and hasMoreChanges flag
+   */
+  async getEmailChanges(sinceState: string | null): Promise<{
+    newState: string;
+    created: string[];
+    updated: string[];
+    destroyed: string[];
+    hasMoreChanges: boolean;
+  }> {
+    this.logger.info("Getting email changes", { sinceState });
+
+    // If no previous state, get current state only (first sync)
+    if (!sinceState) {
+      this.logger.info("No previous state, fetching current state");
+      const response = await this.client.request([
+        [
+          "Email/get",
+          {
+            accountId: this.client.accountId,
+            ids: [],
+            properties: ["id"],
+          },
+          "0",
+        ],
+      ]);
+
+      const result = getResponseData<JMAPGetResponse<JMAPEmail>>(
+        response.methodResponses[0],
+      );
+
+      return {
+        newState: result.state,
+        created: [],
+        updated: [],
+        destroyed: [],
+        hasMoreChanges: false,
+      };
+    }
+
+    try {
+      const response = await this.client.request([
+        [
+          "Email/changes",
+          {
+            accountId: this.client.accountId,
+            sinceState,
+            maxChanges: 100, // Limit to avoid overwhelming processing
+          },
+          "0",
+        ],
+      ]);
+
+      const changes = getResponseData<JMAPChangesResponse>(
+        response.methodResponses[0],
+      );
+
+      this.logger.info("Got email changes", {
+        created: changes.created.length,
+        updated: changes.updated.length,
+        destroyed: changes.destroyed.length,
+        hasMoreChanges: changes.hasMoreChanges,
+      });
+
+      return {
+        newState: changes.newState,
+        created: changes.created,
+        updated: changes.updated,
+        destroyed: changes.destroyed,
+        hasMoreChanges: changes.hasMoreChanges,
+      };
+    } catch (error) {
+      // Handle state mismatch errors (cannotCalculateChanges)
+      if (
+        isJMAPErrorType(error, "cannotCalculateChanges") ||
+        isJMAPErrorType(error, "invalidState")
+      ) {
+        this.logger.warn(
+          "State is too old or invalid, need to re-sync from scratch",
+          { error },
+        );
+        // Return empty changes with a flag to indicate full resync needed
+        // The caller should reset the state and start fresh
+        const response = await this.client.request([
+          [
+            "Email/get",
+            {
+              accountId: this.client.accountId,
+              ids: [],
+              properties: ["id"],
+            },
+            "0",
+          ],
+        ]);
+
+        const result = getResponseData<JMAPGetResponse<JMAPEmail>>(
+          response.methodResponses[0],
+        );
+
+        return {
+          newState: result.state,
+          created: [],
+          updated: [],
+          destroyed: [],
+          hasMoreChanges: false,
+        };
+      }
+      throw error;
+    }
   }
 
   async processHistory(_options: {
