@@ -189,9 +189,9 @@ export async function pollFastmailAccount({
       };
     }
 
-    // Check for tokens
-    if (!account.account?.access_token || !account.account?.refresh_token) {
-      log.error("Missing access or refresh token");
+    // Check for tokens (refresh_token is optional for app token accounts)
+    if (!account.account?.access_token) {
+      log.error("Missing access token");
       return {
         emailAccountId,
         email: account.email,

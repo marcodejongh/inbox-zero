@@ -1,15 +1,9 @@
 import type { ParsedMessage } from "@/utils/types";
 import type {
   FastmailClient,
-  JMAPMethodCall,
   JMAPMethodResponse,
-  JMAPError,
 } from "@/utils/fastmail/client";
-import {
-  getAccessTokenFromClient,
-  getJMAPError,
-  isJMAPError,
-} from "@/utils/fastmail/client";
+import { getAccessTokenFromClient } from "@/utils/fastmail/client";
 import { FastmailMailbox } from "@/utils/fastmail/constants";
 import type { InboxZeroLabel } from "@/utils/label";
 import type { ThreadsQuery } from "@/app/api/threads/validation";
@@ -562,14 +556,14 @@ export class FastmailProvider implements EmailProvider {
     const log = this.logger.with({ action: "getThread", threadId });
 
     try {
-      // Get all emails in the thread
+      // Get thread to retrieve email IDs, then fetch emails
+      // Note: JMAP does not support "inThread" filter - must use Thread/get
       const response = await this.client.request([
         [
-          "Email/query",
+          "Thread/get",
           {
             accountId: this.client.accountId,
-            filter: { inThread: threadId },
-            sort: [{ property: "receivedAt", isAscending: true }],
+            ids: [threadId],
           },
           "0",
         ],
@@ -579,8 +573,8 @@ export class FastmailProvider implements EmailProvider {
             accountId: this.client.accountId,
             "#ids": {
               resultOf: "0",
-              name: "Email/query",
-              path: "/ids",
+              name: "Thread/get",
+              path: "/list/*/emailIds",
             },
             properties: [...EMAIL_PROPERTIES],
             fetchAllBodyValues: true,
@@ -1123,7 +1117,7 @@ export class FastmailProvider implements EmailProvider {
 
   async bulkArchiveFromSenders(
     fromEmails: string[],
-    ownerEmail: string,
+    _ownerEmail: string,
     _emailAccountId: string,
   ): Promise<void> {
     const log = this.logger.with({
@@ -2565,7 +2559,7 @@ export class FastmailProvider implements EmailProvider {
    * @returns Object with base64-encoded data and size in bytes
    */
   async getAttachment(
-    messageId: string,
+    _messageId: string,
     attachmentId: string,
   ): Promise<{ data: string; size: number }> {
     // JMAP uses blob download URL

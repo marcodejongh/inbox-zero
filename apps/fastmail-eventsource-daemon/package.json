@@ -1,0 +1,27 @@
+{
+  "name": "inbox-zero-fastmail-eventsource-daemon",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx --tsconfig tsconfig.json src/index.ts",
+    "dev": "tsx watch --tsconfig tsconfig.json src/index.ts",
+    "build": "prisma generate && tsc",
+    "db:generate": "prisma generate",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "prisma": "6.8.2",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@prisma/client": "6.8.2",
+    "@t3-oss/env-core": "0.13.8",
+    "dotenv": "17.2.3",
+    "eventsource": "3.0.6",
+    "zod": "3.25.46"
+  }
+}

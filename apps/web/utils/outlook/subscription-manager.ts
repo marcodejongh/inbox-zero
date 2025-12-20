@@ -1,5 +1,4 @@
 import prisma from "@/utils/prisma";
-import { createScopedLogger } from "@/utils/logger";
 import { captureException } from "@/utils/error";
 import type { EmailProvider } from "@/utils/email/types";
 import { createEmailProvider } from "@/utils/email/provider";

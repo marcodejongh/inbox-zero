@@ -28,6 +28,7 @@ export const env = createEnv({
     MICROSOFT_TENANT_ID: z.string().optional().default("common"),
     FASTMAIL_CLIENT_ID: z.string().optional(),
     FASTMAIL_CLIENT_SECRET: z.string().optional(),
+    FASTMAIL_WEBHOOK_SECRET: z.string().optional(), // Shared secret for EventSource daemon webhook auth
     AUTHELIA_CLIENT_ID: z.string().optional(),
     AUTHELIA_CLIENT_SECRET: z.string().optional(),
     AUTHELIA_ISSUER_URL: z.string().optional(), // e.g., https://auth.yourdomain.com
