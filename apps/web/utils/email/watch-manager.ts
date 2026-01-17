@@ -6,7 +6,10 @@ import { captureException } from "@/utils/error";
 import { cleanupInvalidTokens } from "@/utils/auth/cleanup-invalid-tokens";
 import type { EmailProvider } from "@/utils/email/types";
 import { createManagedOutlookSubscription } from "@/utils/outlook/subscription-manager";
-import { isMicrosoftProvider } from "@/utils/email/provider-types";
+import {
+  isMicrosoftProvider,
+  isFastmailProvider,
+} from "@/utils/email/provider-types";
 
 export type WatchEmailAccountResult =
   | {
@@ -211,6 +214,19 @@ async function watchEmails({
   logger.info("Watching emails");
 
   try {
+    // Fastmail doesn't support webhooks for third-party apps
+    // It uses polling via /api/fastmail/poll cron job instead
+    if (isFastmailProvider(provider.name)) {
+      logger.info(
+        "Fastmail uses polling instead of webhooks - skipping watch setup",
+      );
+      // Return a far-future expiration to prevent watch-manager from treating this as an error
+      // The actual polling is handled by the /api/fastmail/poll cron job
+      const pollingExpiration = new Date();
+      pollingExpiration.setFullYear(pollingExpiration.getFullYear() + 10);
+      return { success: true, expirationDate: pollingExpiration };
+    }
+
     if (isMicrosoftProvider(provider.name)) {
       const result = await createManagedOutlookSubscription({
         emailAccountId,

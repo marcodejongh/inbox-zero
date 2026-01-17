@@ -125,6 +125,7 @@ model EmailAccount {
   watchEmailsSubscriptionId      String? // For Outlook subscription ID
   watchEmailsSubscriptionHistory Json? // Historical Outlook subscription IDs: [{ subscriptionId, createdAt, replacedAt }]
   lastSyncedHistoryId            String?
+  lastPolledAt                   DateTime? // For Fastmail polling - tracks last successful poll
   behaviorProfile                Json?
   personaAnalysis                Json? // ai analysis of the user's persona
   role                           String? // the role confirmed by the user - previously `User.surveyRole`
