@@ -1,0 +1,116 @@
+---
+title: 'Slack Integration Setup'
+description: 'Set up the Slack bot for meeting briefs and AI assistant'
+---
+
+## 1. Create a Slack App
+
+The easiest way is to use the included manifest:
+
+1. Go to [https://api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** > **From an app manifest**
+2. Select a workspace
+3. Paste the contents of the [`manifest.yaml` template](https://github.com/elie222/inbox-zero/blob/main/docs/slack/manifest.yaml), replacing `YOUR_DOMAIN` with your actual domain
+4. Click **Create**
+
+This configures all scopes, event subscriptions, and the bot user automatically.
+
+<details>
+<summary>Manual setup (without manifest)</summary>
+
+### Configure OAuth & Permissions
+
+Under **OAuth & Permissions**:
+
+**Redirect URLs** — add:
+
+```
+https://<your-domain>/api/slack/callback
+```
+
+**Bot Token Scopes** — add these scopes:
+
+| Scope | Purpose |
+|-------|---------|
+| `channels:read` | Resolve public channels where users mention the assistant |
+| `channels:join` | Join a public channel when needed for assistant interactions |
+| `groups:read` | List private channels available as notification targets |
+| `chat:write` | Send meeting briefs and AI responses |
+| `app_mentions:read` | Respond to @mentions in channels |
+| `im:read` | Receive direct messages |
+| `im:write` | Send DM responses |
+| `im:history` | Read DM conversation history |
+| `assistant:write` | Enable Slack Assistant prompts and status indicators |
+| `reactions:write` | Add processing indicator reactions |
+| `users:read` | View workspace members |
+| `users:read.email` | Look up teammates by email for multi-user workspaces |
+
+### Enable Event Subscriptions
+
+Under **Event Subscriptions**:
+
+1. Toggle **Enable Events** to ON
+2. Set **Request URL** to:
+   ```
+   https://<your-domain>/api/slack/events
+   ```
+3. Under **Subscribe to bot events**, add:
+   - `message.im` — direct messages to the bot
+   - `app_mention` — @mentions in channels
+   - `assistant_thread_started` — initialize Slack assistant thread prompts
+   - `assistant_thread_context_changed` — respond to assistant context switches
+
+Slack will send a verification challenge to the URL; the app handles this automatically.
+
+### Enable Interactivity
+
+Under **Interactivity & Shortcuts**:
+
+1. Toggle **Interactivity** to ON
+2. Set **Request URL** to:
+   ```
+   https://<your-domain>/api/slack/events
+   ```
+
+Interactive actions (for example, assistant `Send` buttons) are posted to this URL. Without this setting, button clicks will not reach the app.
+
+### Enable App Home
+
+Under **App Home**:
+
+1. Check **Allow users to send Slash commands and messages from the messages tab**
+2. Uncheck **Make the messages tab read-only** (if shown)
+
+This lets users DM the bot directly to chat with the AI assistant.
+
+</details>
+
+## 2. Set Environment Variables
+
+From **Basic Information** and **OAuth & Permissions** pages, set these in your `.env`:
+
+```bash
+SLACK_CLIENT_ID=       # OAuth & Permissions > Client ID
+SLACK_CLIENT_SECRET=   # OAuth & Permissions > Client Secret
+SLACK_SIGNING_SECRET=  # Basic Information > Signing Secret
+```
+
+All three are optional. If not set, the Slack connect button is hidden and the events endpoint returns 503.
+
+For local development with ngrok, also set:
+
+```bash
+WEBHOOK_URL=https://your-domain.ngrok-free.app
+```
+
+This is used for the OAuth callback and events webhook URLs. `NEXT_PUBLIC_BASE_URL` stays as `http://localhost:3000` so other auth flows aren't affected.
+
+## 3. Connect from the UI
+
+1. Navigate to **Settings** > **Email Account** tab
+2. Click **Connect Slack** under Connected Apps
+3. Authorize the app in the Slack OAuth flow
+4. Open **Channels** and choose a private Slack channel for notifications
+5. Invite the Inbox Zero bot to that private channel
+6. Enable the meeting briefs, follow-ups, digests, filing alerts, or rule notifications you want delivered there
+
+Users can also DM the bot or @mention it in channels to chat with the AI assistant.

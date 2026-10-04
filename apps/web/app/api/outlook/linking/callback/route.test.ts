@@ -1,0 +1,863 @@
+import { NextRequest } from "next/server";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import prisma from "@/utils/__mocks__/prisma";
+
+const {
+  mockValidateOAuthCallback,
+  mockHandleAccountLinking,
+  mockGetOAuthCodeResult,
+  mockAcquireOAuthCodeLock,
+  mockSetOAuthCodeResult,
+  mockClearOAuthCode,
+  mockCaptureException,
+  mockAuth,
+} = vi.hoisted(() => ({
+  mockValidateOAuthCallback: vi.fn(),
+  mockHandleAccountLinking: vi.fn(),
+  mockGetOAuthCodeResult: vi.fn(),
+  mockAcquireOAuthCodeLock: vi.fn(),
+  mockSetOAuthCodeResult: vi.fn(),
+  mockClearOAuthCode: vi.fn(),
+  mockCaptureException: vi.fn(),
+  mockAuth: vi.fn(),
+}));
+
+vi.mock("@/env", () => ({
+  env: {
+    AUTH_SECRET: "test-auth-secret",
+    EMAIL_ENCRYPT_SALT: "test-email-salt",
+    NEXT_PUBLIC_BASE_URL: "http://localhost:3000",
+    MICROSOFT_CLIENT_ID: "client-id",
+    MICROSOFT_CLIENT_SECRET: "client-secret",
+    MICROSOFT_TENANT_ID: "common",
+  },
+}));
+
+vi.mock("@/utils/middleware", async () => {
+  const { createWithErrorTestMiddleware } = await vi.importActual<
+    typeof import("@/__tests__/helpers")
+  >("@/__tests__/helpers");
+
+  return createWithErrorTestMiddleware();
+});
+
+vi.mock("@/utils/prisma");
+
+vi.mock("@/utils/error", async (importActual) => {
+  const actual = await importActual<typeof import("@/utils/error")>();
+  return {
+    ...actual,
+    captureException: mockCaptureException,
+  };
+});
+
+vi.mock("@/utils/oauth/callback-validation", async (importActual) => {
+  const actual =
+    await importActual<typeof import("@/utils/oauth/callback-validation")>();
+  return {
+    ...actual,
+    validateOAuthCallback: mockValidateOAuthCallback,
+  };
+});
+
+vi.mock("@/utils/oauth/account-linking", async (importActual) => {
+  const actual =
+    await importActual<typeof import("@/utils/oauth/account-linking")>();
+  return {
+    getMailboxLinkingBlockedRedirect: actual.getMailboxLinkingBlockedRedirect,
+    handleAccountLinking: mockHandleAccountLinking,
+  };
+});
+
+vi.mock("@/utils/user/merge-account", () => ({
+  mergeAccount: vi.fn(),
+}));
+
+vi.mock("@/utils/redis/oauth-code", () => ({
+  acquireOAuthCodeLock: mockAcquireOAuthCodeLock,
+  getOAuthCodeResult: mockGetOAuthCodeResult,
+  setOAuthCodeResult: mockSetOAuthCodeResult,
+  clearOAuthCode: mockClearOAuthCode,
+}));
+
+vi.mock("@/utils/prisma-helpers", () => ({
+  isDuplicateError: vi.fn(() => false),
+}));
+
+vi.mock("@/utils/auth", () => ({
+  auth: mockAuth,
+}));
+
+vi.mock("@/utils/outlook/scopes", () => ({
+  REQUIRED_SCOPES: [
+    "openid",
+    "profile",
+    "email",
+    "User.Read",
+    "offline_access",
+    "Mail.ReadWrite",
+    "Mail.Send",
+    "MailboxSettings.ReadWrite",
+  ],
+  SCOPES: [
+    "openid",
+    "profile",
+    "email",
+    "User.Read",
+    "offline_access",
+    "Mail.ReadWrite",
+    "Mail.Send",
+    "Contacts.Read",
+    "MailboxSettings.ReadWrite",
+  ],
+}));
+
+import { generateSignedOAuthState } from "@/utils/oauth/state";
+import { GET } from "./route";
+
+function createIdToken(claims: Record<string, string>) {
+  const encode = (value: object) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "RS256" })}.${encode(claims)}.signature`;
+}
+
+describe("outlook linking callback route", () => {
+  const createSignedState = (userId = "user-123") =>
+    generateSignedOAuthState({ userId });
+
+  const findUniqueAccountKeys = () =>
+    prisma.account.findUnique.mock.calls.map(
+      ([args]) => args.where.provider_providerAccountId?.providerAccountId,
+    );
+
+  const createRequest = (url: string, state = createSignedState()) =>
+    new NextRequest(url, {
+      headers: {
+        cookie: `outlook_linking_state=${state}`,
+      },
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockValidateOAuthCallback.mockReturnValue({
+      success: true,
+      targetUserId: "user-123",
+      stateNonce: "state-nonce",
+      reconnectEmailAccountId: null,
+      code: "valid-auth-code",
+    });
+    mockGetOAuthCodeResult.mockResolvedValue(null);
+    mockAcquireOAuthCodeLock.mockResolvedValue(true);
+    mockAuth.mockResolvedValue({
+      user: {
+        id: "user-123",
+      },
+      session: { emailOtp: false },
+    });
+    prisma.account.findUnique.mockResolvedValue(null);
+  });
+
+  it("does not let an email code session link a mailbox", async () => {
+    mockAuth.mockResolvedValue({
+      user: { id: "user-123" },
+      session: { emailOtp: true },
+    });
+    mockHandleAccountLinking.mockResolvedValue({ type: "continue_create" });
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    expect(response.headers.get("location")).toContain(
+      "error=provider_sign_in_required",
+    );
+    expect(mockGetOAuthCodeResult).not.toHaveBeenCalled();
+    expect(mockHandleAccountLinking).not.toHaveBeenCalled();
+    expect(prisma.account.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects signed linking state after the session is revoked", async () => {
+    mockAuth.mockResolvedValue(null);
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+    expect(response.headers.get("location")).toContain("error=invalid_state");
+    expect(mockGetOAuthCodeResult).not.toHaveBeenCalled();
+    expect(mockHandleAccountLinking).not.toHaveBeenCalled();
+  });
+
+  it("redirects with consent_incomplete when Microsoft linking lacks required consent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "entra-object-id",
+              sub: "better-auth-subject",
+            }),
+            scope: "Mail.ReadWrite MailboxSettings.ReadWrite",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "provider-account-id",
+            userPrincipalName: "user@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            sub: "better-auth-subject",
+          }),
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    const redirectLocation = response.headers.get("location");
+    expect(redirectLocation).toContain("/accounts");
+    expect(redirectLocation).toContain("error=consent_incomplete");
+    expect(redirectLocation).toContain("approve+every+requested+permission");
+    expect(mockHandleAccountLinking).not.toHaveBeenCalled();
+    expect(mockSetOAuthCodeResult).not.toHaveBeenCalled();
+    expect(mockClearOAuthCode).toHaveBeenCalledWith("valid-auth-code");
+  });
+
+  it("allows linking without optional contact access", async () => {
+    mockHandleAccountLinking.mockResolvedValue({
+      type: "continue_create",
+    });
+    prisma.account.create.mockResolvedValue({
+      id: "account-123",
+    } as Awaited<ReturnType<typeof prisma.account.create>>);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "entra-object-id",
+              sub: "better-auth-subject",
+            }),
+            scope: "Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite",
+            token_type: "Bearer",
+            expires_in: 3600,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "provider-account-id",
+            userPrincipalName: "user@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            sub: "better-auth-subject",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    const redirectLocation = response.headers.get("location");
+    expect(redirectLocation).toContain("success=account_created_and_linked");
+    expect(mockHandleAccountLinking).toHaveBeenCalled();
+    expect(prisma.account.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          provider: "microsoft",
+          providerAccountId: "entra-object-id",
+        }),
+      }),
+    );
+    expect(mockSetOAuthCodeResult).toHaveBeenCalledWith("valid-auth-code", {
+      success: "account_created_and_linked",
+    });
+  });
+
+  it("redirects with admin_consent_required when Microsoft returns an AADSTS65001 callback error", async () => {
+    const state = createSignedState();
+    const response = await GET(
+      createRequest(
+        `http://localhost:3000/api/outlook/linking/callback?error=access_denied&error_description=AADSTS65001&state=${encodeURIComponent(state)}`,
+        state,
+      ),
+    );
+
+    const redirectLocation = response.headers.get("location");
+    expect(redirectLocation).toContain("error=admin_consent_required");
+    expect(redirectLocation).toContain("admin+approval");
+    expect(mockValidateOAuthCallback).not.toHaveBeenCalled();
+    expect(mockHandleAccountLinking).not.toHaveBeenCalled();
+  });
+
+  it("redirects with consent_declined when Microsoft consent is canceled", async () => {
+    const state = createSignedState();
+    const response = await GET(
+      createRequest(
+        `http://localhost:3000/api/outlook/linking/callback?error=access_denied&error_description=AADSTS65004&state=${encodeURIComponent(state)}`,
+        state,
+      ),
+    );
+
+    const redirectLocation = response.headers.get("location");
+    expect(redirectLocation).toContain("error=consent_declined");
+    expect(redirectLocation).toContain("consent+screen");
+    expect(mockValidateOAuthCallback).not.toHaveBeenCalled();
+    expect(mockHandleAccountLinking).not.toHaveBeenCalled();
+  });
+
+  it("redirects with invalid_state for Microsoft callback errors with mismatched state", async () => {
+    const cookieState = createSignedState();
+    const queryState = createSignedState();
+    const response = await GET(
+      createRequest(
+        `http://localhost:3000/api/outlook/linking/callback?error=access_denied&error_description=AADSTS65001&state=${encodeURIComponent(queryState)}`,
+        cookieState,
+      ),
+    );
+
+    const redirectLocation = response.headers.get("location");
+    expect(redirectLocation).toContain("error=invalid_state");
+    expect(mockValidateOAuthCallback).not.toHaveBeenCalled();
+  });
+
+  it("allows successful reconnects when Microsoft omits scope from the token response", async () => {
+    prisma.account.findUnique.mockResolvedValue({
+      id: "account-123",
+      userId: "user-123",
+      refresh_token: "stored-refresh-token",
+      user: { name: "Test User", email: "user@example.com" },
+      emailAccount: { id: "email-account-123" },
+    } as Awaited<ReturnType<typeof prisma.account.findUnique>>);
+    mockHandleAccountLinking.mockResolvedValue({
+      type: "update_tokens",
+      existingAccountId: "account-123",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "entra-object-id",
+              sub: "better-auth-subject",
+            }),
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "provider-account-id",
+            userPrincipalName: "user@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            sub: "better-auth-subject",
+          }),
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    const redirectLocation = response.headers.get("location");
+    expect(redirectLocation).toContain("success=tokens_updated");
+    expect(mockHandleAccountLinking).toHaveBeenCalled();
+    expect(mockSetOAuthCodeResult).toHaveBeenCalledWith("valid-auth-code", {
+      success: "tokens_updated",
+    });
+  });
+
+  it("re-keys an account still stored under the legacy OIDC subject", async () => {
+    prisma.account.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "account-123",
+        userId: "user-123",
+        refresh_token: "stored-refresh-token",
+        user: { name: "Test User", email: "user@example.com" },
+        emailAccount: { id: "email-account-123" },
+      } as Awaited<ReturnType<typeof prisma.account.findUnique>>);
+    mockHandleAccountLinking.mockResolvedValue({
+      type: "update_tokens",
+      existingAccountId: "account-123",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "entra-object-id",
+              sub: "better-auth-subject",
+            }),
+            scope: "Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite",
+            token_type: "Bearer",
+            expires_in: 3600,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "graph-user-id",
+            userPrincipalName: "user@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            sub: "better-auth-subject",
+          }),
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    expect(response.headers.get("location")).toContain(
+      "success=tokens_updated",
+    );
+    expect(findUniqueAccountKeys()).toEqual([
+      "entra-object-id",
+      "better-auth-subject",
+    ]);
+    expect(prisma.account.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "account-123" },
+        data: expect.objectContaining({
+          providerAccountId: "entra-object-id",
+        }),
+      }),
+    );
+  });
+
+  it("refuses a reconnect that authorized a different provider account", async () => {
+    mockValidateOAuthCallback.mockReturnValue({
+      success: true,
+      targetUserId: "user-123",
+      stateNonce: "state-nonce",
+      reconnectEmailAccountId: "email-account-123",
+      code: "valid-auth-code",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "other-object-id",
+              sub: "other-subject",
+            }),
+            scope: "Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite",
+            token_type: "Bearer",
+            expires_in: 3600,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "other-graph-id",
+            userPrincipalName: "other@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ sub: "other-subject" }),
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    expect(response.headers.get("location")).toContain(
+      "error=reconnect_account_mismatch",
+    );
+    expect(mockHandleAccountLinking).not.toHaveBeenCalled();
+    expect(prisma.account.create).not.toHaveBeenCalled();
+    expect(prisma.account.update).not.toHaveBeenCalled();
+  });
+
+  it("allows a reconnect that authorized the mailbox it targeted", async () => {
+    mockValidateOAuthCallback.mockReturnValue({
+      success: true,
+      targetUserId: "user-123",
+      stateNonce: "state-nonce",
+      reconnectEmailAccountId: "email-account-123",
+      code: "valid-auth-code",
+    });
+    prisma.account.findUnique.mockResolvedValue({
+      id: "account-123",
+      userId: "user-123",
+      refresh_token: "stored-refresh-token",
+      user: { name: "Test User", email: "user@example.com" },
+      emailAccount: { id: "email-account-123" },
+    } as Awaited<ReturnType<typeof prisma.account.findUnique>>);
+    mockHandleAccountLinking.mockResolvedValue({
+      type: "update_tokens",
+      existingAccountId: "account-123",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "entra-object-id",
+              sub: "better-auth-subject",
+            }),
+            scope: "Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite",
+            token_type: "Bearer",
+            expires_in: 3600,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "graph-user-id",
+            userPrincipalName: "user@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ sub: "better-auth-subject" }),
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    expect(response.headers.get("location")).toContain(
+      "success=tokens_updated",
+    );
+    expect(findUniqueAccountKeys()).toEqual(["entra-object-id"]);
+    expect(mockHandleAccountLinking).toHaveBeenCalledWith(
+      expect.objectContaining({
+        existingAccountId: "account-123",
+        hasEmailAccount: true,
+        provider: "microsoft",
+      }),
+    );
+  });
+
+  it("fails the callback when Microsoft returns no object id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({ sub: "better-auth-subject" }),
+            scope: "Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "graph-user-id",
+            userPrincipalName: "user@example.com",
+          }),
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    expect(response.headers.get("location")).not.toContain("success=");
+    expect(prisma.account.create).not.toHaveBeenCalled();
+    expect(prisma.account.update).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a legacy Graph ID account and migrates it to the object id", async () => {
+    prisma.account.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "account-123",
+        userId: "user-123",
+        refresh_token: "stored-refresh-token",
+        user: { name: "Test User", email: "user@example.com" },
+        emailAccount: { id: "email-account-123" },
+      } as Awaited<ReturnType<typeof prisma.account.findUnique>>);
+    mockHandleAccountLinking.mockResolvedValue({
+      type: "update_tokens",
+      existingAccountId: "account-123",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "entra-object-id",
+              sub: "better-auth-subject",
+            }),
+            scope: "Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite",
+            token_type: "Bearer",
+            expires_in: 3600,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "legacy-provider-account-id",
+            userPrincipalName: "user@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            sub: "better-auth-subject",
+          }),
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    expect(response.headers.get("location")).toContain(
+      "success=tokens_updated",
+    );
+    expect(findUniqueAccountKeys()).toEqual([
+      "entra-object-id",
+      "better-auth-subject",
+      "legacy-provider-account-id",
+    ]);
+    expect(prisma.account.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "account-123" },
+        data: expect.objectContaining({
+          providerAccountId: "entra-object-id",
+          access_token: "access-token",
+          refresh_token: "refresh-token",
+        }),
+      }),
+    );
+    expect(mockSetOAuthCodeResult).toHaveBeenCalledWith("valid-auth-code", {
+      success: "tokens_updated",
+    });
+  });
+
+  it("maps token exchange AADSTS errors through the shared Microsoft error handler", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => ({
+          error_description:
+            "AADSTS65001: The user or administrator has not consented to use the application.",
+        }),
+      }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    const redirectLocation = response.headers.get("location");
+    expect(redirectLocation).toContain("error=admin_consent_required");
+    expect(mockClearOAuthCode).toHaveBeenCalledWith("valid-auth-code");
+  });
+
+  it("retries Microsoft token exchange with IPv4 when the first request fails with ENETUNREACH", async () => {
+    mockHandleAccountLinking.mockResolvedValue({
+      type: "continue_create",
+    });
+    prisma.account.create.mockResolvedValue({
+      id: "account-123",
+    } as Awaited<ReturnType<typeof prisma.account.create>>);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockRejectedValueOnce(createFetchFailedError("ENETUNREACH"))
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "entra-object-id",
+              sub: "better-auth-subject",
+            }),
+            scope: "Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite",
+            token_type: "Bearer",
+            expires_in: 3600,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "provider-account-id",
+            userPrincipalName: "user@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            sub: "better-auth-subject",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    expect(response.headers.get("location")).toContain(
+      "success=account_created_and_linked",
+    );
+    expect(mockHandleAccountLinking).toHaveBeenCalled();
+    expect(prisma.account.create).toHaveBeenCalled();
+  });
+
+  it("sanitizes unmapped Microsoft token errors before redirecting", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => ({
+          error_description:
+            "AADSTS700016: Application with identifier was not found in the directory.",
+        }),
+      }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    const redirectLocation = response.headers.get("location");
+    expect(redirectLocation).toContain("error=link_failed");
+    expect(redirectLocation).toContain(
+      "error_description=Microsoft+error+AADSTS700016.",
+    );
+  });
+
+  it("rejects the callback when the actor differs from the target user", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockAuth.mockResolvedValue({
+      user: {
+        id: "actor-user",
+      },
+      session: { emailOtp: false },
+    });
+    mockValidateOAuthCallback.mockReturnValue({
+      success: true,
+      targetUserId: "target-user",
+      stateNonce: "state-nonce",
+      code: "valid-auth-code",
+    });
+    mockHandleAccountLinking.mockResolvedValue({
+      type: "continue_create",
+    });
+    prisma.account.create.mockResolvedValue({
+      id: "account-123",
+    } as Awaited<ReturnType<typeof prisma.account.create>>);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            id_token: createIdToken({
+              oid: "entra-object-id",
+              sub: "better-auth-subject",
+            }),
+            scope: "Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite",
+            token_type: "Bearer",
+            expires_in: 3600,
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: "provider-account-id",
+            userPrincipalName: "user@example.com",
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+        }),
+    );
+
+    const response = await GET(
+      createRequest("http://localhost:3000/api/outlook/linking/callback"),
+    );
+
+    expect(response.headers.get("location")).toContain("error=invalid_state");
+    expect(mockHandleAccountLinking).not.toHaveBeenCalled();
+    const warning = consoleWarn.mock.calls[0]?.[0];
+    expect(warning).toContain("OAuth linking callback actor mismatch");
+    expect(warning).toContain('"actorUserId": "actor-user"');
+    expect(warning).toContain('"targetUserId": "target-user"');
+    consoleWarn.mockRestore();
+  });
+});
+
+function createFetchFailedError(code: string) {
+  const connectError = Object.assign(new Error(`connect ${code}`), { code });
+  const error = new TypeError("fetch failed") as TypeError & {
+    cause: AggregateError;
+  };
+
+  error.cause = new AggregateError([connectError], `connect ${code}`);
+
+  return error;
+}

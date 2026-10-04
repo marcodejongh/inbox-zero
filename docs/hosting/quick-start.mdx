@@ -1,0 +1,115 @@
+---
+title: 'Quick Start'
+description: 'Self-host Inbox Zero in under 5 minutes'
+---
+
+The fastest way to self-host Inbox Zero is with two commands:
+
+```bash
+npx @inbox-zero/cli setup      # One-time setup wizard
+npx @inbox-zero/cli start      # Start containers
+```
+
+Then open [http://localhost:3000](http://localhost:3000) (or your domain).
+
+<Info>
+  **Prerequisites:** [Docker](https://docs.docker.com/engine/install/) and [Node.js](https://nodejs.org/) v24+ must be installed.
+</Info>
+
+The CLI will walk you through configuring [Google OAuth](/hosting/google-oauth) or [Microsoft OAuth](/hosting/microsoft-oauth) and your AI provider. For manual configuration, see the [Setup Guides](/hosting/setup-guides).
+
+<Info>
+  **CLI is optional:** The setup command is a convenience wrapper that helps prepare your `.env` and run Docker Compose with sensible defaults.
+
+  Prefer manual setup? Clone the repo, copy `apps/web/.env.example` to `apps/web/.env`, then link it for Compose once with `ln -s apps/web/.env .env`, and run the Docker/Node commands that match your environment.
+</Info>
+
+On Windows, run the Docker commands printed by the CLI in PowerShell. The manual shell examples in these guides use POSIX syntax (Git Bash or WSL on Windows).
+
+## Install Options
+
+You can also install the CLI globally instead of using `npx`:
+
+<CodeGroup>
+
+```bash npm
+npm install -g @inbox-zero/cli
+inbox-zero setup
+inbox-zero start
+```
+
+```bash Homebrew
+brew install inbox-zero/inbox-zero/inbox-zero
+inbox-zero setup
+inbox-zero start
+```
+
+</CodeGroup>
+
+## CLI Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `inbox-zero setup` | One-time setup wizard |
+| `inbox-zero start` | Start containers |
+| `inbox-zero stop` | Stop containers |
+| `inbox-zero update` | Pull latest image and restart |
+| `inbox-zero logs -f` | Follow container logs |
+| `inbox-zero status` | Show container status |
+| `inbox-zero config` | Interactive configuration editor |
+| `inbox-zero config set <key> <value>` | Set a config value |
+| `inbox-zero config get <key>` | Get a config value |
+| `inbox-zero setup-google` | Configure Google APIs, OAuth guidance, and Pub/Sub using `gcloud` |
+| `inbox-zero setup-aws` | Deploy to AWS using Copilot (ECS/Fargate) |
+| `inbox-zero setup-terraform` | Generate Terraform files for an AWS deployment |
+| `inbox-zero setup-vercel` | Link Vercel, provision optional Neon/Upstash resources, and seed environment variables |
+
+Run `inbox-zero <command> --help` for command-specific options. Deployment commands are also covered in the [Google OAuth](/hosting/google-oauth), [AWS](/hosting/aws), and [Vercel](/hosting/vercel) guides.
+
+## Updating
+
+To update to the latest version:
+
+```bash
+inbox-zero update
+```
+
+Or manually with Docker Compose:
+
+```bash
+docker compose pull web
+NEXT_PUBLIC_BASE_URL=https://yourdomain.com docker compose --profile all up -d
+```
+
+## Uninstalling / Starting Over
+
+Need to remove Inbox Zero or start fresh? See the [full cleanup guide](/hosting/troubleshooting#uninstalling--starting-over) in Troubleshooting.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Google OAuth" icon="google" href="/hosting/google-oauth">
+    Configure Google OAuth credentials and Gmail API access.
+  </Card>
+  <Card title="Microsoft OAuth" icon="microsoft" href="/hosting/microsoft-oauth">
+    Configure Azure app registration and Graph permissions.
+  </Card>
+  <Card title="All Guides" icon="wrench" href="/hosting/setup-guides">
+    PubSub, AI providers, and more manual configuration options.
+  </Card>
+  <Card title="Docker/VPS Deployment Guide" icon="server" href="/hosting/self-hosting">
+    Production deployment, Docker profiles, and scheduled tasks.
+  </Card>
+  <Card title="Image Proxy" icon="image" href="/hosting/image-proxy">
+    Deploy the optional remote-image proxy without editing Worker config files.
+  </Card>
+  <Card title="Vercel Deployment" icon="cloud" href="/hosting/vercel">
+    Deploy on Vercel with Neon Postgres and Upstash Redis.
+  </Card>
+  <Card title="AWS Deployment" icon="aws" href="/hosting/aws">
+    Deploy on AWS using EC2, Terraform, or AWS Copilot.
+  </Card>
+  <Card title="Troubleshooting" icon="life-ring" href="/hosting/troubleshooting">
+    Solutions for common issues like OAuth errors, rate limiting, and more.
+  </Card>
+</CardGroup>

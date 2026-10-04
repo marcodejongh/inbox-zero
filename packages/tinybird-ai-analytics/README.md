@@ -1,36 +1,20 @@
-## Getting Started
+# Tinybird AI Analytics
 
-First time:
+This package contains the TypeScript client for publishing and querying AI
+analytics. The Tinybird data sources and endpoints are part of the canonical
+Forward project documented in [`../tinybird`](../tinybird/README.md).
 
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-pip install tinybird-cli
-tb auth
-```
+Run all Tinybird CLI commands from `packages/tinybird/project` so the complete
+workspace is validated and deployed together.
 
-More notes: [Quickstart](https://www.tinybird.co/docs/quick-start-cli.html)
+## AI Cost Fields
 
-Thereafter:
-
-```sh
-source .venv/bin/activate
-```
-
-### Docker
-
-You can also use the Docker image. This worked a lot better for me.
-
-Run the following from this directory:
-
-```sh
-docker run -v .:/mnt/data -it tinybirdco/tinybird-cli-docker
-```
-
-Then within Docker:
-
-```sh
-cd mnt/data
-tb push datasources
-tb push pipes
-```
+- `cost`: platform-paid estimated cost from our local pricing table (user API key traffic is `0`)
+- `estimatedCost`: estimated cost regardless of who paid, from our local pricing table
+- `providerReportedCost`: exact provider-reported cost when available
+- `providerUpstreamInferenceCost`: exact upstream provider cost when available
+- `providerCostSource`: internal source key describing how provider-side cost was derived
+- `isUserApiKey`: `1` for user-provided API keys, `0` for platform keys
+- `stepCount`: total number of steps reported by the AI SDK result
+- `toolCallCount`: total number of tool calls across all reported steps
+- Legacy rows (before this schema change) have `NULL` for `estimatedCost` and `isUserApiKey`

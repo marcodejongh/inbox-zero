@@ -1,0 +1,585 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { processHistoryItem } from "@/utils/webhook/process-history-item";
+import {
+  createMockEmailProvider,
+  getMockParsedMessage,
+  ErrorProviders,
+} from "@/__tests__/mocks/email-provider.mock";
+import { getEmailAccount, createTestLogger } from "@/__tests__/helpers";
+import { handleOutboundMessage } from "@/utils/reply-tracker/handle-outbound";
+import { processAttachmentsForFiling } from "@/utils/drive/process-filing-attachments";
+import {
+  DraftReplyConfidence,
+  NewsletterStatus,
+} from "@/generated/prisma/enums";
+import prisma from "@/utils/prisma";
+import { categorizeSender } from "@/utils/categorize/senders/categorize";
+import { sendOtpPushNotification } from "@/utils/otp-push";
+import { runRules } from "@/utils/ai/choose-rule/run-rules";
+import { SafeError } from "@/utils/error";
+
+vi.mock("@/utils/prisma", () => ({
+  default: {
+    executedRule: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
+    newsletter: {
+      findFirst: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
+  },
+}));
+vi.mock("@/utils/cold-email/is-cold-email", () => ({
+  runColdEmailBlocker: vi
+    .fn()
+    .mockResolvedValue({ isColdEmail: false, reason: "hasPreviousEmail" }),
+}));
+vi.mock("@/utils/categorize/senders/categorize", () => ({
+  categorizeSender: vi.fn(),
+}));
+vi.mock("@/utils/ai/choose-rule/run-rules", () => ({
+  runRules: vi.fn(),
+}));
+vi.mock("@/utils/reply-tracker/handle-outbound", () => ({
+  handleOutboundMessage: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/utils/drive/filing-engine", () => ({
+  getFilableAttachments: vi.fn((message) => message.attachments ?? []),
+}));
+vi.mock("@/utils/drive/process-filing-attachments", () => ({
+  processAttachmentsForFiling: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/utils/otp-push", () => ({
+  sendOtpPushNotification: vi.fn().mockResolvedValue(undefined),
+}));
+
+const logger = createTestLogger();
+
+describe("Provider Edge Cases", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function getDefaultEmailAccount() {
+    return {
+      ...getEmailAccount(),
+      autoCategorizeSenders: false,
+      filingEnabled: false,
+      filingPrompt: null,
+      filingConfirmationSendEmail: true,
+      draftReplyConfidence: DraftReplyConfidence.ALL_EMAILS,
+    };
+  }
+
+  const baseOptions = {
+    hasAutomationRules: false,
+    hasAiAccess: false,
+    rules: [],
+    emailAccount: getDefaultEmailAccount(),
+    logger,
+  };
+
+  describe("Gmail-specific errors", () => {
+    it("handles Gmail 'not found' error gracefully (message was deleted)", async () => {
+      const provider = ErrorProviders.gmailNotFound();
+
+      // Should not throw - the error is caught and logged
+      await expect(
+        processHistoryItem(
+          { messageId: "deleted-msg", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).resolves.toBeUndefined();
+    });
+
+    it("throws on Gmail rate limit errors (to be caught by webhook handler)", async () => {
+      const provider = ErrorProviders.gmailRateLimit();
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).rejects.toThrow("Rate limit exceeded");
+    });
+
+    it("throws on Gmail quota exceeded errors", async () => {
+      const provider = ErrorProviders.gmailQuotaExceeded();
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).rejects.toThrow("Quota exceeded");
+    });
+  });
+
+  describe("Outlook-specific errors", () => {
+    it("handles Outlook ErrorItemNotFound gracefully", async () => {
+      const provider = ErrorProviders.outlookNotFound();
+
+      // Should not throw - similar to Gmail not found
+      await expect(
+        processHistoryItem(
+          { messageId: "deleted-msg", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).resolves.toBeUndefined();
+    });
+
+    it("throws on Outlook throttling errors", async () => {
+      const provider = ErrorProviders.outlookThrottling();
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).rejects.toThrow("Too many requests");
+    });
+  });
+
+  describe("OAuth/Auth errors", () => {
+    it("throws on invalid_grant errors (caught higher up)", async () => {
+      const provider = ErrorProviders.invalidGrant();
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).rejects.toThrow("invalid_grant");
+    });
+  });
+
+  describe("Known processing errors", () => {
+    it("handles safe errors without forwarding them to webhook error handlers", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(
+          getMockParsedMessage({
+            labelIds: ["INBOX"],
+          }),
+        ),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+      vi.mocked(runRules).mockRejectedValueOnce(
+        new SafeError("Expected processing limitation"),
+      );
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          {
+            ...baseOptions,
+            provider,
+            hasAutomationRules: true,
+            hasAiAccess: true,
+          },
+        ),
+      ).resolves.toBeUndefined();
+      expect(runRules).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("Network errors", () => {
+    it("throws on network errors (to trigger retry logic)", async () => {
+      const provider = ErrorProviders.networkError();
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).rejects.toThrow("fetch failed");
+    });
+  });
+
+  describe("Message processing", () => {
+    it("blocks unsubscribed senders when the provider changes address casing", async () => {
+      vi.mocked(prisma.newsletter.findFirst).mockResolvedValueOnce({
+        id: "newsletter-1",
+      } as any);
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(
+          getMockParsedMessage({
+            labelIds: ["INBOX"],
+            headers: {
+              from: "Sender <Sender@Example.COM>",
+              to: "user@test.com",
+              subject: "Test",
+              date: "2024-01-01",
+            },
+          }),
+        ),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+
+      await processHistoryItem(
+        { messageId: "msg-123", threadId: "thread-123" },
+        { ...baseOptions, provider },
+      );
+
+      expect(prisma.newsletter.findFirst).toHaveBeenCalledWith({
+        where: {
+          emailAccountId: baseOptions.emailAccount.id,
+          email: {
+            equals: "sender@example.com",
+            mode: "insensitive",
+          },
+          status: NewsletterStatus.UNSUBSCRIBED,
+        },
+      });
+      expect(provider.blockUnsubscribedEmail).toHaveBeenCalledWith("msg-123");
+      expect(sendOtpPushNotification).not.toHaveBeenCalled();
+    });
+
+    it("sends OTP notifications after the unsubscribe check passes", async () => {
+      const parsedMessage = getMockParsedMessage({
+        labelIds: ["INBOX"],
+        headers: {
+          from: "Security <security@example.com>",
+          to: "user@test.com",
+          subject: "Your verification code is 123456",
+          date: "2026-07-31T12:00:00.000Z",
+        },
+      });
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(parsedMessage),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+
+      await processHistoryItem(
+        { messageId: parsedMessage.id, threadId: parsedMessage.threadId },
+        { ...baseOptions, provider },
+      );
+
+      expect(sendOtpPushNotification).toHaveBeenCalledWith({
+        emailAccountId: baseOptions.emailAccount.id,
+        userId: baseOptions.emailAccount.userId,
+        message: parsedMessage,
+        logger,
+      });
+    });
+
+    it("does not store an address-only header as the sender display name", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(
+          getMockParsedMessage({
+            labelIds: ["INBOX"],
+            headers: {
+              from: "Sender@Example.COM",
+              to: "user@test.com",
+              subject: "Test",
+              date: "2024-01-01",
+            },
+          }),
+        ),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+      const emailAccount = {
+        ...getDefaultEmailAccount(),
+        autoCategorizeSenders: true,
+      };
+
+      await processHistoryItem(
+        { messageId: "msg-123", threadId: "thread-123" },
+        {
+          ...baseOptions,
+          emailAccount,
+          hasAiAccess: true,
+          provider,
+        },
+      );
+
+      expect(categorizeSender).toHaveBeenCalledWith(
+        "sender@example.com",
+        emailAccount,
+        provider,
+        undefined,
+        undefined,
+      );
+    });
+
+    it("categorizes when any sender casing variant has no category", async () => {
+      vi.mocked(prisma.newsletter.findFirst).mockResolvedValueOnce(null);
+      vi.mocked(prisma.newsletter.findMany).mockResolvedValue([
+        { categoryId: "category-1" },
+        { categoryId: null },
+      ] as any);
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(
+          getMockParsedMessage({
+            labelIds: ["INBOX"],
+            headers: {
+              from: "Sender <Sender@Example.COM>",
+              to: "user@test.com",
+              subject: "Test",
+              date: "2024-01-01",
+            },
+          }),
+        ),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+
+      await processHistoryItem(
+        { messageId: "msg-123", threadId: "thread-123" },
+        {
+          ...baseOptions,
+          emailAccount: {
+            ...getDefaultEmailAccount(),
+            autoCategorizeSenders: true,
+          },
+          hasAiAccess: true,
+          provider,
+        },
+      );
+
+      expect(prisma.newsletter.findMany).toHaveBeenCalledOnce();
+      expect(categorizeSender).toHaveBeenCalledOnce();
+    });
+
+    it("processes inbox messages correctly", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(
+          getMockParsedMessage({
+            labelIds: ["INBOX"],
+          }),
+        ),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+
+      await processHistoryItem(
+        { messageId: "msg-123", threadId: "thread-123" },
+        { ...baseOptions, provider },
+      );
+
+      expect(provider.getMessage).toHaveBeenCalledWith("msg-123");
+    });
+
+    it("handles sent messages via handleOutboundMessage", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(
+          getMockParsedMessage({
+            labelIds: ["SENT"],
+            headers: {
+              from: "user@test.com",
+              to: "recipient@example.com",
+              subject: "Test",
+              date: "2024-01-01",
+            },
+          }),
+        ),
+        isSentMessage: vi.fn().mockReturnValue(true),
+      });
+
+      await processHistoryItem(
+        { messageId: "msg-123", threadId: "thread-123" },
+        { ...baseOptions, provider },
+      );
+
+      expect(handleOutboundMessage).toHaveBeenCalled();
+    });
+
+    it("skips outbound handling for filebot notification messages", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(
+          getMockParsedMessage({
+            labelIds: ["SENT"],
+            headers: {
+              from: "Inbox Zero Assistant <user@test.com>",
+              to: "user@test.com",
+              "reply-to": "Inbox Zero Assistant <user+ai@test.com>",
+              subject: "Filed your document",
+              date: "2024-01-01",
+            },
+          }),
+        ),
+        isSentMessage: vi.fn().mockReturnValue(true),
+      });
+
+      await processHistoryItem(
+        { messageId: "msg-123", threadId: "thread-123" },
+        { ...baseOptions, provider },
+      );
+
+      expect(handleOutboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Error message detection", () => {
+    it("handles Outlook ResourceNotFound error", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi
+          .fn()
+          .mockRejectedValue(new Error("ResourceNotFound: Item not found")),
+      });
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).resolves.toBeUndefined();
+    });
+
+    it("handles Outlook 'not found in the store' error", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi
+          .fn()
+          .mockRejectedValue(new Error("The item was not found in the store")),
+      });
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).resolves.toBeUndefined();
+    });
+
+    it("handles Outlook itemNotFound code", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockRejectedValue(
+          Object.assign(new Error("Not found"), {
+            code: "itemNotFound",
+          }),
+        ),
+      });
+
+      await expect(
+        processHistoryItem(
+          { messageId: "msg-123", threadId: "thread-123" },
+          { ...baseOptions, provider },
+        ),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe("Pre-fetched message support", () => {
+    it("uses pre-fetched message when provided instead of fetching", async () => {
+      const preFetchedMessage = getMockParsedMessage({
+        id: "pre-fetched-msg",
+        labelIds: ["INBOX"],
+      });
+
+      const provider = createMockEmailProvider({
+        getMessage: vi
+          .fn()
+          .mockResolvedValue(
+            getMockParsedMessage({ id: "should-not-be-used" }),
+          ),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+
+      await processHistoryItem(
+        {
+          messageId: "pre-fetched-msg",
+          threadId: "thread-123",
+          message: preFetchedMessage,
+        },
+        { ...baseOptions, provider },
+      );
+
+      // getMessage should NOT be called since we passed a pre-fetched message
+      expect(provider.getMessage).not.toHaveBeenCalled();
+    });
+
+    it("fetches message when not pre-fetched", async () => {
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(
+          getMockParsedMessage({
+            labelIds: ["INBOX"],
+          }),
+        ),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+
+      await processHistoryItem(
+        { messageId: "msg-123", threadId: "thread-123" },
+        { ...baseOptions, provider },
+      );
+
+      // getMessage should be called since no message was pre-fetched
+      expect(provider.getMessage).toHaveBeenCalledWith("msg-123");
+    });
+
+    it("processes pre-fetched sent message correctly", async () => {
+      const preFetchedMessage = getMockParsedMessage({
+        id: "sent-msg",
+        labelIds: ["SENT"],
+        headers: {
+          from: "user@test.com",
+          to: "recipient@example.com",
+          subject: "Test",
+          date: "2024-01-01",
+        },
+      });
+
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn(),
+        isSentMessage: vi.fn().mockReturnValue(true),
+      });
+
+      await processHistoryItem(
+        {
+          messageId: "sent-msg",
+          threadId: "thread-123",
+          message: preFetchedMessage,
+        },
+        { ...baseOptions, provider },
+      );
+
+      expect(provider.getMessage).not.toHaveBeenCalled();
+      expect(handleOutboundMessage).toHaveBeenCalled();
+    });
+
+    it("still processes attachments when rules were already run for the message", async () => {
+      vi.mocked(prisma.executedRule.findFirst).mockResolvedValue({
+        id: "executed-rule-1",
+      } as any);
+
+      const attachment = {
+        attachmentId: "attachment-1",
+        filename: "invoice.pdf",
+        mimeType: "application/pdf",
+        size: 123,
+      };
+      const message = getMockParsedMessage({
+        id: "msg-123",
+        threadId: "thread-123",
+        labelIds: ["INBOX"],
+        attachments: [attachment],
+      });
+      const provider = createMockEmailProvider({
+        getMessage: vi.fn().mockResolvedValue(message),
+        isSentMessage: vi.fn().mockReturnValue(false),
+      });
+      const emailAccount = {
+        ...getDefaultEmailAccount(),
+        filingEnabled: true,
+        filingPrompt: "File invoices",
+      };
+
+      await processHistoryItem(
+        { messageId: "msg-123", threadId: "thread-123" },
+        {
+          ...baseOptions,
+          provider,
+          hasAiAccess: true,
+          hasAutomationRules: true,
+          emailAccount,
+        },
+      );
+
+      expect(processAttachmentsForFiling).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachments: [attachment],
+          emailProvider: provider,
+          message,
+        }),
+      );
+    });
+  });
+});

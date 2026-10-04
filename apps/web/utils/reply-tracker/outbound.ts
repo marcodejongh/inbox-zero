@@ -3,12 +3,24 @@ import type { ParsedMessage } from "@/utils/types";
 import { aiDetermineThreadStatus } from "@/utils/ai/reply/determine-thread-status";
 import prisma from "@/utils/prisma";
 import type { Logger } from "@/utils/logger";
-import { getEmailForLLM } from "@/utils/get-email-from-message";
 import { internalDateToDate, sortByInternalDate } from "@/utils/date";
 import type { EmailProvider } from "@/utils/email/types";
 import { applyThreadStatusLabel } from "./label-helpers";
 import { updateThreadTrackers } from "@/utils/reply-tracker/handle-conversation-status";
-import { CONVERSATION_STATUS_TYPES } from "@/utils/reply-tracker/conversation-status-config";
+import {
+  CONVERSATION_STATUS_TYPES,
+  type ConversationStatus,
+} from "@/utils/reply-tracker/conversation-status-config";
+import {
+  acquireOutboundThreadStatusLock,
+  clearOutboundThreadStatusLock,
+  markOutboundThreadStatusProcessed,
+} from "@/utils/redis/outbound-thread-status";
+import {
+  buildThreadStatusMessagesForLLM,
+  excludeAssistantMessages,
+} from "@/utils/reply-tracker/thread-status-context";
+import { isFilebotConversationMessage } from "@/utils/filebot/is-filebot-email";
 
 export async function handleOutboundReply({
   emailAccount,
@@ -27,109 +39,168 @@ export async function handleOutboundReply({
     threadId: message.threadId,
   });
 
-  const isEnabled = await isOutboundTrackingEnabled({
+  if (
+    isFilebotConversationMessage({ userEmail: emailAccount.email, message })
+  ) {
+    logger.info("Skipping. Filing assistant message.");
+    return;
+  }
+
+  const enabledStatuses = await getEnabledStatuses({
     emailAccountId: emailAccount.id,
   });
-  if (!isEnabled) {
+  if (!enabledStatuses.length) {
     logger.info("Outbound reply tracking disabled, skipping.");
     return;
   }
 
-  logger.info("Determining thread status for outbound message");
+  const idempotencyKey = {
+    emailAccountId: emailAccount.id,
+    threadId: message.threadId,
+    messageId: message.id,
+  };
 
-  const threadMessages = await provider.getThreadMessages(message.threadId);
-  if (!threadMessages?.length) {
-    logger.error("No thread messages found, cannot proceed.");
-    return;
-  }
-
-  const { isLatest, sortedMessages } = isMessageLatestInThread(
-    message,
-    threadMessages,
-    logger,
-  );
-  if (!isLatest) {
+  const lockToken = await acquireOutboundThreadStatusLock(idempotencyKey);
+  if (!lockToken) {
     logger.info(
-      "Skipping outbound check: message is not the latest in the thread",
+      "Outbound thread status already processed or currently processing, skipping.",
     );
-    return; // Stop processing if not the latest
-  }
-
-  // Prepare thread messages for AI analysis (chronological order, oldest to newest)
-  const threadMessagesForLLM = sortedMessages.map((m, index) =>
-    getEmailForLLM(m, {
-      maxLength: index === sortedMessages.length - 1 ? 2000 : 500, // Give more context for the latest message
-      extractReply: true,
-      removeForwarded: false,
-    }),
-  );
-
-  if (!threadMessagesForLLM.length) {
-    logger.error("No messages for AI analysis");
     return;
   }
 
-  const aiResult = await aiDetermineThreadStatus({
-    emailAccount,
-    threadMessages: threadMessagesForLLM,
-    userSentLastEmail: true,
-  });
+  let processedSuccessfully = false;
 
-  logger.info("AI determined thread status", { status: aiResult.status });
+  try {
+    logger.info("Determining thread status for outbound message");
 
-  await Promise.all([
-    applyThreadStatusLabel({
-      emailAccountId: emailAccount.id,
-      threadId: message.threadId,
-      messageId: message.id,
-      systemType: aiResult.status,
-      provider,
-      logger,
-    }),
-    updateThreadTrackers({
-      emailAccountId: emailAccount.id,
-      threadId: message.threadId,
-      messageId: message.id,
-      sentAt: internalDateToDate(message.internalDate),
-      status: aiResult.status,
-    }),
-  ]);
+    const threadMessages = await provider.getThreadMessages(message.threadId);
+    if (!threadMessages?.length) {
+      logger.error("No thread messages found, cannot proceed.");
+      return;
+    }
+
+    const { isLatest, sortedMessages } = isMessageLatestInThread(
+      message,
+      excludeAssistantMessages({
+        messages: threadMessages,
+        userEmail: emailAccount.email,
+      }),
+    );
+    if (!isLatest) {
+      logger.info(
+        "Outbound message is not the latest in the thread, proceeding anyway.",
+        {
+          processingMessageId: message.id,
+          actualLatestMessageId: sortedMessages.at(-1)?.id,
+        },
+      );
+    }
+
+    const threadMessagesForLLM =
+      buildThreadStatusMessagesForLLM(sortedMessages);
+
+    if (!threadMessagesForLLM.length) {
+      logger.error("No messages for AI analysis");
+      return;
+    }
+
+    const aiResult = await aiDetermineThreadStatus({
+      emailAccount,
+      threadMessages: threadMessagesForLLM,
+      userSentLastEmail: true,
+    });
+
+    logger.info("AI determined thread status", { status: aiResult.status });
+
+    if (!enabledStatuses.includes(aiResult.status)) {
+      logger.info(
+        "Rule for determined status is disabled, skipping label application",
+        { status: aiResult.status },
+      );
+      return;
+    }
+
+    await Promise.all([
+      applyThreadStatusLabel({
+        emailAccountId: emailAccount.id,
+        threadId: message.threadId,
+        messageId: message.id,
+        systemType: aiResult.status,
+        provider,
+        logger,
+      }),
+      updateThreadTrackers({
+        emailAccountId: emailAccount.id,
+        threadId: message.threadId,
+        messageId: message.id,
+        sentAt: internalDateToDate(message.internalDate),
+        status: aiResult.status,
+      }),
+    ]);
+
+    processedSuccessfully = true;
+  } finally {
+    if (processedSuccessfully) {
+      const markedAsProcessed = await markOutboundThreadStatusProcessed({
+        ...idempotencyKey,
+        lockToken,
+      }).catch((error) => {
+        logger.error("Failed to mark outbound thread status as processed", {
+          error,
+        });
+        return false;
+      });
+      if (!markedAsProcessed) {
+        logger.warn(
+          "Skipped marking outbound thread status as processed because lock was no longer owned.",
+        );
+      }
+    } else {
+      const lockCleared = await clearOutboundThreadStatusLock({
+        ...idempotencyKey,
+        lockToken,
+      }).catch((error) => {
+        logger.error("Failed to clear outbound thread status lock", { error });
+        return false;
+      });
+      if (!lockCleared) {
+        logger.warn(
+          "Skipped clearing outbound thread status lock because lock was no longer owned.",
+        );
+      }
+    }
+  }
 }
 
-async function isOutboundTrackingEnabled({
+async function getEnabledStatuses({
   emailAccountId,
 }: {
   emailAccountId: string;
-}): Promise<boolean> {
-  const enabledRule = await prisma.rule.findFirst({
+}): Promise<ConversationStatus[]> {
+  const enabledRules = await prisma.rule.findMany({
     where: {
       emailAccountId,
       systemType: { in: CONVERSATION_STATUS_TYPES },
       enabled: true,
     },
+    select: { systemType: true },
   });
-  return !!enabledRule;
+  return enabledRules
+    .map((r) => r.systemType)
+    .filter((s): s is ConversationStatus => s != null);
 }
 
 function isMessageLatestInThread(
   message: ParsedMessage,
   threadMessages: ParsedMessage[],
-  logger: Logger,
 ): { isLatest: boolean; sortedMessages: ParsedMessage[] } {
   if (!threadMessages.length) return { isLatest: false, sortedMessages: [] }; // Should not happen if called correctly
 
   const sortedMessages = [...threadMessages].sort(sortByInternalDate());
-  const actualLatestMessage = sortedMessages[sortedMessages.length - 1];
+  const actualLatestMessage = sortedMessages.at(-1);
 
-  if (actualLatestMessage?.id !== message.id) {
-    logger.warn(
-      "Skipping outbound reply check: message is not the latest in the thread",
-      {
-        processingMessageId: message.id,
-        actualLatestMessageId: actualLatestMessage?.id,
-      },
-    );
-    return { isLatest: false, sortedMessages };
-  }
-  return { isLatest: true, sortedMessages };
+  return {
+    isLatest: actualLatestMessage?.id === message.id,
+    sortedMessages,
+  };
 }

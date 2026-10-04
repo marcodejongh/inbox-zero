@@ -6,6 +6,8 @@ import { PageHeading } from "@/components/Typography";
 import { LoadingContent } from "@/components/LoadingContent";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useOrganization } from "@/hooks/useOrganization";
+import { useOrganizationMembership } from "@/hooks/useOrganizationMembership";
+import { hasOrganizationAdminRole } from "@/utils/organizations/roles";
 
 interface OrganizationTabsProps {
   organizationId: string;
@@ -18,6 +20,8 @@ export function OrganizationTabs({ organizationId }: OrganizationTabsProps) {
     isLoading,
     error,
   } = useOrganization(organizationId);
+  const { data: membership } = useOrganizationMembership();
+  const isAdmin = hasOrganizationAdminRole(membership?.role ?? "");
 
   const tabs = [
     {
@@ -25,15 +29,25 @@ export function OrganizationTabs({ organizationId }: OrganizationTabsProps) {
       label: "Members",
       href: `/organization/${organizationId}`,
     },
-    {
-      id: "stats",
-      label: "Analytics",
-      href: `/organization/${organizationId}/stats`,
-    },
+    ...(isAdmin
+      ? [
+          {
+            id: "rules",
+            label: "Rules",
+            href: `/organization/${organizationId}/rules`,
+          },
+          {
+            id: "stats",
+            label: "Analytics",
+            href: `/organization/${organizationId}/stats`,
+          },
+        ]
+      : []),
   ];
 
-  // Determine selected tab based on pathname
-  const selected = pathname.includes("/stats") ? "stats" : "members";
+  const selected =
+    tabs.find((tab) => tab.id !== "members" && pathname.endsWith(`/${tab.id}`))
+      ?.id ?? "members";
 
   return (
     <div>

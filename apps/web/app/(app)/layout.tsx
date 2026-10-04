@@ -1,4 +1,5 @@
 import "../../styles/globals.css";
+import type { Metadata } from "next";
 import type React from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
@@ -11,23 +12,35 @@ import { CommandK } from "@/components/CommandK";
 import { AppProviders } from "@/providers/AppProviders";
 import { AssessUser } from "@/app/(app)/[emailAccountId]/assess";
 import { SentryIdentify } from "@/app/(app)/sentry-identify";
+import { AiAutomationStatusBanner } from "@/app/(app)/AiAutomationStatusBanner";
 import { ErrorMessages } from "@/app/(app)/ErrorMessages";
-import { QueueInitializer } from "@/store/QueueInitializer";
+import { DesktopMailIndicators } from "@/app/(app)/DesktopMailIndicators";
+import { ProviderRateLimitBanner } from "@/app/(app)/ProviderRateLimitBanner";
+import { MailEngineRuntime } from "@/utils/mail-engine/MailEngineHost";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { EmailViewer } from "@/components/EmailViewer";
+import { SettingsDialog } from "@/app/(app)/settings/SettingsDialog";
+import { AnnouncementDialog } from "@/components/feature-announcements/AnnouncementDialog";
 import { captureException } from "@/utils/error";
 import prisma from "@/utils/prisma";
 import { createScopedLogger } from "@/utils/logger";
+import { booleanString } from "@/utils/zod";
 
 const logger = createScopedLogger("AppLayout");
 
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
-  weight: ["400", "500", "600", "700"], // font-normal, font-medium, font-semibold, font-bold
   preload: true,
   display: "swap",
 });
+
+export const metadata: Metadata = {
+  robots: {
+    index: false,
+    follow: false,
+  },
+};
 
 export const viewport = {
   themeColor: "#FFF",
@@ -52,6 +65,8 @@ export default async function AppLayout({
 
   const cookieStore = await cookies();
   const isClosed = cookieStore.get("left-sidebar:state")?.value === "false";
+  const bypassPremiumChecks =
+    booleanString.parse(process.env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) ?? false;
 
   after(async () => {
     const email = session.user.email;
@@ -62,7 +77,7 @@ export default async function AppLayout({
       });
     } catch (error) {
       logger.error("Failed to update last login", { email, error });
-      captureException(error, {}, email);
+      captureException(error, { userEmail: email });
     }
   });
 
@@ -70,19 +85,31 @@ export default async function AppLayout({
     <div className={inter.variable}>
       <div className="font-inter">
         <AppProviders>
-          <SideNavWithTopNav defaultOpen={!isClosed}>
-            <ErrorMessages />
-            {children}
-          </SideNavWithTopNav>
-          <EmailViewer />
-          <ErrorBoundary extra={{ component: "AppLayout" }}>
-            <PostHogIdentify />
+          <MailEngineRuntime>
+            <SideNavWithTopNav
+              defaultOpen={!isClosed}
+              feedbackEnabled={
+                !bypassPremiumChecks ||
+                Boolean(process.env.FEEDBACK_WEBHOOK_URL)
+              }
+            >
+              <DesktopMailIndicators />
+              <AiAutomationStatusBanner />
+              <ErrorMessages />
+              <ProviderRateLimitBanner />
+              {children}
+            </SideNavWithTopNav>
+            <EmailViewer />
+            <SettingsDialog />
+            <AnnouncementDialog />
+            <ErrorBoundary extra={{ component: "AppLayout" }}>
+              <PostHogIdentify />
 
-            <CommandK />
-            <QueueInitializer />
-            <AssessUser />
-            <SentryIdentify email={session.user.email} />
-          </ErrorBoundary>
+              <CommandK />
+              <AssessUser />
+              <SentryIdentify email={session.user.email} />
+            </ErrorBoundary>
+          </MailEngineRuntime>
         </AppProviders>
       </div>
     </div>

@@ -1,0 +1,346 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEvalReporter } from "@/__tests__/eval/reporter";
+import { saveAiUsage } from "@/utils/usage";
+
+vi.mock("@inboxzero/tinybird-ai-analytics", () => ({
+  publishAiCall: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/utils/redis/usage", () => ({
+  saveUsage: vi.fn().mockResolvedValue(undefined),
+}));
+
+describe("eval reporter", () => {
+  const originalCwd = process.cwd();
+  const originalEvalReportPath = process.env.EVAL_REPORT_PATH;
+  const originalEvalHistoryDir = process.env.EVAL_HISTORY_DIR;
+  const originalEvalResultCache = process.env.EVAL_RESULT_CACHE;
+  const originalEvalResultCacheDir = process.env.EVAL_RESULT_CACHE_DIR;
+  const originalRunAiTests = process.env.RUN_AI_TESTS;
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+
+    if (originalEvalReportPath === undefined) {
+      delete process.env.EVAL_REPORT_PATH;
+    } else {
+      process.env.EVAL_REPORT_PATH = originalEvalReportPath;
+    }
+
+    if (originalEvalHistoryDir === undefined) {
+      delete process.env.EVAL_HISTORY_DIR;
+    } else {
+      process.env.EVAL_HISTORY_DIR = originalEvalHistoryDir;
+    }
+
+    if (originalEvalResultCache === undefined) {
+      delete process.env.EVAL_RESULT_CACHE;
+    } else {
+      process.env.EVAL_RESULT_CACHE = originalEvalResultCache;
+    }
+
+    if (originalEvalResultCacheDir === undefined) {
+      delete process.env.EVAL_RESULT_CACHE_DIR;
+    } else {
+      process.env.EVAL_RESULT_CACHE_DIR = originalEvalResultCacheDir;
+    }
+
+    if (originalRunAiTests === undefined) {
+      delete process.env.RUN_AI_TESTS;
+    } else {
+      process.env.RUN_AI_TESTS = originalRunAiTests;
+    }
+
+    vi.restoreAllMocks();
+  });
+
+  it("writes relative report paths from the workspace root", () => {
+    const { workspaceRoot, packageDir } = createTempWorkspace();
+    process.chdir(packageDir);
+    process.env.EVAL_REPORT_PATH = ".context/evals/report.md";
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const reporter = createEvalReporter();
+    reporter.record({
+      testName: "example",
+      model: "Gemini 3 Flash",
+      pass: true,
+    });
+
+    reporter.printReport();
+
+    expect(
+      fs.existsSync(path.join(workspaceRoot, ".context", "evals", "report.md")),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(workspaceRoot, ".context", "evals", "report.json"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(packageDir, ".context", "evals", "report.md")),
+    ).toBe(false);
+  });
+
+  it("includes usage cost totals in the markdown report", async () => {
+    const { workspaceRoot, packageDir } = createTempWorkspace();
+    process.chdir(packageDir);
+    process.env.EVAL_REPORT_PATH = ".context/evals/report.md";
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const reporter = createEvalReporter();
+    await saveAiUsage({
+      userId: "user-1",
+      email: "user@example.com",
+      emailAccountId: "email-account-1",
+      provider: "openrouter",
+      model: "~deepseek/deepseek-v4-flash-latest",
+      usage: {
+        inputTokens: 1000,
+        outputTokens: 500,
+        totalTokens: 1500,
+      },
+      label: "eval-test",
+      providerReportedCost: 0.0002,
+    });
+    reporter.record({
+      testName: "example",
+      model: "DeepSeek V4 Flash Latest",
+      pass: true,
+    });
+
+    reporter.printReport();
+
+    const markdown = fs.readFileSync(
+      path.join(workspaceRoot, ".context", "evals", "report.md"),
+      "utf8",
+    );
+    expect(markdown).toContain("## Eval Cost");
+    expect(markdown).toContain("Provider-reported total: $0.000200");
+    expect(markdown).toContain("openrouter:~deepseek/deepseek-v4-flash-latest");
+  });
+
+  it("writes eval history when AI tests are enabled", () => {
+    const { workspaceRoot, packageDir } = createTempWorkspace();
+    process.chdir(packageDir);
+    process.env.RUN_AI_TESTS = "true";
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const reporter = createEvalReporter({ evalName: "example eval" });
+    reporter.record({
+      testName: "example case",
+      model: "Gemini 3 Flash",
+      pass: true,
+    });
+
+    reporter.printReport();
+
+    const historyDir = path.join(
+      workspaceRoot,
+      ".context",
+      "eval-results",
+      "example-eval",
+    );
+    const historyFiles = fs.readdirSync(historyDir);
+    expect(historyFiles).toHaveLength(1);
+
+    const history = JSON.parse(
+      fs.readFileSync(path.join(historyDir, historyFiles[0]!), "utf8"),
+    );
+    expect(history).toMatchObject({
+      schemaVersion: 1,
+      evalName: "example eval",
+      records: [
+        {
+          testName: "example case",
+          model: "Gemini 3 Flash",
+          pass: true,
+        },
+      ],
+    });
+  });
+
+  it("rejects duplicate test records for the same model", () => {
+    const reporter = createEvalReporter({ evalName: "example eval" });
+    reporter.record({
+      testName: "example case",
+      model: "Example Model",
+      pass: true,
+    });
+
+    expect(() =>
+      reporter.record({
+        testName: "example case",
+        model: "Example Model",
+        pass: false,
+      }),
+    ).toThrowError(
+      'Duplicate eval record for "example case" using "Example Model"',
+    );
+  });
+
+  it("reuses cached eval records in readwrite mode", async () => {
+    const { workspaceRoot, packageDir } = createTempWorkspace();
+    process.chdir(packageDir);
+    process.env.EVAL_RESULT_CACHE = "readwrite";
+    process.env.EVAL_RESULT_CACHE_DIR = ".context/cache";
+    process.env.EVAL_REPORT_PATH = ".context/evals/report.md";
+
+    const firstRun = vi.fn().mockResolvedValue({
+      testName: "example case",
+      model: "Gemini 3 Flash",
+      pass: true,
+      actual: "live result",
+    });
+    const secondRun = vi.fn();
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const firstReporter = createEvalReporter({ evalName: "example eval" });
+    const firstRecord = await firstReporter.recordCached(
+      {
+        testName: "example case",
+        model: "Gemini 3 Flash",
+        cacheKeyParts: [{ input: "hello" }],
+      },
+      firstRun,
+    );
+
+    const secondReporter = createEvalReporter({ evalName: "example eval" });
+    const secondRecord = await secondReporter.recordCached(
+      {
+        testName: "example case",
+        model: "Gemini 3 Flash",
+        cacheKeyParts: [{ input: "hello" }],
+      },
+      secondRun,
+    );
+    secondReporter.printReport();
+
+    expect(firstRun).toHaveBeenCalledTimes(1);
+    expect(secondRun).not.toHaveBeenCalled();
+    expect(firstRecord).toMatchObject({
+      actual: "live result",
+      cached: false,
+    });
+    expect(secondRecord).toMatchObject({
+      actual: "live result",
+      cached: true,
+    });
+    expect(consoleLog.mock.calls.at(-1)?.[0]).toContain("Cached records: 1/1");
+
+    const markdown = fs.readFileSync(
+      path.join(workspaceRoot, ".context", "evals", "report.md"),
+      "utf8",
+    );
+    expect(markdown).toContain("## Eval Cache");
+    expect(markdown).toContain("Cached records: 1/1");
+  });
+
+  it("reuses an identical cached scenario on the same reporter", async () => {
+    const { packageDir } = createTempWorkspace();
+    process.chdir(packageDir);
+    process.env.EVAL_RESULT_CACHE = "readwrite";
+    process.env.EVAL_RESULT_CACHE_DIR = ".context/cache";
+
+    const firstRun = vi.fn().mockResolvedValue({
+      pass: true,
+      actual: "live result",
+    });
+    const secondRun = vi.fn();
+    const options = {
+      testName: "example case",
+      model: "Example Model",
+      cacheKeyParts: [{ input: "hello" }],
+    };
+    const reporter = createEvalReporter({ evalName: "example eval" });
+
+    const firstRecord = await reporter.recordCached(options, firstRun);
+    const secondRecord = await reporter.recordCached(options, secondRun);
+
+    expect(firstRun).toHaveBeenCalledTimes(1);
+    expect(secondRun).not.toHaveBeenCalled();
+    expect(secondRecord).toBe(firstRecord);
+  });
+
+  it("invalidates cached records for staged and untracked code changes", async () => {
+    const { workspaceRoot, packageDir } = createTempWorkspace();
+    fs.writeFileSync(
+      path.join(workspaceRoot, "source.ts"),
+      "export const value = 1;\n",
+    );
+    git(workspaceRoot, ["init"]);
+    git(workspaceRoot, ["add", "pnpm-workspace.yaml", "source.ts"]);
+    git(workspaceRoot, [
+      "-c",
+      "user.name=Eval Test",
+      "-c",
+      "user.email=eval@example.com",
+      "commit",
+      "-m",
+      "initial",
+    ]);
+
+    process.chdir(packageDir);
+    process.env.EVAL_RESULT_CACHE = "readwrite";
+    process.env.EVAL_RESULT_CACHE_DIR = ".context/cache";
+    const options = {
+      testName: "example case",
+      model: "Example Model",
+      cacheKeyParts: [{ input: "hello" }],
+    };
+
+    const firstRun = vi.fn().mockResolvedValue({ pass: true });
+    await createEvalReporter({ evalName: "example eval" }).recordCached(
+      options,
+      firstRun,
+    );
+
+    fs.writeFileSync(
+      path.join(workspaceRoot, "source.ts"),
+      "export const value = 2;\n",
+    );
+    git(workspaceRoot, ["add", "source.ts"]);
+
+    const secondRun = vi.fn().mockResolvedValue({ pass: true });
+    await createEvalReporter({ evalName: "example eval" }).recordCached(
+      options,
+      secondRun,
+    );
+
+    fs.writeFileSync(path.join(workspaceRoot, "new source.ts"), "export {};\n");
+    const thirdRun = vi.fn().mockResolvedValue({ pass: true });
+    await createEvalReporter({ evalName: "example eval" }).recordCached(
+      options,
+      thirdRun,
+    );
+
+    expect(firstRun).toHaveBeenCalledTimes(1);
+    expect(secondRun).toHaveBeenCalledTimes(1);
+    expect(thirdRun).toHaveBeenCalledTimes(1);
+  });
+});
+
+function git(cwd: string, args: string[]): void {
+  execFileSync("git", args, { cwd, stdio: "ignore" });
+}
+
+function createTempWorkspace(): {
+  packageDir: string;
+  workspaceRoot: string;
+} {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "eval-reporter-"));
+  const workspaceRoot = path.join(tempRoot, "workspace");
+  const packageDir = path.join(workspaceRoot, "apps", "web");
+
+  fs.mkdirSync(packageDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(workspaceRoot, "pnpm-workspace.yaml"),
+    "packages:",
+  );
+
+  return { packageDir, workspaceRoot };
+}

@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
-import { sendDigestEmail } from "@inboxzero/resend";
 import { withEmailAccount, withError } from "@/utils/middleware";
-import { env } from "@/env";
 import { captureException, SafeError } from "@/utils/error";
 import prisma from "@/utils/prisma";
 import type { Logger } from "@/utils/logger";
 import { createUnsubscribeToken } from "@/utils/unsubscribe";
-import { calculateNextScheduleDate } from "@/utils/schedule";
+import {
+  getDigestScheduleProgression,
+  isDigestScheduleDue,
+} from "@/utils/digest/schedule";
+import { sendDigest } from "@/utils/digest/send-digest";
 import type { ParsedMessage } from "@/utils/types";
 import {
   sendDigestEmailBody,
@@ -16,10 +18,15 @@ import {
 import { DigestStatus, SystemType } from "@/generated/prisma/enums";
 import { extractNameFromEmail } from "../../../../utils/email";
 import { getRuleName } from "@/utils/rule/consts";
-import { verifySignatureAppRouter } from "@upstash/qstash/nextjs";
-import { camelCase } from "lodash";
+import camelCase from "lodash/camelCase";
 import { createEmailProvider } from "@/utils/email/provider";
 import { sleep } from "@/utils/sleep";
+import { withQstashOrInternal } from "@/utils/qstash";
+import {
+  claimPendingDigests,
+  getDigestClaimWhere,
+  renewDigestClaim,
+} from "@/utils/digest/claim-pending-digests";
 
 export const maxDuration = 60;
 
@@ -43,8 +50,9 @@ export const GET = withEmailAccount("resend/digest", async (request) => {
   return NextResponse.json(result);
 });
 
-export const POST = verifySignatureAppRouter(
-  withError("resend/digest", async (request) => {
+export const POST = withError(
+  "resend/digest",
+  withQstashOrInternal(async (request) => {
     const json = await request.json();
     const { success, data, error } = sendDigestEmailBody.safeParse(json);
 
@@ -66,11 +74,13 @@ export const POST = verifySignatureAppRouter(
       return NextResponse.json(result);
     } catch (error) {
       logger.error("Error sending digest email", { error });
-      captureException(error);
-      return NextResponse.json(
-        { success: false, error: "Error sending digest email" },
-        { status: 500 },
-      );
+      captureException(error, { emailAccountId });
+      // Return 200 to prevent queue retries — failed digests are already marked
+      // FAILED in the DB, and retrying won't help (expired tokens, timeouts, etc.)
+      return NextResponse.json({
+        success: false,
+        error: "Error sending digest email",
+      });
     }
   }),
 );
@@ -104,17 +114,23 @@ async function sendEmail({
   logger: Logger;
 }): Promise<SendEmailResult> {
   logger.info("Sending digest email");
+  const now = new Date();
 
   const emailAccount = await prisma.emailAccount.findUnique({
     where: { id: emailAccountId },
     select: {
       email: true,
-      account: { select: { provider: true } },
+      account: { select: { provider: true, refresh_token: true } },
     },
   });
 
   if (!emailAccount) {
     throw new Error("Email account not found");
+  }
+
+  if (!emailAccount.account.refresh_token) {
+    logger.warn("Skipping digest: account has no refresh token");
+    return { success: false, message: "Account has no refresh token" };
   }
 
   const emailProvider = await createEmailProvider({
@@ -124,25 +140,48 @@ async function sendEmail({
   });
 
   const digestScheduleData = await getDigestSchedule({ emailAccountId });
+  const digestScheduleProgression = digestScheduleData
+    ? getDigestScheduleProgression(digestScheduleData, now)
+    : null;
 
-  const pendingDigests = await prisma.digest.findMany({
-    where: {
-      emailAccountId,
-      status: DigestStatus.PENDING,
-    },
-    select: {
-      id: true,
-      items: {
-        select: {
-          messageId: true,
-          content: true,
-          action: {
-            select: {
-              executedRule: {
-                select: {
-                  rule: {
-                    select: {
-                      name: true,
+  if (!force) {
+    if (!digestScheduleData) {
+      logger.info("Skipping digest send because no schedule is configured");
+      return { success: true, message: "Digest schedule is not configured" };
+    }
+
+    if (!isDigestScheduleDue(digestScheduleData, now)) {
+      logger.info("Skipping digest send because schedule is not due", {
+        nextOccurrenceAt: digestScheduleData.nextOccurrenceAt,
+      });
+      return { success: true, message: "Digest schedule is not due yet" };
+    }
+  }
+
+  let digestClaim = await claimPendingDigests({ emailAccountId });
+
+  try {
+    const pendingDigests = await prisma.digest.findMany({
+      where: {
+        emailAccountId,
+        id: {
+          in: digestClaim.digestIds,
+        },
+      },
+      select: {
+        id: true,
+        items: {
+          select: {
+            messageId: true,
+            content: true,
+            action: {
+              select: {
+                executedRule: {
+                  select: {
+                    rule: {
+                      select: {
+                        name: true,
+                      },
                     },
                   },
                 },
@@ -151,27 +190,21 @@ async function sendEmail({
           },
         },
       },
-    },
-  });
-
-  if (pendingDigests.length) {
-    // Mark all found digests as processing
-    await prisma.digest.updateMany({
-      where: {
-        id: {
-          in: pendingDigests.map((d) => d.id),
-        },
-      },
-      data: {
-        status: DigestStatus.PROCESSING,
-      },
     });
-  }
 
-  try {
     // Return early if no digests were found, unless force is true
     if (pendingDigests.length === 0) {
       if (!force) {
+        if (digestScheduleData && digestScheduleProgression) {
+          await prisma.schedule.update({
+            where: {
+              id: digestScheduleData.id,
+              emailAccountId,
+            },
+            data: digestScheduleProgression,
+          });
+        }
+
         return { success: true, message: "No digests to process" };
       }
       // When force is true, send an empty digest to indicate the system is working
@@ -271,6 +304,12 @@ async function sendEmail({
 
     if (Object.keys(executedRulesByRule).length === 0) {
       logger.info("No executed rules found, skipping digest email");
+      await prisma.digest.updateMany({
+        where: getDigestClaimWhere(digestClaim),
+        data: {
+          status: DigestStatus.FAILED,
+        },
+      });
       return {
         success: true,
         message: "No executed rules found, skipping digest email",
@@ -279,51 +318,52 @@ async function sendEmail({
 
     const token = await createUnsubscribeToken({ emailAccountId });
 
-    logger.info("Sending digest email");
+    const renewedClaim = await renewDigestClaim(digestClaim);
+    if (!renewedClaim) {
+      logger.warn("Skipping digest send because the processing claim was lost");
+      return {
+        success: true,
+        message: "Digest processing claim was lost",
+      };
+    }
+    digestClaim = renewedClaim;
 
-    // First, send the digest email and wait for it to complete
-    await sendDigestEmail({
-      from: env.RESEND_FROM_EMAIL,
-      to: emailAccount.email,
-      emailProps: {
-        baseUrl: env.NEXT_PUBLIC_BASE_URL,
-        unsubscribeToken: token,
-        date: new Date(),
-        ruleNames: Object.fromEntries(ruleNameMap),
-        ...executedRulesByRule,
-        emailAccountId,
-      },
+    logger.info("Sending digest");
+
+    await sendDigest({
+      emailAccountId,
+      userEmail: emailAccount.email,
+      unsubscribeToken: token,
+      date: new Date(),
+      ruleNames: Object.fromEntries(ruleNameMap),
+      itemsByRule: executedRulesByRule,
+      logger,
     });
 
-    logger.info("Digest email sent");
+    logger.info("Digest sent");
+
+    const sentAt = new Date();
 
     // Only update database if email sending succeeded
     // Use a transaction to ensure atomicity - all updates succeed or none are applied
     await prisma.$transaction([
-      ...(digestScheduleData
+      ...(!force && digestScheduleData && digestScheduleProgression
         ? [
             prisma.schedule.update({
               where: {
                 id: digestScheduleData.id,
                 emailAccountId,
               },
-              data: {
-                lastOccurrenceAt: new Date(),
-                nextOccurrenceAt: calculateNextScheduleDate(digestScheduleData),
-              },
+              data: digestScheduleProgression,
             }),
           ]
         : []),
       // Mark only the processed digests as sent
       prisma.digest.updateMany({
-        where: {
-          id: {
-            in: processedDigestIds,
-          },
-        },
+        where: getDigestClaimWhere(digestClaim),
         data: {
           status: DigestStatus.SENT,
-          sentAt: new Date(),
+          sentAt,
         },
       }),
       // Redact all DigestItems for the processed digests
@@ -333,16 +373,16 @@ async function sendEmail({
           digestId: {
             in: processedDigestIds,
           },
+          digest: {
+            status: DigestStatus.SENT,
+            sentAt,
+          },
         },
       }),
     ]);
   } catch (error) {
     await prisma.digest.updateMany({
-      where: {
-        id: {
-          in: pendingDigests.map((d) => d.id),
-        },
-      },
+      where: getDigestClaimWhere(digestClaim),
       data: {
         status: DigestStatus.FAILED,
       },

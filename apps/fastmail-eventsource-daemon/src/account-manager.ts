@@ -17,12 +17,6 @@ const FASTMAIL_OAUTH_TOKEN_URL = "https://www.fastmail.com/dev/oidc/token";
  * JMAP Session response containing API URLs and account information.
  */
 interface JMAPSession {
-  username: string;
-  apiUrl: string;
-  downloadUrl: string;
-  uploadUrl: string;
-  eventSourceUrl: string;
-  state: string;
   accounts: Record<
     string,
     {
@@ -32,20 +26,26 @@ interface JMAPSession {
       accountCapabilities: Record<string, unknown>;
     }
   >;
-  primaryAccounts: Record<string, string>;
+  apiUrl: string;
   capabilities: Record<string, unknown>;
+  downloadUrl: string;
+  eventSourceUrl: string;
+  primaryAccounts: Record<string, string>;
+  state: string;
+  uploadUrl: string;
+  username: string;
 }
 
 /**
  * Managed account with its EventSource client.
  */
 interface ManagedAccount {
-  emailAccountId: string;
-  email: string;
-  client: FastmailEventSourceClient;
   accessToken: string;
-  refreshToken: string | null;
+  client: FastmailEventSourceClient;
+  email: string;
+  emailAccountId: string;
   expiresAt: Date | null;
+  refreshToken: string | null;
 }
 
 /**
@@ -53,8 +53,8 @@ interface ManagedAccount {
  */
 interface TokenResponse {
   access_token: string;
-  refresh_token?: string;
   expires_in?: number;
+  refresh_token?: string;
 }
 
 /**

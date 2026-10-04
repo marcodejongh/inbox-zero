@@ -9,12 +9,13 @@ type ButtonListItem = {
 };
 
 interface ButtonListProps {
-  title?: string;
+  columns?: number;
+  emptyMessage: string;
+  itemClassName?: string;
   items: ButtonListItem[];
   onSelect: (id: string) => void;
   selectedId?: string;
-  emptyMessage: string;
-  columns?: number;
+  title?: string;
 }
 
 export function ButtonList({
@@ -24,6 +25,7 @@ export function ButtonList({
   selectedId,
   emptyMessage,
   columns = 1,
+  itemClassName,
 }: ButtonListProps) {
   return (
     <div>
@@ -44,6 +46,7 @@ export function ButtonList({
             key={item.id}
             variant={selectedId === item.id ? "default" : "outline"}
             onClick={() => onSelect(item.id)}
+            className={itemClassName}
           >
             {item.name}
           </Button>

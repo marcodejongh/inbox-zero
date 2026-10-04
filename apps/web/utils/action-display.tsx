@@ -1,7 +1,9 @@
-import { ActionType } from "@/generated/prisma/enums";
+import { ActionType, type MessagingProvider } from "@/generated/prisma/enums";
 import { getEmailTerminology } from "@/utils/terminology";
+import { sortActionsByPriority } from "@/utils/action-sort";
 import {
   ArchiveIcon,
+  BellIcon,
   FolderInputIcon,
   ForwardIcon,
   ReplyIcon,
@@ -12,8 +14,34 @@ import {
   FileTextIcon,
   MailIcon,
   NewspaperIcon,
+  SquareCheckBigIcon,
+  StarIcon,
+  Trash2Icon,
 } from "lucide-react";
 import { truncate } from "@/utils/string";
+import {
+  getIntegrationActionDisplayValue,
+  getIntegrationActionLabel,
+} from "@/utils/mcp/tool-specs";
+import { getMessagingProviderName } from "@/utils/messaging/platforms";
+
+/**
+ * Hide messaging-channel draft entries when an email draft already exists,
+ * so users don't see "Draft Reply" repeated once per connected chat app.
+ */
+export function getVisibleActions<T extends { type: ActionType }>(
+  actions: T[],
+): T[] {
+  const sortedActions = sortActionsByPriority(actions);
+  const hasEmailDraft = sortedActions.some(
+    (action) => action.type === ActionType.DRAFT_EMAIL,
+  );
+
+  return sortedActions.filter(
+    (action) =>
+      !(action.type === ActionType.DRAFT_MESSAGING_CHANNEL && hasEmailDraft),
+  );
+}
 
 export function getActionDisplay(
   action: {
@@ -23,6 +51,11 @@ export function getActionDisplay(
     folderName?: string | null;
     content?: string | null;
     to?: string | null;
+    notificationDestination?: string | null;
+    messagingChannel?: { provider: MessagingProvider } | null;
+    integrationName?: string | null;
+    integrationToolName?: string | null;
+    integrationArgs?: unknown;
   },
   provider: string,
   labels: Array<{ id: string; name: string }>,
@@ -30,6 +63,7 @@ export function getActionDisplay(
   const terminology = getEmailTerminology(provider);
   switch (action.type) {
     case ActionType.DRAFT_EMAIL:
+    case ActionType.DRAFT_MESSAGING_CHANNEL:
       if (action.content) {
         return `Draft Reply: ${truncate(action.content, 10)}`;
       }
@@ -55,9 +89,13 @@ export function getActionDisplay(
         : terminology.label.action;
     }
     case ActionType.ARCHIVE:
-      return "Skip Inbox";
+      return "Archive";
+    case ActionType.DELETE:
+      return "Delete";
     case ActionType.MARK_READ:
       return "Mark Read";
+    case ActionType.STAR:
+      return "Star";
     case ActionType.MARK_SPAM:
       return "Mark Spam";
     case ActionType.REPLY:
@@ -76,6 +114,20 @@ export function getActionDisplay(
       return "Digest";
     case ActionType.CALL_WEBHOOK:
       return "Call Webhook";
+    case ActionType.NOTIFY_MESSAGING_CHANNEL:
+      if (action.messagingChannel?.provider) {
+        return `Notify on ${getMessagingProviderName(action.messagingChannel.provider)}`;
+      }
+      return action.notificationDestination
+        ? `Notify on ${truncate(action.notificationDestination, 18)}`
+        : "Notify";
+    case ActionType.NOTIFY_SENDER:
+      return "Notify Sender";
+    case ActionType.INTEGRATION: {
+      const label = getIntegrationActionLabel(action);
+      const displayValue = getIntegrationActionDisplayValue(action);
+      return displayValue ? `${label}: '${truncate(displayValue, 20)}'` : label;
+    }
     default: {
       const exhaustiveCheck: never = action.type;
       return exhaustiveCheck;
@@ -83,15 +135,40 @@ export function getActionDisplay(
   }
 }
 
+export const ACTION_TYPE_LABELS = {
+  [ActionType.LABEL]: "Label",
+  [ActionType.ARCHIVE]: "Archive",
+  [ActionType.DELETE]: "Delete",
+  [ActionType.MARK_READ]: "Mark read",
+  [ActionType.MARK_SPAM]: "Mark spam",
+  [ActionType.STAR]: "Star",
+  [ActionType.MOVE_FOLDER]: "Move to folder",
+  [ActionType.FORWARD]: "Forward",
+  [ActionType.REPLY]: "Reply",
+  [ActionType.SEND_EMAIL]: "Send email",
+  [ActionType.DRAFT_EMAIL]: "Draft reply",
+  [ActionType.DRAFT_MESSAGING_CHANNEL]: "Draft to chat channel",
+  [ActionType.NOTIFY_MESSAGING_CHANNEL]: "Notify chat channel",
+  [ActionType.CALL_WEBHOOK]: "Call webhook",
+  [ActionType.DIGEST]: "Add to digest",
+  [ActionType.NOTIFY_SENDER]: "Notify sender",
+  // ActionType alone cannot name a specific tool; getIntegrationActionLabel
+  // gives the precise name when the action is known.
+  [ActionType.INTEGRATION]: getIntegrationActionLabel(),
+} satisfies Record<ActionType, string>;
+
 export function getActionIcon(actionType: ActionType) {
   switch (actionType) {
     case ActionType.LABEL:
       return TagIcon;
     case ActionType.ARCHIVE:
       return ArchiveIcon;
+    case ActionType.DELETE:
+      return Trash2Icon;
     case ActionType.MOVE_FOLDER:
       return FolderInputIcon;
     case ActionType.DRAFT_EMAIL:
+    case ActionType.DRAFT_MESSAGING_CHANNEL:
       return FileTextIcon;
     case ActionType.REPLY:
       return ReplyIcon;
@@ -103,10 +180,18 @@ export function getActionIcon(actionType: ActionType) {
       return ShieldCheckIcon;
     case ActionType.MARK_READ:
       return MailIcon;
+    case ActionType.STAR:
+      return StarIcon;
     case ActionType.CALL_WEBHOOK:
       return WebhookIcon;
     case ActionType.DIGEST:
       return NewspaperIcon;
+    case ActionType.NOTIFY_MESSAGING_CHANNEL:
+      return BellIcon;
+    case ActionType.NOTIFY_SENDER:
+      return BellIcon;
+    case ActionType.INTEGRATION:
+      return SquareCheckBigIcon;
     default: {
       const exhaustiveCheck: never = actionType;
       return exhaustiveCheck;

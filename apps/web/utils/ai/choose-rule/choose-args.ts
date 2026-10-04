@@ -1,14 +1,17 @@
 import { z } from "zod";
 import type { EmailAccountWithAI } from "@/utils/llms/types";
 import type { ModelType } from "@/utils/llms/model";
-import { ActionType } from "@/generated/prisma/enums";
+import {
+  ActionType,
+  type DraftReplyConfidence,
+} from "@/generated/prisma/enums";
 import type { Action } from "@/generated/prisma/client";
 import {
   type RuleWithActions,
   isDefined,
   type ParsedMessage,
 } from "@/utils/types";
-import { fetchMessagesAndGenerateDraft } from "@/utils/reply-tracker/generate-draft";
+import { fetchMessagesAndGenerateDraftWithConfidenceThreshold } from "@/utils/reply-tracker/generate-draft";
 import { getEmailForLLM } from "@/utils/get-email-from-message";
 import {
   type ActionArgResponse,
@@ -16,8 +19,40 @@ import {
 } from "@/utils/ai/choose-rule/ai-choose-args";
 import type { Logger } from "@/utils/logger";
 import type { EmailProvider } from "@/utils/email/types";
+import type { DraftAttribution } from "@/utils/ai/reply/draft-attribution";
+import type { DraftContextMetadata } from "@/utils/ai/reply/draft-context-metadata";
+import { isDraftReplyActionType } from "@/utils/actions/draft-reply";
+import {
+  getIntegrationToolSpec,
+  type IntegrationArgSpec,
+  isAiFilledArgValue,
+} from "@/utils/mcp/tool-specs";
+import type { SelectedAttachment } from "@/utils/attachments/source-schema";
+import { escapeHtml } from "@/utils/string";
 
 const MODULE = "choose-args";
+
+const INTEGRATION_ARGS_FIELD_PREFIX = "integrationArgs.";
+
+// These bodies are rendered as HTML by the email providers.
+const HTML_REPLY_BODY_ACTION_TYPES = new Set<ActionType>([
+  ActionType.DRAFT_EMAIL,
+  ActionType.REPLY,
+]);
+
+export type EmailAccountForDrafting = EmailAccountWithAI & {
+  draftReplyConfidence: DraftReplyConfidence;
+};
+
+type DraftAttributionFields = {
+  draftModelProvider?: string | null;
+  draftModelName?: string | null;
+  draftPipelineVersion?: number | null;
+  draftContextMetadata?: DraftContextMetadata | null;
+  selectedAttachments?: SelectedAttachment[] | null;
+};
+
+export type ActionWithDraftAttribution = Action & DraftAttributionFields;
 
 export async function getActionItemsWithAiArgs({
   message,
@@ -29,23 +64,27 @@ export async function getActionItemsWithAiArgs({
   isTest = false,
 }: {
   message: ParsedMessage;
-  emailAccount: EmailAccountWithAI;
+  emailAccount: EmailAccountForDrafting;
   selectedRule: RuleWithActions;
   client: EmailProvider;
   modelType: ModelType;
   logger: Logger;
   isTest?: boolean;
-}): Promise<Action[]> {
+}): Promise<ActionWithDraftAttribution[]> {
   const log = logger.with({ module: MODULE });
   // Draft content is handled via its own AI call
   // We provide a lot more context to the AI to draft the content
-  const draftEmailActions = selectedRule.actions.filter(
-    (action) => action.type === ActionType.DRAFT_EMAIL && !action.content,
+  const draftReplyActions = selectedRule.actions.filter(
+    (action) => isDraftReplyActionType(action.type) && !action.content,
   );
 
   let draft: string | null = null;
+  let draftConfidence: DraftReplyConfidence | null = null;
+  let draftAttribution: DraftAttribution | null = null;
+  let draftContextMetadata: DraftContextMetadata | null = null;
+  let selectedAttachments: SelectedAttachment[] | null = null;
 
-  if (draftEmailActions.length) {
+  if (draftReplyActions.length) {
     try {
       log.info("Generating draft", {
         email: emailAccount.email,
@@ -53,17 +92,28 @@ export async function getActionItemsWithAiArgs({
         isTest,
       });
 
-      draft = await fetchMessagesAndGenerateDraft(
-        emailAccount,
-        message.threadId,
-        client,
-        isTest ? message : undefined,
-        logger,
-      );
+      const draftResult =
+        await fetchMessagesAndGenerateDraftWithConfidenceThreshold(
+          emailAccount,
+          message.threadId,
+          client,
+          isTest ? message : undefined,
+          logger,
+          emailAccount.draftReplyConfidence,
+          selectedRule.id,
+        );
+      draft = draftResult.draft;
+      draftConfidence = draftResult.confidence;
+      draftAttribution = draftResult.attribution;
+      draftContextMetadata = draftResult.draftContextMetadata ?? null;
+      selectedAttachments = draftResult.attachments ?? null;
 
       log.info("Draft generated", {
         email: emailAccount.email,
         threadId: message.threadId,
+        draftConfidence,
+        minimumConfidence: emailAccount.draftReplyConfidence,
+        drafted: !!draft,
       });
     } catch (error) {
       log.error("Failed to generate draft", {
@@ -78,9 +128,11 @@ export async function getActionItemsWithAiArgs({
 
   const parameters = extractActionsNeedingAiGeneration(selectedRule.actions);
 
-  if (parameters.length === 0 && !draft) return selectedRule.actions;
+  if (parameters.length === 0 && !draft) {
+    return filterIncompleteDraftActions(selectedRule.actions);
+  }
 
-  const result = await aiGenerateArgs({
+  const { args, attribution: aiArgsAttribution } = await aiGenerateArgs({
     email: getEmailForLLM(message),
     emailAccount,
     selectedRule,
@@ -89,32 +141,95 @@ export async function getActionItemsWithAiArgs({
     logger,
   });
 
-  return combineActionsWithAiArgs(selectedRule.actions, result, draft);
-}
+  const combinedActions = combineActionsWithAiArgs(
+    selectedRule.actions,
+    args,
+    draft,
+    draftAttribution,
+    aiArgsAttribution,
+    draftContextMetadata,
+    selectedAttachments,
+  );
+  const filteredActions = filterIncompleteDraftActions(combinedActions);
 
+  if (filteredActions.length < combinedActions.length) {
+    log.info("Skipping draft action with no generated content", {
+      removedDraftActions: combinedActions.length - filteredActions.length,
+      draftConfidence,
+      minimumConfidence: emailAccount.draftReplyConfidence,
+    });
+  }
+
+  return filteredActions;
+}
 export function combineActionsWithAiArgs(
   actions: Action[],
   aiArgs: ActionArgResponse | undefined,
   draft: string | null = null,
-): Action[] {
-  if (!aiArgs && !draft) return actions;
+  draftAttribution: DraftAttribution | null = null,
+  aiArgsAttribution: DraftAttribution | null = null,
+  draftContextMetadata: DraftContextMetadata | null = null,
+  selectedAttachments: SelectedAttachment[] | null = null,
+): ActionWithDraftAttribution[] {
+  if (!aiArgs && !draft) return actions as ActionWithDraftAttribution[];
 
   return actions.map((action) => {
-    const updatedAction = { ...action };
+    const updatedAction: ActionWithDraftAttribution = { ...action };
 
-    // Add draft content to DRAFT_EMAIL actions if available
-    if (draft && action.type === ActionType.DRAFT_EMAIL) {
+    // Add draft content to draft reply actions if available
+    if (draft && isDraftReplyActionType(action.type)) {
       updatedAction.content = draft;
+      updatedAction.draftModelProvider = draftAttribution?.provider ?? null;
+      updatedAction.draftModelName = draftAttribution?.modelName ?? null;
+      updatedAction.draftPipelineVersion =
+        draftAttribution?.pipelineVersion ?? null;
+      updatedAction.draftContextMetadata = draftContextMetadata;
+      updatedAction.selectedAttachments = selectedAttachments;
     }
 
     // Process AI args if available
     const aiAction = aiArgs?.[`${action.type}-${action.id}`];
     if (!aiAction) return updatedAction;
 
+    if (
+      isDraftReplyActionType(action.type) &&
+      typeof action.content === "string" &&
+      aiAction.content
+    ) {
+      updatedAction.draftModelProvider = aiArgsAttribution?.provider ?? null;
+      updatedAction.draftModelName = aiArgsAttribution?.modelName ?? null;
+      updatedAction.draftPipelineVersion =
+        aiArgsAttribution?.pipelineVersion ?? null;
+    }
+
     // Merge variables for each field that has AI-generated content
     for (const [field, vars] of Object.entries(aiAction)) {
-      // Skip content field only if the action originally had no content and we've already set a draft
-      if (field === "content" && draft && !action.content) continue;
+      if (field === "content" && draft && isDraftReplyActionType(action.type)) {
+        continue;
+      }
+
+      if (field.startsWith(INTEGRATION_ARGS_FIELD_PREFIX)) {
+        const argKey = field.slice(INTEGRATION_ARGS_FIELD_PREFIX.length);
+        const originalArgs = getIntegrationArgsRecord(action.integrationArgs);
+        const originalValue = originalArgs[argKey];
+        const value = typeof originalValue === "string" ? originalValue : "";
+        const argSpec = getIntegrationToolSpec(
+          action.integrationName,
+          action.integrationToolName,
+        )?.args.find((arg) => arg.key === argKey);
+
+        if (!argSpec && typeof originalValue !== "string") continue;
+
+        const resolvedVars = vars as Record<`var${number}`, string>;
+        updatedAction.integrationArgs = {
+          ...getIntegrationArgsRecord(updatedAction.integrationArgs),
+          // AI-filled args take the generated value wholesale; templates stitch
+          [argKey]: isAiFilledArgValue(argSpec, value)
+            ? (resolvedVars.var1 ?? "").trim()
+            : mergeTemplateWithVars(value, resolvedVars),
+        } as Action["integrationArgs"];
+        continue;
+      }
 
       // Only process fields that we know can contain template strings
       if (
@@ -128,15 +243,27 @@ export function combineActionsWithAiArgs(
       ) {
         const originalValue = action[field];
         if (typeof originalValue === "string") {
+          const resolvedVars = vars as Record<`var${number}`, string>;
           (updatedAction[field] as string) = mergeTemplateWithVars(
             originalValue,
-            vars as Record<`var${number}`, string>,
+            field === "content" && HTML_REPLY_BODY_ACTION_TYPES.has(action.type)
+              ? escapeTemplateVars(resolvedVars)
+              : resolvedVars,
           );
         }
       }
     }
 
     return updatedAction;
+  });
+}
+
+export function filterIncompleteDraftActions<T extends Action>(
+  actions: T[],
+): T[] {
+  return actions.filter((action) => {
+    if (!isDraftReplyActionType(action.type)) return true;
+    return !!action.content?.trim();
   });
 }
 
@@ -174,7 +301,7 @@ export function combineActionsWithAiArgs(
  *
  * Note: Only returns actions that have fields containing {{template variables}}
  */
-function extractActionsNeedingAiGeneration(actions: Action[]) {
+export function extractActionsNeedingAiGeneration(actions: Action[]) {
   return actions
     .map((action) => {
       const fields = getParameterFieldsForAction(action);
@@ -228,7 +355,11 @@ export function getParameterFieldsForAction(
   action: Pick<
     Action,
     "label" | "subject" | "content" | "to" | "cc" | "bcc" | "url"
-  >,
+  > & {
+    integrationName?: Action["integrationName"];
+    integrationToolName?: Action["integrationToolName"];
+    integrationArgs?: Action["integrationArgs"];
+  },
 ) {
   const fields: Record<string, z.ZodObject<Record<string, z.ZodString>>> = {};
   const fieldNames = [
@@ -244,34 +375,83 @@ export function getParameterFieldsForAction(
   for (const field of fieldNames) {
     const value = action[field];
     if (typeof value === "string") {
-      const { aiPrompts } = parseTemplate(value);
-      if (aiPrompts.length > 0) {
-        const schemaFields: Record<string, z.ZodString> = {};
-        aiPrompts.forEach((_prompt, index) => {
-          schemaFields[`var${index + 1}`] = z.string();
-        });
-
-        // Transform original template to use var1, var2, etc
-        let template = value;
-        aiPrompts.forEach((prompt, index) => {
-          template = template.replace(
-            `{{${prompt}}}`,
-            `{{var${index + 1}: ${prompt}}}`,
-          );
-        });
-
-        const description = `Generate this template: ${template}${
-          field === "content"
-            ? "\nMake sure to maintain the exact formatting."
-            : ""
-        }`;
-
-        fields[field] = z.object(schemaFields).describe(description);
-      }
+      const templateField = buildTemplateField(value);
+      if (templateField) fields[field] = templateField;
     }
   }
 
+  const integrationArgs = getIntegrationArgsRecord(action.integrationArgs);
+  const spec = getIntegrationToolSpec(
+    action.integrationName,
+    action.integrationToolName,
+  );
+
+  // An empty arg the spec marks as AI-filled works like an empty draft-reply
+  // content: the AI writes the whole value. Templates keep their own path.
+  for (const arg of spec?.args ?? []) {
+    const argValue = integrationArgs[arg.key];
+    const value = typeof argValue === "string" ? argValue : "";
+
+    const field = isAiFilledArgValue(arg, value)
+      ? buildWholeValueField(arg)
+      : buildTemplateField(value);
+
+    if (field) fields[`${INTEGRATION_ARGS_FIELD_PREFIX}${arg.key}`] = field;
+  }
+
   return fields;
+}
+
+function buildWholeValueField(arg: IntegrationArgSpec) {
+  return z.object({ var1: z.string() }).describe(`${arg.aiPrompt}
+
+Return the full value in var1.`);
+}
+
+function buildTemplateField(value: string) {
+  const { aiPrompts } = parseTemplate(value);
+  if (aiPrompts.length === 0) return null;
+
+  const schemaFields: Record<string, z.ZodString> = {};
+  aiPrompts.forEach((_prompt, index) => {
+    schemaFields[`var${index + 1}`] = z.string();
+  });
+
+  // Transform original template to use var1, var2, etc
+  let template = value;
+  aiPrompts.forEach((prompt, index) => {
+    template = template.replace(
+      `{{${prompt}}}`,
+      `{{var${index + 1}: ${prompt}}}`,
+    );
+  });
+
+  const variableList = aiPrompts
+    .map((prompt, index) => `- var${index + 1}: ${prompt}`)
+    .join("\n");
+
+  const description = `Fill in the variable(s) for this template. Return ONLY the value for each variable, not the surrounding template text.
+
+Variables to fill:
+${variableList}
+
+Full template for context:
+${template}`;
+
+  return z.object(schemaFields).describe(description);
+}
+
+function getIntegrationArgsRecord(
+  integrationArgs: Action["integrationArgs"] | undefined,
+): Record<string, unknown> {
+  if (
+    integrationArgs &&
+    typeof integrationArgs === "object" &&
+    !Array.isArray(integrationArgs)
+  ) {
+    return integrationArgs as Record<string, unknown>;
+  }
+  return {};
 }
 
 /**
@@ -337,4 +517,11 @@ export function mergeTemplateWithVars(
   }
 
   return result;
+}
+
+// AI-filled values are untrusted; the user's own template text is kept as written.
+function escapeTemplateVars(vars: Record<`var${number}`, string>) {
+  return Object.fromEntries(
+    Object.entries(vars).map(([key, value]) => [key, escapeHtml(value)]),
+  ) as Record<`var${number}`, string>;
 }

@@ -1,4 +1,4 @@
-import { saveTokens } from "@/utils/auth";
+import { saveTokens } from "@/utils/auth/save-tokens";
 import { env } from "@/env";
 import { createScopedLogger } from "@/utils/logger";
 import { SCOPES } from "@/utils/fastmail/scopes";
@@ -115,12 +115,6 @@ export const FASTMAIL_OAUTH_USERINFO_URL =
  * @see https://jmap.io/spec-core.html#the-jmap-session-resource
  */
 export interface JMAPSession {
-  username: string;
-  apiUrl: string;
-  downloadUrl: string;
-  uploadUrl: string;
-  eventSourceUrl: string;
-  state: string;
   accounts: Record<
     string,
     {
@@ -130,8 +124,14 @@ export interface JMAPSession {
       accountCapabilities: Record<string, unknown>;
     }
   >;
-  primaryAccounts: Record<string, string>;
+  apiUrl: string;
   capabilities: Record<string, unknown>;
+  downloadUrl: string;
+  eventSourceUrl: string;
+  primaryAccounts: Record<string, string>;
+  state: string;
+  uploadUrl: string;
+  username: string;
 }
 
 /**
@@ -139,8 +139,8 @@ export interface JMAPSession {
  * @see https://jmap.io/spec-core.html#the-request-object
  */
 export interface JMAPRequest {
-  using: string[];
   methodCalls: JMAPMethodCall[];
+  using: string[];
 }
 
 /** JMAP method call tuple: [methodName, arguments, callId] */
@@ -163,8 +163,8 @@ export type JMAPMethodResponse = [string, Record<string, unknown>, string];
  * @see https://jmap.io/spec-core.html#errors
  */
 export interface JMAPError {
-  type: string;
   description?: string;
+  type: string;
 }
 
 /**
@@ -207,16 +207,16 @@ export function checkJMAPErrors(response: JMAPResponse): void {
  * Fastmail client interface for making JMAP API calls
  */
 export interface FastmailClient {
-  /** The JMAP session containing API endpoints and capabilities */
-  session: JMAPSession;
   /** OAuth access token for authentication */
   accessToken: string;
   /** Primary mail account ID */
   accountId: string;
-  /** Execute JMAP method calls */
-  request: (methodCalls: JMAPMethodCall[]) => Promise<JMAPResponse>;
   /** Get the current access token */
   getAccessToken: () => string;
+  /** Execute JMAP method calls */
+  request: (methodCalls: JMAPMethodCall[]) => Promise<JMAPResponse>;
+  /** The JMAP session containing API endpoints and capabilities */
+  session: JMAPSession;
 }
 
 /**

@@ -64,6 +64,24 @@ export async function fetchAndCheckIsAdmin({
   organizationId: string;
   userId: string;
 }) {
+  const errorMessage =
+    "You are not a member of this organization or you do not have admin permissions";
+
+  await getAuthorizedOrganizationAdminMembership({
+    organizationId,
+    userId,
+    missingMembershipMessage: errorMessage,
+    unauthorizedMessage: errorMessage,
+  });
+}
+
+export async function fetchAndCheckIsMember({
+  organizationId,
+  userId,
+}: {
+  organizationId: string;
+  userId: string;
+}): Promise<{ role: string }> {
   const member = await prisma.member.findFirst({
     where: {
       organizationId,
@@ -76,7 +94,35 @@ export async function fetchAndCheckIsAdmin({
     throw new SafeError("You are not a member of this organization");
   }
 
-  if (!hasOrganizationAdminRole(member.role)) {
-    throw new SafeError("You are not an organization admin");
+  return { role: member.role };
+}
+
+export async function getAuthorizedOrganizationAdminMembership({
+  organizationId,
+  userId,
+  unauthorizedMessage,
+  missingMembershipMessage = "You are not a member of this organization.",
+}: {
+  organizationId: string;
+  userId: string;
+  unauthorizedMessage: string;
+  missingMembershipMessage?: string;
+}) {
+  const member = await prisma.member.findFirst({
+    where: {
+      organizationId,
+      emailAccount: { userId },
+    },
+    select: { role: true, emailAccountId: true, organizationId: true },
+  });
+
+  if (!member) {
+    throw new SafeError(missingMembershipMessage);
   }
+
+  if (!hasOrganizationAdminRole(member.role)) {
+    throw new SafeError(unauthorizedMessage);
+  }
+
+  return member;
 }

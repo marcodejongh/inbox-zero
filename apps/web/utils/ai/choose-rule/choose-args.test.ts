@@ -1,36 +1,259 @@
-import { describe, it, expect, vi } from "vitest";
-import { combineActionsWithAiArgs } from "./choose-args";
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+import {
+  combineActionsWithAiArgs,
+  filterIncompleteDraftActions,
+  getParameterFieldsForAction,
+  parseTemplate,
+} from "./choose-args";
 import { ActionType } from "@/generated/prisma/enums";
 import type { Action } from "@/generated/prisma/client";
+import type { DraftAttribution } from "@/utils/ai/reply/draft-attribution";
 
-vi.mock("server-only", () => ({}));
+describe("getParameterFieldsForAction", () => {
+  it("creates schema for simple field", () => {
+    const action = {
+      label: "{{write label}}",
+      subject: "",
+      content: "",
+      to: "",
+      cc: "",
+      bcc: "",
+      url: "",
+    };
 
-// Helper function to create a mock Action object
-function createMockAction(overrides: Partial<Action> = {}): Action {
-  return {
-    id: "test-action-id",
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    type: ActionType.DRAFT_EMAIL,
-    ruleId: "test-rule-id",
-    to: null,
-    subject: null,
-    label: null,
-    content: null,
-    cc: null,
-    bcc: null,
-    url: null,
-    folderName: null,
-    folderId: null,
-    delayInMinutes: null,
-    ...overrides,
-  };
-}
+    const result = getParameterFieldsForAction(action);
+
+    expect(result.label).toBeDefined();
+    expect(result.label?.shape).toEqual({
+      var1: expect.any(z.ZodString),
+    });
+    expect(Object.keys(result)).toEqual(["label"]);
+    const description =
+      (result.label as any)?.description ||
+      (result.label as any)?._def?.description;
+    expect(description).toContain("{{var1: write label}}");
+  });
+
+  it("creates schema for field with multiple variables", () => {
+    const action = {
+      label: "",
+      content: "Dear {{write greeting}},\n\n{{draft response}}\n\nBest",
+      subject: "",
+      to: "",
+      cc: "",
+      bcc: "",
+      url: "",
+    };
+
+    const result = getParameterFieldsForAction(action);
+
+    expect(result.content).toBeDefined();
+    expect(result.content?.shape).toEqual({
+      var1: expect.any(z.ZodString),
+      var2: expect.any(z.ZodString),
+    });
+    const description =
+      (result.content as any)?.description ||
+      (result.content as any)?._def?.description;
+    expect(description).toContain("{{var1: write greeting}}");
+    expect(description).toContain("{{var2: draft response}}");
+    expect(description).toContain("Return ONLY the value for each variable");
+  });
+
+  it("ignores fields without template variables", () => {
+    const action = {
+      label: "Simple label",
+      subject: "",
+      content: "",
+      to: "",
+      cc: "",
+      bcc: "",
+      url: "",
+    };
+
+    const result = getParameterFieldsForAction(action);
+
+    expect(result.label).toBeUndefined();
+  });
+
+  it("handles multiple fields with template variables", () => {
+    const action = {
+      label: "{{write label}}",
+      subject: "Re: {{write subject}}",
+      content: "{{write content}}",
+      to: "{{recipient}}",
+      cc: "",
+      bcc: "",
+      url: "",
+    };
+
+    const result = getParameterFieldsForAction(action);
+
+    expect(Object.keys(result)).toHaveLength(4);
+
+    expect(result.label).toBeDefined();
+    const labelDesc =
+      (result.label as any)?.description ||
+      (result.label as any)?._def?.description;
+    expect(labelDesc).toContain("{{var1: write label}}");
+
+    expect(result.subject).toBeDefined();
+    const subjectDesc =
+      (result.subject as any)?.description ||
+      (result.subject as any)?._def?.description;
+    expect(subjectDesc).toContain("Re: {{var1: write subject}}");
+
+    expect(result.to).toBeDefined();
+    const toDesc =
+      (result.to as any)?.description || (result.to as any)?._def?.description;
+    expect(toDesc).toContain("{{var1: recipient}}");
+  });
+
+  it("creates a whole-value schema for empty AI-filled integration args", () => {
+    const action = {
+      label: "",
+      subject: "",
+      content: "",
+      to: "",
+      cc: "",
+      bcc: "",
+      url: "",
+      integrationName: "todoist",
+      integrationToolName: "add-tasks",
+      integrationArgs: {
+        content: "",
+        description: "",
+        dueString: "ai",
+        projectId: "inbox",
+      },
+    };
+
+    const result = getParameterFieldsForAction(action);
+
+    // Empty text args and the "AI decides" due date all get filled by the AI;
+    // projectId is an explicit choice, so it is not sent to the model.
+    expect(Object.keys(result).sort()).toEqual([
+      "integrationArgs.content",
+      "integrationArgs.description",
+      "integrationArgs.dueString",
+    ]);
+    expect(result["integrationArgs.content"]?.shape).toEqual({
+      var1: expect.any(z.ZodString),
+    });
+  });
+
+  it("creates schemas for templated integrationArgs string values only", () => {
+    const action = {
+      label: "",
+      subject: "",
+      content: "",
+      to: "",
+      cc: "",
+      bcc: "",
+      url: "",
+      integrationName: "todoist",
+      integrationToolName: "add-tasks",
+      integrationArgs: {
+        content: "{{Short action item based on the email}}",
+        description: "Static description",
+        dueString: "today",
+        projectId: "inbox",
+      },
+    };
+
+    const result = getParameterFieldsForAction(action);
+
+    expect(Object.keys(result).sort()).toEqual(["integrationArgs.content"]);
+    const contentDesc =
+      (result["integrationArgs.content"] as any)?.description ||
+      (result["integrationArgs.content"] as any)?._def?.description;
+    expect(contentDesc).toContain(
+      "{{var1: Short action item based on the email}}",
+    );
+  });
+});
+
+describe("parseTemplate", () => {
+  it("handles adjacent template variables with no gap", () => {
+    const template = "start{{x}}{{y}}end";
+    const result = parseTemplate(template);
+
+    expect(result).toEqual({
+      aiPrompts: ["x", "y"],
+      fixedParts: ["start", "", "end"],
+    });
+  });
+
+  it("handles multiple edge cases", () => {
+    const cases = [
+      {
+        template: "{{x}}{{y}}",
+        expected: {
+          aiPrompts: ["x", "y"],
+          fixedParts: ["", "", ""],
+        },
+      },
+      {
+        template: "{{x}}text{{y}}{{z}}",
+        expected: {
+          aiPrompts: ["x", "y", "z"],
+          fixedParts: ["", "text", "", ""],
+        },
+      },
+    ];
+
+    cases.forEach(({ template, expected }) => {
+      expect(parseTemplate(template)).toEqual(expected);
+    });
+  });
+
+  it("handles multi-line AI prompts", () => {
+    const template = `{{Determine which single label to apply based on these criteria:
+1. If action is needed from Alice -> 'Action needed'
+2. If a question is asked directly to Alice (excluding X emails) -> 'Answer needed'
+3. If email is high priority but doesn't match above conditions -> 'High Priority'
+Only return ONE of these three labels based on the most appropriate match.}}`;
+
+    const result = parseTemplate(template);
+
+    expect(result).toEqual({
+      aiPrompts: [
+        `Determine which single label to apply based on these criteria:
+1. If action is needed from Alice -> 'Action needed'
+2. If a question is asked directly to Alice (excluding X emails) -> 'Answer needed'
+3. If email is high priority but doesn't match above conditions -> 'High Priority'
+Only return ONE of these three labels based on the most appropriate match.`,
+      ],
+      fixedParts: ["", ""],
+    });
+  });
+
+  it("handles multi-line AI prompts with surrounding text", () => {
+    const template = `Label: {{Determine which single label to apply based on these criteria:
+1. If action is needed from Alice -> 'Action needed'
+2. If a question is asked directly to Alice (excluding X emails) -> 'Answer needed'
+3. If email is high priority but doesn't match above conditions -> 'High Priority'
+Only return ONE of these three labels based on the most appropriate match.}} (Auto-generated)`;
+
+    const result = parseTemplate(template);
+
+    expect(result).toEqual({
+      aiPrompts: [
+        `Determine which single label to apply based on these criteria:
+1. If action is needed from Alice -> 'Action needed'
+2. If a question is asked directly to Alice (excluding X emails) -> 'Answer needed'
+3. If email is high priority but doesn't match above conditions -> 'High Priority'
+Only return ONE of these three labels based on the most appropriate match.`,
+      ],
+      fixedParts: ["Label: ", " (Auto-generated)"],
+    });
+  });
+});
 
 describe("combineActionsWithAiArgs", () => {
   describe("DRAFT_EMAIL action with template content", () => {
-    it("should replace template variables in content when AI args are provided", () => {
-      // This test ensures template variables are replaced with AI-generated content
+    it("replaces template variables in content when AI args are provided", () => {
       const actions = [
         createMockAction({
           id: "1",
@@ -50,14 +273,92 @@ describe("combineActionsWithAiArgs", () => {
 
       const result = combineActionsWithAiArgs(actions, aiArgs, null);
 
-      // Verify that template variables are properly replaced
       expect(result[0].content).toBe(
-        "Dear Mr. Johnson,\n\nThank you for your email. I'd be happy to help with your request.\n\nBest regards",
+        "Dear Mr. Johnson,\n\nThank you for your email. I&#x27;d be happy to help with your request.\n\nBest regards",
       );
     });
 
-    it("should handle DRAFT_EMAIL action without content (full draft generation)", () => {
-      // This test shows the working case where no template exists
+    it("escapes AI-filled values in reply bodies but keeps the user's template text", () => {
+      const actions = [
+        createMockAction({
+          id: "1",
+          type: ActionType.DRAFT_EMAIL,
+          content: "<b>Hi</b> {{name}},\n\n{{reply}}",
+          label: "{{label}}",
+        }),
+        createMockAction({
+          id: "2",
+          type: ActionType.REPLY,
+          content: "{{reply}}",
+        }),
+        createMockAction({
+          id: "3",
+          type: ActionType.DRAFT_MESSAGING_CHANNEL,
+          content: "{{reply}}",
+        }),
+      ];
+
+      const result = combineActionsWithAiArgs(
+        actions,
+        {
+          "DRAFT_EMAIL-1": {
+            content: { var1: "Sam", var2: "Email <sam@example.com> & me" },
+            label: { var1: "A & B" },
+          },
+          "REPLY-2": { content: { var1: "a < b" } },
+          "DRAFT_MESSAGING_CHANNEL-3": { content: { var1: "a < b" } },
+        },
+        null,
+      );
+
+      expect(result[0].content).toBe(
+        "<b>Hi</b> Sam,\n\nEmail &lt;sam@example.com&gt; &amp; me",
+      );
+      expect(result[0].label).toBe("A & B");
+      expect(result[1].content).toBe("a &lt; b");
+      expect(result[2].content).toBe("a < b");
+    });
+
+    it("stores attribution for template-generated draft content", () => {
+      const actions = [
+        createMockAction({
+          id: "draft-template-1",
+          type: ActionType.DRAFT_EMAIL,
+          content: "Hello {{name}},\n\n{{reply}}",
+        }),
+      ];
+
+      const aiArgs = {
+        "DRAFT_EMAIL-draft-template-1": {
+          content: {
+            var1: "Taylor",
+            var2: "Thanks for the note.",
+          },
+        },
+      };
+      const aiArgsAttribution: DraftAttribution = {
+        provider: "openai",
+        modelName: "gpt-5-mini",
+        pipelineVersion: 1,
+      };
+
+      const result = combineActionsWithAiArgs(
+        actions,
+        aiArgs,
+        null,
+        null,
+        aiArgsAttribution,
+      );
+
+      expect(result[0]).toMatchObject({
+        content: "Hello Taylor,\n\nThanks for the note.",
+        draftModelProvider: "openai",
+        draftModelName: "gpt-5-mini",
+        draftPipelineVersion: 1,
+      });
+    });
+
+    it("handles DRAFT_EMAIL action without content", () => {
       const actions = [
         createMockAction({
           id: "2",
@@ -70,22 +371,58 @@ describe("combineActionsWithAiArgs", () => {
 
       const result = combineActionsWithAiArgs(actions, undefined, fullDraft);
 
-      // This case works correctly - the full draft is added
       expect(result[0].content).toBe(fullDraft);
     });
 
-    it("should not skip content field processing when draft exists but action has template", () => {
-      // This test ensures that templates with variables are processed even when a draft exists
+    it("carries selected attachments with generated draft actions", () => {
+      const actions = [
+        createMockAction({
+          id: "2",
+          type: ActionType.DRAFT_EMAIL,
+          content: null,
+        }),
+      ];
+      const selectedAttachments = [
+        {
+          driveConnectionId: "drive-1",
+          fileId: "file-1",
+          filename: "attachment.pdf",
+          mimeType: "application/pdf",
+        },
+      ];
+
+      const result = combineActionsWithAiArgs(
+        actions,
+        undefined,
+        "Generated draft",
+        null,
+        null,
+        null,
+        selectedAttachments,
+      );
+
+      expect(result[0]).toMatchObject({
+        content: "Generated draft",
+        selectedAttachments,
+      });
+    });
+
+    it("uses one generated draft for every draft reply action", () => {
       const actions = [
         createMockAction({
           id: "3",
           type: ActionType.DRAFT_EMAIL,
+          content: null,
+        }),
+        createMockAction({
+          id: "4",
+          type: ActionType.DRAFT_MESSAGING_CHANNEL,
           content: "Hello {{name}}, {{message}}",
         }),
       ];
 
       const aiArgs = {
-        "DRAFT_EMAIL-3": {
+        "DRAFT_MESSAGING_CHANNEL-4": {
           content: {
             var1: "Alice",
             var2: "I hope this email finds you well.",
@@ -93,25 +430,92 @@ describe("combineActionsWithAiArgs", () => {
         },
       };
 
-      // Even if draft is provided, template processing should still happen
-      // This draft represents content from another action, not this one
-      const draftFromAnotherAction = "Some other draft";
-
       const result = combineActionsWithAiArgs(
         actions,
         aiArgs,
-        draftFromAnotherAction,
+        "Some other draft",
       );
 
-      // Verify that template variables are processed correctly
-      expect(result[0].content).toBe(
-        "Hello Alice, I hope this email finds you well.",
-      );
+      expect(result.map((action) => action.content)).toEqual([
+        "Some other draft",
+        "Some other draft",
+      ]);
     });
   });
 
-  describe("Other action types with templates", () => {
-    it("should process template variables in labels", () => {
+  describe("INTEGRATION action with templated args", () => {
+    it("fills templates inside integrationArgs string values", () => {
+      const actions = [
+        createMockAction({
+          id: "5",
+          type: ActionType.INTEGRATION,
+          content: null,
+          integrationName: "todoist",
+          integrationToolName: "add-tasks",
+          integrationArgs: {
+            content: "{{Short action item based on the email}}",
+            dueString: "{{due date mentioned in the email; omit if none}}",
+            projectId: "inbox",
+          },
+        }),
+      ];
+
+      const aiArgs = {
+        "INTEGRATION-5": {
+          "integrationArgs.content": { var1: "Send the signed lease" },
+          "integrationArgs.dueString": { var1: "" },
+        },
+      };
+
+      const result = combineActionsWithAiArgs(actions, aiArgs, null);
+
+      expect(result[0].integrationArgs).toEqual({
+        content: "Send the signed lease",
+        dueString: "",
+        projectId: "inbox",
+      });
+    });
+  });
+
+  describe("INTEGRATION action with AI-filled args", () => {
+    it("replaces an empty arg with the generated value", () => {
+      const actions = [
+        createMockAction({
+          id: "6",
+          type: ActionType.INTEGRATION,
+          content: null,
+          integrationName: "todoist",
+          integrationToolName: "add-tasks",
+          integrationArgs: {
+            content: "",
+            description: "",
+            dueString: "ai",
+            projectId: "inbox",
+          },
+        }),
+      ];
+
+      const aiArgs = {
+        "INTEGRATION-6": {
+          "integrationArgs.content": { var1: "Send the signed lease" },
+          "integrationArgs.description": { var1: "" },
+          "integrationArgs.dueString": { var1: "tomorrow" },
+        },
+      };
+
+      const result = combineActionsWithAiArgs(actions, aiArgs, null);
+
+      expect(result[0].integrationArgs).toEqual({
+        content: "Send the signed lease",
+        description: "",
+        dueString: "tomorrow",
+        projectId: "inbox",
+      });
+    });
+  });
+
+  describe("other action types with templates", () => {
+    it("processes template variables in labels", () => {
       const actions = [
         createMockAction({
           id: "4",
@@ -135,3 +539,57 @@ describe("combineActionsWithAiArgs", () => {
     });
   });
 });
+
+describe("filterIncompleteDraftActions", () => {
+  it("removes draft actions that have no content", () => {
+    const result = filterIncompleteDraftActions([
+      createMockAction({
+        id: "draft-empty",
+        type: ActionType.DRAFT_EMAIL,
+        content: null,
+      }),
+      createMockAction({
+        id: "label-1",
+        type: ActionType.LABEL,
+        label: "Important",
+      }),
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].type).toBe(ActionType.LABEL);
+  });
+
+  it("keeps draft actions when content exists", () => {
+    const result = filterIncompleteDraftActions([
+      createMockAction({
+        id: "draft-filled",
+        type: ActionType.DRAFT_EMAIL,
+        content: "Thanks for reaching out.",
+      }),
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe("draft-filled");
+  });
+});
+
+function createMockAction(overrides: Partial<Action> = {}): Action {
+  return {
+    id: "test-action-id",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    type: ActionType.DRAFT_EMAIL,
+    ruleId: "test-rule-id",
+    to: null,
+    subject: null,
+    label: null,
+    content: null,
+    cc: null,
+    bcc: null,
+    url: null,
+    folderName: null,
+    folderId: null,
+    delayInMinutes: null,
+    ...overrides,
+  };
+}

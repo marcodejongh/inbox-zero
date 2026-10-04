@@ -2,9 +2,9 @@ import { XMLParser } from "fast-xml-parser";
 import { env } from "@/env";
 
 export interface SSOProviderConfig {
-  issuer: string;
-  entryPoint: string;
   cert: string;
+  entryPoint: string;
+  issuer: string;
   spMetadata: string;
   // Security configuration options
   wantAssertionsSigned?: boolean; // Defaults to true for security; set false only if IdP doesn't support signed assertions
@@ -39,9 +39,8 @@ export function extractSSOProviderConfigFromXML(
     obj: Record<string, unknown>,
     prefixedKey: string,
     unprefixedKey: string,
-  ): T | undefined => {
-    return (obj?.[prefixedKey] ?? obj?.[unprefixedKey]) as T | undefined;
-  };
+  ): T | undefined =>
+    (obj?.[prefixedKey] ?? obj?.[unprefixedKey]) as T | undefined;
 
   const getArrayValue = <T = unknown>(
     obj: Record<string, unknown>,
@@ -164,7 +163,7 @@ export function extractSSOProviderConfigFromXML(
 
   const encodedProviderId = encodeURIComponent(providerId);
   const baseUrl = env.NEXT_PUBLIC_BASE_URL.replace(/\/$/, "");
-  const acsUrl = `${baseUrl}/api/auth/sso/saml2/callback/${encodedProviderId}`;
+  const acsUrl = `${baseUrl}/api/auth/sso/saml2/sp/acs/${encodedProviderId}`;
 
   const spMetadata = `<?xml version="1.0"?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="${baseUrl}">

@@ -1,221 +1,261 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { createTestLogger } from "@/__tests__/helpers";
 import {
   extractErrorInfo,
   isRetryableError,
   calculateRetryDelay,
+  withMicrosoftGraphRetry,
+  withMicrosoftGraphWriteRetry,
 } from "./retry";
 
 describe("extractErrorInfo", () => {
-  it("extracts status from statusCode", () => {
-    const error = { statusCode: 429, message: "Too many requests" };
-    const info = extractErrorInfo(error);
-    expect(info.status).toBe(429);
-    expect(info.errorMessage).toBe("Too many requests");
-  });
-
-  it("extracts code from error.code", () => {
-    const error = {
-      code: "TooManyRequests",
-      message: "Rate limit exceeded",
-    };
-    const info = extractErrorInfo(error);
-    expect(info.code).toBe("TooManyRequests");
-    expect(info.errorMessage).toBe("Rate limit exceeded");
-  });
-
-  it("extracts nested error structure", () => {
-    const error = {
+  it.each([
+    {
+      name: "status from statusCode",
+      error: { statusCode: 429, message: "Too many requests" },
+      expected: { status: 429, errorMessage: "Too many requests" },
+    },
+    {
+      name: "code from error.code",
       error: {
+        code: "TooManyRequests",
+        message: "Rate limit exceeded",
+      },
+      expected: {
+        code: "TooManyRequests",
+        errorMessage: "Rate limit exceeded",
+      },
+    },
+    {
+      name: "nested error structure",
+      error: {
+        error: {
+          code: "ServiceNotAvailable",
+          message: "Service temporarily unavailable",
+        },
+        statusCode: 503,
+      },
+      expected: {
+        status: 503,
         code: "ServiceNotAvailable",
-        message: "Service temporarily unavailable",
+        errorMessage: "Service temporarily unavailable",
       },
-      statusCode: 503,
-    };
-    const info = extractErrorInfo(error);
-    expect(info.status).toBe(503);
-    expect(info.code).toBe("ServiceNotAvailable");
-    expect(info.errorMessage).toBe("Service temporarily unavailable");
-  });
-
-  it("handles response object", () => {
-    const error = {
-      response: {
+    },
+    {
+      name: "response object",
+      error: {
+        response: {
+          status: 429,
+        },
+        message: "Rate limited",
+      },
+      expected: { status: 429, errorMessage: "Rate limited" },
+    },
+    {
+      name: "p-retry wrapped error",
+      error: {
+        error: {
+          statusCode: 429,
+          code: "TooManyRequests",
+          message: "Throttled",
+        },
+      },
+      expected: {
         status: 429,
+        code: "TooManyRequests",
+        errorMessage: "Throttled",
       },
-      message: "Rate limited",
-    };
-    const info = extractErrorInfo(error);
-    expect(info.status).toBe(429);
-    expect(info.errorMessage).toBe("Rate limited");
+    },
+  ])("extracts $name", ({ error, expected }) => {
+    expect(extractErrorInfo(error)).toMatchObject(expected);
   });
 });
 
 describe("isRetryableError", () => {
-  it("identifies 429 as rate limit", () => {
-    const errorInfo = { status: 429, errorMessage: "Too many requests" };
-    const result = isRetryableError(errorInfo);
-    expect(result.isRateLimit).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies TooManyRequests code as rate limit", () => {
-    const errorInfo = {
-      code: "TooManyRequests",
-      errorMessage: "Rate limit exceeded",
-    };
-    const result = isRetryableError(errorInfo);
-    expect(result.isRateLimit).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies ApplicationThrottled code as rate limit", () => {
-    const errorInfo = {
-      code: "ApplicationThrottled",
-      errorMessage: "Application is over its MailboxConcurrency limit.",
-    };
-    const result = isRetryableError(errorInfo);
-    expect(result.isRateLimit).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies MailboxConcurrency message as rate limit", () => {
-    const errorInfo = {
-      status: 429,
-      errorMessage: "MailboxConcurrency limit exceeded",
-    };
-    const result = isRetryableError(errorInfo);
-    expect(result.isRateLimit).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies server errors", () => {
-    for (const status of [502, 503, 504]) {
-      const errorInfo = { status, errorMessage: "Server error" };
-      const result = isRetryableError(errorInfo);
-      expect(result.isServerError).toBe(true);
-      expect(result.retryable).toBe(true);
-    }
-  });
-
-  it("identifies ServiceNotAvailable code as server error", () => {
-    const errorInfo = {
-      code: "ServiceNotAvailable",
-      errorMessage: "Service unavailable",
-    };
-    const result = isRetryableError(errorInfo);
-    expect(result.isServerError).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies ServerBusy code as server error", () => {
-    const errorInfo = { code: "ServerBusy", errorMessage: "Server busy" };
-    const result = isRetryableError(errorInfo);
-    expect(result.isServerError).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies 412 as conflict error", () => {
-    const errorInfo = { status: 412, errorMessage: "Precondition failed" };
-    const result = isRetryableError(errorInfo);
-    expect(result.isConflictError).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies ErrorIrresolvableConflict code as conflict error", () => {
-    const errorInfo = {
-      code: "ErrorIrresolvableConflict",
-      errorMessage: "Change key conflict",
-    };
-    const result = isRetryableError(errorInfo);
-    expect(result.isConflictError).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies conflict by message pattern", () => {
-    const errorInfo = {
-      status: 409,
-      errorMessage: "The change key passed does not match",
-    };
-    const result = isRetryableError(errorInfo);
-    expect(result.isConflictError).toBe(true);
-    expect(result.retryable).toBe(true);
-  });
-
-  it("identifies fetch failed as network error", () => {
-    const errorInfo = { errorMessage: "fetch failed" };
-    const result = isRetryableError(errorInfo);
-    expect(result.retryable).toBe(true);
-    expect(result.isRateLimit).toBe(false);
-    expect(result.isServerError).toBe(false);
-    expect(result.isConflictError).toBe(false);
-  });
-
-  it("identifies non-retryable errors", () => {
-    const errorInfo = { status: 404, errorMessage: "Not found" };
-    const result = isRetryableError(errorInfo);
-    expect(result.retryable).toBe(false);
-    expect(result.isRateLimit).toBe(false);
-    expect(result.isServerError).toBe(false);
-    expect(result.isConflictError).toBe(false);
-  });
-
-  it("identifies rate limit by message pattern", () => {
-    const errorInfo = { status: 403, errorMessage: "Rate limit exceeded" };
-    const result = isRetryableError(errorInfo);
-    expect(result.isRateLimit).toBe(true);
-    expect(result.retryable).toBe(true);
+  it.each([
+    {
+      name: "429 status as rate limit",
+      errorInfo: { status: 429, errorMessage: "Too many requests" },
+      expected: { isRateLimit: true, retryable: true },
+    },
+    {
+      name: "TooManyRequests code as rate limit",
+      errorInfo: {
+        code: "TooManyRequests",
+        errorMessage: "Rate limit exceeded",
+      },
+      expected: { isRateLimit: true, retryable: true },
+    },
+    {
+      name: "ApplicationThrottled code as rate limit",
+      errorInfo: {
+        code: "ApplicationThrottled",
+        errorMessage: "Application is over its MailboxConcurrency limit.",
+      },
+      expected: { isRateLimit: true, retryable: true },
+    },
+    {
+      name: "MailboxConcurrency message as rate limit",
+      errorInfo: {
+        status: 429,
+        errorMessage: "MailboxConcurrency limit exceeded",
+      },
+      expected: { isRateLimit: true, retryable: true },
+    },
+    {
+      name: "502 status as server error",
+      errorInfo: { status: 502, errorMessage: "Server error" },
+      expected: { isServerError: true, retryable: true },
+    },
+    {
+      name: "503 status as server error",
+      errorInfo: { status: 503, errorMessage: "Server error" },
+      expected: { isServerError: true, retryable: true },
+    },
+    {
+      name: "504 status as server error",
+      errorInfo: { status: 504, errorMessage: "Server error" },
+      expected: { isServerError: true, retryable: true },
+    },
+    {
+      name: "ServiceNotAvailable code as server error",
+      errorInfo: {
+        code: "ServiceNotAvailable",
+        errorMessage: "Service unavailable",
+      },
+      expected: { isServerError: true, retryable: true },
+    },
+    {
+      name: "ServerBusy code as server error",
+      errorInfo: { code: "ServerBusy", errorMessage: "Server busy" },
+      expected: { isServerError: true, retryable: true },
+    },
+    {
+      name: "412 status as conflict error",
+      errorInfo: { status: 412, errorMessage: "Precondition failed" },
+      expected: { isConflictError: true, retryable: true },
+    },
+    {
+      name: "ErrorIrresolvableConflict code as conflict error",
+      errorInfo: {
+        code: "ErrorIrresolvableConflict",
+        errorMessage: "Change key conflict",
+      },
+      expected: { isConflictError: true, retryable: true },
+    },
+    {
+      name: "conflict by message pattern",
+      errorInfo: {
+        status: 409,
+        errorMessage: "The change key passed does not match",
+      },
+      expected: { isConflictError: true, retryable: true },
+    },
+    {
+      name: "fetch failed as network error",
+      errorInfo: { errorMessage: "fetch failed" },
+      expected: {
+        retryable: true,
+        isRateLimit: false,
+        isServerError: false,
+        isConflictError: false,
+      },
+    },
+    {
+      name: "non-retryable errors",
+      errorInfo: { status: 404, errorMessage: "Not found" },
+      expected: {
+        retryable: false,
+        isRateLimit: false,
+        isServerError: false,
+        isConflictError: false,
+      },
+    },
+    {
+      name: "rate limit by message pattern",
+      errorInfo: { status: 403, errorMessage: "Rate limit exceeded" },
+      expected: { isRateLimit: true, retryable: true },
+    },
+  ])("identifies $name", ({ errorInfo, expected }) => {
+    expect(isRetryableError(errorInfo)).toMatchObject(expected);
   });
 });
 
 describe("calculateRetryDelay", () => {
-  it("uses Retry-After header in seconds", () => {
-    const delay = calculateRetryDelay(true, false, false, 1, "10");
-    expect(delay).toBe(10_000); // 10 seconds in ms
-  });
-
-  it("uses Retry-After header as HTTP-date", () => {
-    const futureDate = new Date(Date.now() + 5000);
-    const delay = calculateRetryDelay(
-      true,
-      false,
-      false,
-      1,
-      futureDate.toUTCString(),
-    );
-    expect(delay).toBeGreaterThanOrEqual(4000);
-    expect(delay).toBeLessThanOrEqual(5000);
-  });
-
   it("falls back to 30s for rate limits without header", () => {
     const delay = calculateRetryDelay(true, false, false, 1);
     expect(delay).toBe(30_000);
   });
 
-  it("uses exponential backoff for server errors", () => {
-    expect(calculateRetryDelay(false, true, false, 1)).toBe(5000); // 5s
-    expect(calculateRetryDelay(false, true, false, 2)).toBe(10_000); // 10s
-    expect(calculateRetryDelay(false, true, false, 3)).toBe(20_000); // 20s
-    expect(calculateRetryDelay(false, true, false, 4)).toBe(40_000); // 40s
-    expect(calculateRetryDelay(false, true, false, 5)).toBe(80_000); // 80s max
-    expect(calculateRetryDelay(false, true, false, 6)).toBe(80_000); // capped at 80s
+  it.each([
+    {
+      name: "server errors",
+      args: [false, true, false] as const,
+      expectedDelays: [5000, 10_000, 20_000, 40_000, 80_000, 80_000],
+    },
+    {
+      name: "conflict errors",
+      args: [false, false, true] as const,
+      expectedDelays: [500, 1000, 2000, 4000, 8000, 8000],
+    },
+    {
+      name: "other retryable errors",
+      args: [false, false, false] as const,
+      expectedDelays: [1000, 2000, 4000, 8000, 16_000, 16_000],
+    },
+  ])("uses exponential backoff for $name", ({ args, expectedDelays }) => {
+    for (const [index, expectedDelay] of expectedDelays.entries()) {
+      expect(calculateRetryDelay(...args, index + 1)).toBe(expectedDelay);
+    }
+  });
+});
+
+describe("withMicrosoftGraphRetry", () => {
+  it("aborts retries when backoff exceeds max blocking delay", async () => {
+    const operation = vi.fn().mockRejectedValue(
+      Object.assign(new Error("Throttled"), {
+        code: "ApplicationThrottled",
+        statusCode: 429,
+      }),
+    );
+
+    await expect(
+      withMicrosoftGraphRetry(operation, createTestLogger(), 5, 1),
+    ).rejects.toBeDefined();
+
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("withMicrosoftGraphWriteRetry", () => {
+  it.each([
+    Object.assign(new Error("Service unavailable"), { statusCode: 503 }),
+    new Error("fetch failed"),
+    Object.assign(new Error("Change key conflict"), { statusCode: 412 }),
+  ])("does not repeat a write after an ambiguous failure", async (error) => {
+    const operation = vi.fn().mockRejectedValue(error);
+
+    await expect(
+      withMicrosoftGraphWriteRetry(operation, createTestLogger()),
+    ).rejects.toBeDefined();
+
+    expect(operation).toHaveBeenCalledTimes(1);
   });
 
-  it("uses exponential backoff for conflict errors", () => {
-    expect(calculateRetryDelay(false, false, true, 1)).toBe(500); // 500ms
-    expect(calculateRetryDelay(false, false, true, 2)).toBe(1000); // 1s
-    expect(calculateRetryDelay(false, false, true, 3)).toBe(2000); // 2s
-    expect(calculateRetryDelay(false, false, true, 4)).toBe(4000); // 4s
-    expect(calculateRetryDelay(false, false, true, 5)).toBe(8000); // 8s max
-    expect(calculateRetryDelay(false, false, true, 6)).toBe(8000); // capped at 8s
-  });
+  it("retries a write rejected by a rate limit", async () => {
+    const rateLimitError = Object.assign(new Error("Throttled"), {
+      statusCode: 429,
+      response: { headers: { "retry-after": "0" } },
+    });
+    const operation = vi
+      .fn()
+      .mockRejectedValueOnce(rateLimitError)
+      .mockResolvedValue("ok");
 
-  it("uses default exponential backoff for other retryable errors (e.g., network)", () => {
-    // When no specific error type matches, falls back to default
-    expect(calculateRetryDelay(false, false, false, 1)).toBe(1000); // 1s
-    expect(calculateRetryDelay(false, false, false, 2)).toBe(2000); // 2s
-    expect(calculateRetryDelay(false, false, false, 3)).toBe(4000); // 4s
-    expect(calculateRetryDelay(false, false, false, 4)).toBe(8000); // 8s
-    expect(calculateRetryDelay(false, false, false, 5)).toBe(16_000); // 16s max
-    expect(calculateRetryDelay(false, false, false, 6)).toBe(16_000); // capped at 16s
+    await expect(
+      withMicrosoftGraphWriteRetry(operation, createTestLogger(), 1),
+    ).resolves.toBe("ok");
+
+    expect(operation).toHaveBeenCalledTimes(2);
   });
 });

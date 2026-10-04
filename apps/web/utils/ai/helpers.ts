@@ -34,12 +34,33 @@ ${info.map((i) => `<${i.label}>${i.value}</${i.label}>`).join("\n")}
 </user_info>`.trim();
 };
 
+export function getUserAboutPrompt(about: string | null | undefined) {
+  return about
+    ? `Context about the user:
+
+<userAbout>
+${about}
+</userAbout>
+`
+    : "";
+}
+
+export function getWritingStylePrompt(writingStyle: string | null | undefined) {
+  return writingStyle
+    ? `Writing style:
+
+<writing_style>
+${writingStyle}
+</writing_style>
+`
+    : "";
+}
+
 export const getUserRulesPrompt = ({
   rules,
 }: {
   rules: { name: string; instructions: string }[];
-}) => {
-  return `<user_rules>
+}) => `<user_rules>
 ${rules
   .map(
     (rule) => `<rule>
@@ -49,7 +70,6 @@ ${rules
   )
   .join("\n")}
 </user_rules>`;
-};
 
 export const getEmailListPrompt = ({
   messages,

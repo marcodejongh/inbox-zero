@@ -1,38 +1,135 @@
-function getGmailBaseUrl(emailAddress?: string | null) {
-  return `https://mail.google.com/mail/u/${emailAddress || 0}`;
-}
+import { extractDomainFromEmail } from "@/utils/email";
 
-function getOutlookBaseUrl() {
-  return "https://outlook.live.com/mail/0";
-}
+export function createSearchParams(params: Record<string, unknown>) {
+  const searchParams = new URLSearchParams();
 
-const PROVIDER_CONFIG: Record<
-  string,
-  {
-    buildUrl: (
-      messageOrThreadId: string,
-      emailAddress?: string | null,
-    ) => string;
-    selectId: (messageId: string, threadId: string) => string;
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined) continue;
+    searchParams.set(key, String(value));
   }
-> = {
+
+  return searchParams;
+}
+
+function getGmailUrlForFragment(
+  fragment: string,
+  emailAddress?: string | null,
+) {
+  if (!emailAddress) return `https://mail.google.com/mail/u/0/#${fragment}`;
+
+  return `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(emailAddress)}#${fragment}`;
+}
+
+// Personal Microsoft accounts (outlook / hotmail / live / msn) sign in at
+// outlook.live.com; everything else is an Entra ID / Microsoft 365 mailbox
+// served from outlook.office.com. The two hosts route to separate services, so
+// pointing a business user at outlook.live.com lands them on the homepage.
+// Prefix match covers country variants like outlook.fr, live.co.uk, hotmail.de.
+const PERSONAL_MICROSOFT_DOMAIN_PREFIXES = ["outlook.", "hotmail.", "live."];
+const PERSONAL_MICROSOFT_DOMAINS = new Set(["msn.com", "passport.com"]);
+
+function isPersonalMicrosoftEmail(emailAddress?: string | null) {
+  if (!emailAddress) return false;
+  const domain = extractDomainFromEmail(emailAddress).toLowerCase();
+  if (!domain) return false;
+  if (PERSONAL_MICROSOFT_DOMAINS.has(domain)) return true;
+  return PERSONAL_MICROSOFT_DOMAIN_PREFIXES.some((prefix) =>
+    domain.startsWith(prefix),
+  );
+}
+
+function getOutlookBaseUrl(isPersonalMailbox: boolean) {
+  return isPersonalMailbox
+    ? "https://outlook.live.com/mail/0"
+    : "https://outlook.office.com/mail";
+}
+
+const OUTLOOK_WEB_HOSTS = new Set([
+  "outlook.office.com",
+  "outlook.office365.com",
+  "outlook.live.com",
+]);
+
+// Graph's `webLink` is redirected to, so only Outlook hosts are allowed.
+function toOutlookReadingPaneUrl(webLink?: string | null) {
+  if (!webLink) return null;
+
+  let url: URL;
+  try {
+    url = new URL(webLink);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "https:") return null;
+  if (!OUTLOOK_WEB_HOSTS.has(url.hostname.toLowerCase())) return null;
+
+  url.searchParams.set("ispopout", "0");
+  return url.toString();
+}
+
+// Only the fields a draft deeplink can be built from.
+type DraftLinkTarget = {
+  id: string;
+  threadId?: string | null;
+  externalUrl?: string | null;
+};
+
+type ProviderUrlConfig = {
+  requiresMessageId: boolean;
+  buildUrl: (messageOrThreadId: string, emailAddress?: string | null) => string;
+  buildDraftUrl: (
+    draft: DraftLinkTarget,
+    emailAddress?: string | null,
+  ) => string | null;
+  selectId: (messageId: string, threadId: string) => string;
+  buildSearchUrl: (from: string, emailAddress?: string | null) => string;
+};
+
+const GOOGLE_CONFIG: ProviderUrlConfig = {
+  requiresMessageId: false,
+  buildUrl: (messageOrThreadId: string, emailAddress?: string | null) =>
+    getGmailUrlForFragment(`all/${messageOrThreadId}`, emailAddress),
+  // Gmail's compose deeplink takes an internal id that cannot be derived from
+  // an API id, so the draft itself cannot be opened. Its conversation can, and
+  // Drafts is the one label that holds it.
+  buildDraftUrl: (draft: DraftLinkTarget, emailAddress?: string | null) =>
+    getGmailUrlForFragment(
+      `drafts/${encodeURIComponent(draft.threadId || draft.id)}`,
+      emailAddress,
+    ),
+  selectId: (messageId: string, _threadId: string) => messageId,
+  buildSearchUrl: (from: string, emailAddress?: string | null) =>
+    getGmailUrlForFragment(
+      `advanced-search/from=${encodeURIComponent(from)}`,
+      emailAddress,
+    ),
+};
+
+const PROVIDER_CONFIG: Record<string, ProviderUrlConfig> = {
   microsoft: {
-    buildUrl: (messageOrThreadId: string, _emailAddress?: string | null) => {
-      // Outlook URL format: https://outlook.live.com/mail/0/inbox/id/ENCODED_MESSAGE_ID
-      // The message ID needs to be URL-encoded for Outlook
+    requiresMessageId: true,
+    buildUrl: (messageOrThreadId: string, emailAddress?: string | null) => {
       const encodedMessageId = encodeURIComponent(messageOrThreadId);
-      return `${getOutlookBaseUrl()}/inbox/id/${encodedMessageId}`;
+      return `${getOutlookBaseUrl(isPersonalMicrosoftEmail(emailAddress))}/inbox/id/${encodedMessageId}`;
     },
-    selectId: (_messageId: string, threadId: string) => threadId,
-  },
-  google: {
-    buildUrl: (messageOrThreadId: string, emailAddress?: string | null) =>
-      `${getGmailBaseUrl(emailAddress)}/#all/${messageOrThreadId}`,
+    buildDraftUrl: (draft: DraftLinkTarget, emailAddress?: string | null) => {
+      const readingPaneUrl = toOutlookReadingPaneUrl(draft.externalUrl);
+      if (readingPaneUrl) return readingPaneUrl;
+
+      return draft.id
+        ? `${getOutlookBaseUrl(isPersonalMicrosoftEmail(emailAddress))}/drafts/id/${encodeURIComponent(draft.id)}`
+        : null;
+    },
     selectId: (messageId: string, _threadId: string) => messageId,
+    buildSearchUrl: (from: string, emailAddress?: string | null) => {
+      const query = encodeURIComponent(`from:${from}`);
+      return `${getOutlookBaseUrl(isPersonalMicrosoftEmail(emailAddress))}/search/q/${query}`;
+    },
   },
+  google: GOOGLE_CONFIG,
   default: {
-    buildUrl: (messageOrThreadId: string, emailAddress?: string | null) =>
-      `${getGmailBaseUrl(emailAddress)}/#all/${messageOrThreadId}`,
+    ...GOOGLE_CONFIG,
     selectId: (_messageId: string, threadId: string) => threadId,
   },
 } as const;
@@ -40,7 +137,8 @@ const PROVIDER_CONFIG: Record<
 function getProviderConfig(
   provider?: string,
 ): (typeof PROVIDER_CONFIG)[keyof typeof PROVIDER_CONFIG] {
-  return PROVIDER_CONFIG[provider ?? "default"];
+  if (!provider) return PROVIDER_CONFIG.default;
+  return PROVIDER_CONFIG[provider] ?? PROVIDER_CONFIG.default;
 }
 
 export function getEmailUrl(
@@ -50,6 +148,24 @@ export function getEmailUrl(
 ): string {
   const config = getProviderConfig(provider);
   return config.buildUrl(messageOrThreadId, emailAddress);
+}
+
+/**
+ * Takes the draft message itself rather than an id, because Gmail links to the
+ * draft's thread while Outlook links to its message. Resolve the draft via
+ * `EmailProvider.getDraft` at link time — its message id changes on every edit.
+ *
+ * Outlook opens the draft via Graph's `webLink`, falling back to Drafts.
+ * Gmail returns a Drafts conversation URL (composer deeplinks need an internal
+ * id the API does not expose).
+ */
+export function getEmailDraftUrl(
+  draft: DraftLinkTarget,
+  emailAddress?: string | null,
+  provider?: string,
+): string | null {
+  const config = getProviderConfig(provider);
+  return config.buildDraftUrl(draft, emailAddress);
 }
 
 /**
@@ -69,6 +185,32 @@ export function getEmailUrlForMessage(
   return getEmailUrl(idToUse, emailAddress, provider);
 }
 
+export function getEmailUrlForOptionalMessage({
+  messageId,
+  threadId,
+  emailAddress,
+  provider,
+}: {
+  messageId?: string | null;
+  threadId?: string | null;
+  emailAddress?: string | null;
+  provider?: string;
+}) {
+  const config = getProviderConfig(provider);
+  if (config.requiresMessageId && !messageId) return null;
+
+  const resolvedMessageId = messageId || threadId;
+  const resolvedThreadId = threadId || messageId;
+  if (!resolvedMessageId || !resolvedThreadId) return null;
+
+  return getEmailUrlForMessage(
+    resolvedMessageId,
+    resolvedThreadId,
+    emailAddress,
+    provider,
+  );
+}
+
 // Keep the old function name for backward compatibility
 export function getGmailUrl(
   messageOrThreadId: string,
@@ -78,27 +220,38 @@ export function getGmailUrl(
 }
 
 export function getGmailSearchUrl(from: string, emailAddress?: string | null) {
-  return `${getGmailBaseUrl(
-    emailAddress,
-  )}/#advanced-search/from=${encodeURIComponent(from)}`;
+  const config = getProviderConfig("google");
+  return config.buildSearchUrl(from, emailAddress);
+}
+
+const OPEN_IN_MAILBOX_LABELS: Record<string, string> = {
+  google: "Open in Gmail",
+  microsoft: "Open in Outlook",
+};
+
+export function getOpenInMailboxLabel(provider?: string | null) {
+  if (!provider) return null;
+  return OPEN_IN_MAILBOX_LABELS[provider] ?? null;
+}
+
+export function getEmailSearchUrl(
+  from: string,
+  emailAddress?: string | null,
+  provider?: string,
+) {
+  const config = provider ? PROVIDER_CONFIG[provider] : undefined;
+  if (!config)
+    return PROVIDER_CONFIG.default.buildSearchUrl(from, emailAddress);
+  return config.buildSearchUrl(from, emailAddress);
 }
 
 export function getGmailBasicSearchUrl(emailAddress: string, query: string) {
-  return `${getGmailBaseUrl(emailAddress)}/#search/${encodeURIComponent(
-    query,
-  )}`;
+  return getGmailUrlForFragment(
+    `search/${encodeURIComponent(query)}`,
+    emailAddress,
+  );
 }
 
-// export function getGmailCreateFilterUrl(
-//   search: string,
-//   emailAddress?: string | null,
-// ) {
-//   return `${getGmailBaseUrl(
-//     emailAddress,
-//     emailAddress,
-//   )}/#create-filter/from=${encodeURIComponent(search)}`;
-// }
-
 export function getGmailFilterSettingsUrl(emailAddress?: string | null) {
-  return `${getGmailBaseUrl(emailAddress)}/#settings/filters`;
+  return getGmailUrlForFragment("settings/filters", emailAddress);
 }

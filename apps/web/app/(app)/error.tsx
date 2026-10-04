@@ -1,17 +1,13 @@
 "use client";
 
-import * as Sentry from "@sentry/nextjs";
-import { useEffect } from "react";
-import { ErrorDisplay } from "@/components/ErrorDisplay";
+import { AppErrorBoundary } from "@/components/AppErrorBoundary";
 
-export default function ErrorBoundary({ error }: any) {
-  useEffect(() => {
-    Sentry.captureException(error);
-  }, [error]);
-
-  return (
-    <div className="p-4">
-      <ErrorDisplay error={{ error: error?.message }} />
-    </div>
-  );
+export default function ErrorBoundary({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  return <AppErrorBoundary error={error} reset={reset} />;
 }

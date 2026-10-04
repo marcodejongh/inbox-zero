@@ -1,0 +1,582 @@
+import { describe, it, expect } from "vitest";
+import {
+  getActionFields,
+  sanitizeActionFields,
+  actionInputs,
+} from "./action-item";
+import { ActionType, AttachmentSourceType } from "@/generated/prisma/enums";
+
+describe("actionInputs", () => {
+  it("has configuration for all action types", () => {
+    const actionTypes = Object.values(ActionType);
+    for (const type of actionTypes) {
+      expect(actionInputs[type]).toBeDefined();
+      expect(actionInputs[type].fields).toBeDefined();
+    }
+  });
+
+  it("ARCHIVE has no fields", () => {
+    expect(actionInputs[ActionType.ARCHIVE].fields).toEqual([]);
+  });
+
+  it("LABEL has labelId field", () => {
+    const fields = actionInputs[ActionType.LABEL].fields;
+    expect(fields).toHaveLength(1);
+    expect(fields[0].name).toBe("labelId");
+  });
+
+  it("DRAFT_EMAIL has subject, content, to, cc, bcc fields", () => {
+    const fieldNames = actionInputs[ActionType.DRAFT_EMAIL].fields.map(
+      (f) => f.name,
+    );
+    expect(fieldNames).toContain("subject");
+    expect(fieldNames).toContain("content");
+    expect(fieldNames).toContain("to");
+    expect(fieldNames).toContain("cc");
+    expect(fieldNames).toContain("bcc");
+  });
+
+  it("DRAFT_MESSAGING_CHANNEL has subject, content, to, cc, bcc fields", () => {
+    const fieldNames = actionInputs[
+      ActionType.DRAFT_MESSAGING_CHANNEL
+    ].fields.map((f) => f.name);
+    expect(fieldNames).toContain("subject");
+    expect(fieldNames).toContain("content");
+    expect(fieldNames).toContain("to");
+    expect(fieldNames).toContain("cc");
+    expect(fieldNames).toContain("bcc");
+  });
+
+  it("CALL_WEBHOOK has url field", () => {
+    const fields = actionInputs[ActionType.CALL_WEBHOOK].fields;
+    expect(fields).toHaveLength(1);
+    expect(fields[0].name).toBe("url");
+  });
+
+  it("NOTIFY_MESSAGING_CHANNEL has no fields", () => {
+    expect(actionInputs[ActionType.NOTIFY_MESSAGING_CHANNEL].fields).toEqual(
+      [],
+    );
+  });
+});
+
+describe("getActionFields", () => {
+  it("returns empty object for undefined input", () => {
+    expect(getActionFields(undefined)).toEqual({});
+  });
+
+  it("returns only fields with values", () => {
+    const action = {
+      label: "Test Label",
+      subject: null,
+      content: "",
+      to: "test@example.com",
+    } as any;
+    const result = getActionFields(action);
+    expect(result).toEqual({
+      label: "Test Label",
+      to: "test@example.com",
+    });
+    expect(result).not.toHaveProperty("subject");
+    expect(result).not.toHaveProperty("content");
+  });
+
+  it("returns all populated fields", () => {
+    const action = {
+      label: "Label",
+      subject: "Subject",
+      content: "Content",
+      to: "to@test.com",
+      cc: "cc@test.com",
+      bcc: "bcc@test.com",
+      url: "https://example.com",
+      folderName: "Archive",
+      folderId: "folder123",
+    } as any;
+    const result = getActionFields(action);
+    expect(result).toEqual({
+      label: "Label",
+      subject: "Subject",
+      content: "Content",
+      to: "to@test.com",
+      cc: "cc@test.com",
+      bcc: "bcc@test.com",
+      url: "https://example.com",
+      folderName: "Archive",
+      folderId: "folder123",
+    });
+  });
+
+  it("labels integration args from the tool spec", () => {
+    const action = {
+      type: ActionType.INTEGRATION,
+      integrationName: "todoist",
+      integrationToolName: "add-tasks",
+      integrationArgs: {
+        content: "Review the contract",
+        description: "From the legal team",
+        dueString: "tomorrow",
+        projectId: "6X7",
+        projectName: "Work",
+      },
+    } as any;
+
+    const result = getActionFields(action);
+
+    expect(result).toEqual({
+      Task: "Review the contract",
+      Description: "From the legal team",
+      "Due date": "Tomorrow",
+      Project: "Work",
+    });
+  });
+
+  it("shows AI-filled integration args as AI-generated", () => {
+    const action = {
+      type: ActionType.INTEGRATION,
+      integrationName: "todoist",
+      integrationToolName: "add-tasks",
+      integrationArgs: {
+        content: "",
+        description: "",
+        dueString: "ai",
+        projectId: "inbox",
+        projectName: "Inbox",
+      },
+    } as any;
+
+    const result = getActionFields(action);
+
+    expect(result).toEqual({
+      Task: "AI-generated",
+      Description: "AI-generated",
+      "Due date": "AI-generated",
+      Project: "Inbox",
+    });
+  });
+
+  it("shows a custom due date instead of a preset label", () => {
+    const action = {
+      type: ActionType.INTEGRATION,
+      integrationName: "todoist",
+      integrationToolName: "add-tasks",
+      integrationArgs: {
+        content: "Review the contract",
+        dueString: "next Friday",
+        projectId: "inbox",
+        projectName: "Inbox",
+      },
+    } as any;
+
+    expect(getActionFields(action)["Due date"]).toBe("next Friday");
+  });
+
+  it("excludes falsy values except for defined nulls", () => {
+    const action = {
+      label: "",
+      subject: null,
+      content: undefined,
+      to: "test@example.com",
+    } as any;
+    const result = getActionFields(action);
+    expect(result).toEqual({ to: "test@example.com" });
+  });
+});
+
+describe("sanitizeActionFields", () => {
+  describe("INTEGRATION", () => {
+    it("keeps integration fields and strips unrelated ones", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.INTEGRATION,
+        content: "should be stripped",
+        url: "https://example.com",
+        integrationName: "todoist",
+        integrationToolName: "add-tasks",
+        integrationArgs: { content: "Do the thing", projectId: "inbox" },
+      });
+
+      expect(result.integrationName).toBe("todoist");
+      expect(result.integrationToolName).toBe("add-tasks");
+      expect(result.integrationArgs).toEqual({
+        content: "Do the thing",
+        projectId: "inbox",
+      });
+      expect(result.content).toBeNull();
+      expect(result.url).toBeNull();
+    });
+
+    it("strips integration fields from other action types", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.ARCHIVE,
+        integrationName: "todoist",
+        integrationToolName: "add-tasks",
+        integrationArgs: { content: "Do the thing" },
+      });
+
+      expect(result.integrationName).toBeNull();
+      expect(result.integrationToolName).toBeNull();
+      expect(result.integrationArgs).toBeUndefined();
+    });
+  });
+
+  describe("actions with no fields", () => {
+    it("returns base fields for ARCHIVE", () => {
+      const result = sanitizeActionFields({ type: ActionType.ARCHIVE });
+      expect(result.type).toBe(ActionType.ARCHIVE);
+      expect(result.label).toBeNull();
+      expect(result.subject).toBeNull();
+      expect(result.content).toBeNull();
+    });
+
+    it("returns base fields for MARK_SPAM", () => {
+      const result = sanitizeActionFields({ type: ActionType.MARK_SPAM });
+      expect(result.type).toBe(ActionType.MARK_SPAM);
+    });
+
+    it("returns base fields for MARK_READ", () => {
+      const result = sanitizeActionFields({ type: ActionType.MARK_READ });
+      expect(result.type).toBe(ActionType.MARK_READ);
+    });
+
+    it("returns base fields for STAR", () => {
+      const result = sanitizeActionFields({ type: ActionType.STAR });
+      expect(result.type).toBe(ActionType.STAR);
+    });
+
+    it("returns base fields for DIGEST", () => {
+      const result = sanitizeActionFields({ type: ActionType.DIGEST });
+      expect(result.type).toBe(ActionType.DIGEST);
+    });
+
+    it("returns base fields for NOTIFY_SENDER", () => {
+      const result = sanitizeActionFields({ type: ActionType.NOTIFY_SENDER });
+      expect(result.type).toBe(ActionType.NOTIFY_SENDER);
+    });
+
+    it("returns base fields for NOTIFY_MESSAGING_CHANNEL", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.NOTIFY_MESSAGING_CHANNEL,
+      });
+      expect(result.type).toBe(ActionType.NOTIFY_MESSAGING_CHANNEL);
+      expect(result.messagingChannelId).toBeNull();
+    });
+  });
+
+  describe("LABEL action", () => {
+    it("preserves label and labelId fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.LABEL,
+        label: "Newsletters",
+        labelId: "label123",
+      });
+      expect(result.label).toBe("Newsletters");
+      expect(result.labelId).toBe("label123");
+    });
+
+    it("nullifies unrelated fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.LABEL,
+        label: "Test",
+        subject: "Should be null",
+        to: "should@be.null",
+      });
+      expect(result.label).toBe("Test");
+      expect(result.subject).toBeNull();
+      expect(result.to).toBeNull();
+    });
+  });
+
+  describe("MOVE_FOLDER action", () => {
+    it("preserves folderName and folderId fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.MOVE_FOLDER,
+        folderName: "Archive",
+        folderId: "folder123",
+      });
+      expect(result.folderName).toBe("Archive");
+      expect(result.folderId).toBe("folder123");
+    });
+  });
+
+  describe("REPLY action", () => {
+    it("preserves content, cc, and bcc fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.REPLY,
+        content: "Reply content",
+        cc: "cc@test.com",
+        bcc: "bcc@test.com",
+      });
+      expect(result.content).toBe("Reply content");
+      expect(result.cc).toBe("cc@test.com");
+      expect(result.bcc).toBe("bcc@test.com");
+    });
+
+    it("nullifies subject and to fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.REPLY,
+        subject: "Should be null",
+        to: "should@be.null",
+        content: "Content",
+      });
+      expect(result.subject).toBeNull();
+      expect(result.to).toBeNull();
+      expect(result.content).toBe("Content");
+    });
+
+    it("preserves static attachments", () => {
+      const attachments = [
+        {
+          driveConnectionId: "drive-1",
+          name: "lease.pdf",
+          sourceId: "file-1",
+          sourcePath: "/Docs",
+          type: AttachmentSourceType.FILE,
+        },
+      ];
+
+      const result = sanitizeActionFields({
+        type: ActionType.REPLY,
+        content: "Content",
+        staticAttachments: attachments,
+      });
+
+      expect(result.staticAttachments).toEqual(attachments);
+    });
+  });
+
+  describe("SEND_EMAIL action", () => {
+    it("preserves subject, content, to, cc, and bcc fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.SEND_EMAIL,
+        subject: "Subject",
+        content: "Content",
+        to: "to@test.com",
+        cc: "cc@test.com",
+        bcc: "bcc@test.com",
+      });
+      expect(result.subject).toBe("Subject");
+      expect(result.content).toBe("Content");
+      expect(result.to).toBe("to@test.com");
+      expect(result.cc).toBe("cc@test.com");
+      expect(result.bcc).toBe("bcc@test.com");
+    });
+
+    it("preserves static attachments", () => {
+      const attachments = [
+        {
+          driveConnectionId: "drive-1",
+          name: "quote.pdf",
+          sourceId: "file-2",
+          sourcePath: "/Docs",
+          type: AttachmentSourceType.FILE,
+        },
+      ];
+
+      const result = sanitizeActionFields({
+        type: ActionType.SEND_EMAIL,
+        subject: "Subject",
+        content: "Content",
+        to: "to@test.com",
+        staticAttachments: attachments,
+      });
+
+      expect(result.staticAttachments).toEqual(attachments);
+    });
+  });
+
+  describe("FORWARD action", () => {
+    it("preserves content, to, cc, and bcc fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.FORWARD,
+        content: "Extra content",
+        to: "forward@test.com",
+        cc: "cc@test.com",
+        bcc: "bcc@test.com",
+      });
+      expect(result.content).toBe("Extra content");
+      expect(result.to).toBe("forward@test.com");
+      expect(result.cc).toBe("cc@test.com");
+      expect(result.bcc).toBe("bcc@test.com");
+    });
+
+    it("nullifies subject field", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.FORWARD,
+        subject: "Should be null",
+        to: "forward@test.com",
+      });
+      expect(result.subject).toBeNull();
+    });
+  });
+
+  describe("DRAFT_EMAIL action", () => {
+    it("preserves subject, content, to, cc, and bcc fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.DRAFT_EMAIL,
+        subject: "Draft Subject",
+        content: "Draft Content",
+        to: "draft@test.com",
+        cc: "cc@test.com",
+        bcc: "bcc@test.com",
+      });
+      expect(result.subject).toBe("Draft Subject");
+      expect(result.content).toBe("Draft Content");
+      expect(result.to).toBe("draft@test.com");
+      expect(result.cc).toBe("cc@test.com");
+      expect(result.bcc).toBe("bcc@test.com");
+      expect(result.messagingChannelId).toBeNull();
+    });
+
+    it("preserves static attachments", () => {
+      const attachments = [
+        {
+          driveConnectionId: "drive-1",
+          name: "brief.pdf",
+          sourceId: "file-3",
+          sourcePath: "/Docs",
+          type: AttachmentSourceType.FILE,
+        },
+      ];
+
+      const result = sanitizeActionFields({
+        type: ActionType.DRAFT_EMAIL,
+        content: "Draft Content",
+        staticAttachments: attachments,
+      });
+
+      expect(result.staticAttachments).toEqual(attachments);
+    });
+
+    it("preserves selected attachments", () => {
+      const selectedAttachments = [
+        {
+          driveConnectionId: "drive-1",
+          fileId: "file-3",
+          filename: "brief.pdf",
+          mimeType: "application/pdf",
+        },
+      ];
+
+      const result = sanitizeActionFields({
+        type: ActionType.DRAFT_EMAIL,
+        content: "Draft Content",
+        selectedAttachments,
+      });
+
+      expect(result.selectedAttachments).toEqual(selectedAttachments);
+    });
+  });
+
+  describe("DRAFT_MESSAGING_CHANNEL action", () => {
+    it("preserves messagingChannelId and draft fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.DRAFT_MESSAGING_CHANNEL,
+        messagingChannelId: "channel-1",
+        subject: "Draft Subject",
+        content: "Draft Content",
+        to: "draft@test.com",
+        cc: "cc@test.com",
+        bcc: "bcc@test.com",
+      });
+
+      expect(result.type).toBe(ActionType.DRAFT_MESSAGING_CHANNEL);
+      expect(result.subject).toBe("Draft Subject");
+      expect(result.content).toBe("Draft Content");
+      expect(result.to).toBe("draft@test.com");
+      expect(result.cc).toBe("cc@test.com");
+      expect(result.bcc).toBe("bcc@test.com");
+      expect(result.messagingChannelId).toBe("channel-1");
+    });
+
+    it("preserves static attachments", () => {
+      const attachments = [
+        {
+          driveConnectionId: "drive-1",
+          name: "brief.pdf",
+          sourceId: "file-4",
+          sourcePath: "/Docs",
+          type: AttachmentSourceType.FILE,
+        },
+      ];
+
+      const result = sanitizeActionFields({
+        type: ActionType.DRAFT_MESSAGING_CHANNEL,
+        messagingChannelId: "channel-1",
+        content: "Draft Content",
+        staticAttachments: attachments,
+      });
+
+      expect(result.staticAttachments).toEqual(attachments);
+    });
+
+    it("preserves selected attachments", () => {
+      const selectedAttachments = [
+        {
+          driveConnectionId: "drive-1",
+          fileId: "file-4",
+          filename: "brief.pdf",
+          mimeType: "application/pdf",
+        },
+      ];
+
+      const result = sanitizeActionFields({
+        type: ActionType.DRAFT_MESSAGING_CHANNEL,
+        messagingChannelId: "channel-1",
+        content: "Draft Content",
+        selectedAttachments,
+      });
+
+      expect(result.selectedAttachments).toEqual(selectedAttachments);
+    });
+  });
+
+  describe("NOTIFY_MESSAGING_CHANNEL action", () => {
+    it("preserves messagingChannelId", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.NOTIFY_MESSAGING_CHANNEL,
+        messagingChannelId: "channel-1",
+        content: "should be cleared",
+      });
+
+      expect(result.messagingChannelId).toBe("channel-1");
+      expect(result.content).toBeNull();
+    });
+  });
+
+  describe("CALL_WEBHOOK action", () => {
+    it("preserves url field", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.CALL_WEBHOOK,
+        url: "https://example.com/webhook",
+      });
+      expect(result.url).toBe("https://example.com/webhook");
+    });
+
+    it("nullifies unrelated fields", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.CALL_WEBHOOK,
+        url: "https://example.com",
+        to: "should@be.null",
+        content: "should be null",
+      });
+      expect(result.url).toBe("https://example.com");
+      expect(result.to).toBeNull();
+      expect(result.content).toBeNull();
+    });
+  });
+
+  describe("delayInMinutes", () => {
+    it("preserves delayInMinutes when provided", () => {
+      const result = sanitizeActionFields({
+        type: ActionType.ARCHIVE,
+        delayInMinutes: 60,
+      });
+      expect(result.delayInMinutes).toBe(60);
+    });
+
+    it("sets delayInMinutes to null when not provided", () => {
+      const result = sanitizeActionFields({ type: ActionType.ARCHIVE });
+      expect(result.delayInMinutes).toBeNull();
+    });
+  });
+});

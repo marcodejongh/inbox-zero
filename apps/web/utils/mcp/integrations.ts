@@ -1,14 +1,25 @@
+import type { IntegrationProviderId } from "@/utils/mcp/providers/types";
+
 type McpIntegrationConfig = {
   name: string;
   serverUrl?: string;
+  // Hosted by a provider instead of a direct MCP server; `app` is the
+  // provider's identifier for it
+  provider?: { id: IntegrationProviderId; app: string };
   authType: "oauth" | "api-token";
   scopes: string[];
+  skipResourceParam?: boolean; // Some OAuth servers don't support RFC 8707 resource parameter
+  filterWriteTools?: boolean; // Require read-only annotations and names; new tools start disabled
+  ruleActionWriteTools?: string[];
 };
 
 export const MCP_INTEGRATIONS: Record<
   string,
   McpIntegrationConfig & {
     displayName: string;
+    shortName?: string; // Short name for display in compact contexts (e.g. "Connected to X")
+    description?: string; // Only for rows whose name alone does not say what they connect
+    url: string; // Domain URL for favicon display
     allowedTools?: string[];
     comingSoon?: boolean;
     oauthConfig?: {
@@ -21,6 +32,7 @@ export const MCP_INTEGRATIONS: Record<
   notion: {
     name: "notion",
     displayName: "Notion",
+    url: "notion.com",
     serverUrl: "https://mcp.notion.com/mcp",
     authType: "oauth",
     scopes: ["read"],
@@ -30,9 +42,9 @@ export const MCP_INTEGRATIONS: Record<
   stripe: {
     name: "stripe",
     displayName: "Stripe",
+    url: "stripe.com",
     serverUrl: "https://mcp.stripe.com",
     authType: "oauth", // must request whitelisting of /api/mcp/stripe/callback from Stripe. localhost is whitelisted already.
-    // authType: "api-token", // alternatively, use an API token.
     scopes: [],
     allowedTools: [
       "list_customers",
@@ -46,9 +58,71 @@ export const MCP_INTEGRATIONS: Record<
     ],
     // OAuth endpoints auto-discovered via RFC 8414/9728
   },
+  linear: {
+    name: "linear",
+    displayName: "Linear",
+    url: "linear.app",
+    // Dedicated read-only endpoint; the server only exposes read tools here
+    serverUrl: "https://mcp.linear.app/mcp/readonly",
+    authType: "oauth",
+    scopes: ["read"],
+    // OAuth endpoints auto-discovered via RFC 8414/9728
+  },
+  attio: {
+    name: "attio",
+    displayName: "Attio",
+    url: "attio.com",
+    serverUrl: "https://mcp.attio.com/mcp",
+    authType: "oauth",
+    // offline_access is required for a refresh token; without it the
+    // connection dies when the access token expires
+    scopes: ["openid", "offline_access", "mcp"],
+    allowedTools: [
+      "search-records",
+      "list-records",
+      "get-records-by-ids",
+      "list-attribute-definitions",
+      "list-lists",
+      "list-list-attribute-definitions",
+      "list-records-in-list",
+      "search-notes-by-metadata",
+      "semantic-search-notes",
+      "get-note-body",
+      "list-tasks",
+      "search-meetings",
+      // Write tools intentionally excluded: create-record, upsert-record,
+      // update-record, merge-records, add-record-to-list, create-note, ...
+    ],
+    // OAuth endpoints auto-discovered via RFC 8414/9728
+  },
+  intercom: {
+    name: "intercom",
+    displayName: "Intercom",
+    url: "intercom.com",
+    // US-hosted workspaces only; EU workspaces use mcp.eu.intercom.com (not supported yet)
+    serverUrl: "https://mcp.intercom.com/mcp",
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "search",
+      "fetch",
+      "search_conversations",
+      "get_conversation",
+      "search_contacts",
+      "get_contact",
+      "list_companies",
+      "get_company",
+      "list_articles",
+      "search_articles",
+      "get_article",
+      // Write tools intentionally excluded: create_article, update_article
+    ],
+    // OAuth endpoints auto-discovered via RFC 8414/9728
+  },
   monday: {
     name: "monday",
     displayName: "Monday.com",
+    url: "monday.com",
     serverUrl: "https://mcp.monday.com/mcp",
     authType: "oauth",
     scopes: ["read", "write"],
@@ -84,95 +158,193 @@ export const MCP_INTEGRATIONS: Record<
       // "create_widget",
     ],
     // OAuth endpoints auto-discovered via RFC 8414
-    comingSoon: false,
+  },
+  todoist: {
+    name: "todoist",
+    displayName: "Todoist",
+    url: "todoist.com",
+    serverUrl: "https://ai.todoist.net/mcp",
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [],
+    ruleActionWriteTools: ["add-tasks"],
   },
   hubspot: {
     name: "hubspot",
     displayName: "HubSpot",
-    serverUrl: "https://mcp.hubspot.com/",
+    url: "hubspot.com",
+    provider: { id: "composio", app: "hubspot" },
     authType: "oauth",
-    scopes: [
-      // "crm.objects.contacts.read",
-      // "crm.objects.companies.read",
-      // "crm.objects.deals.read",
-      // "crm.objects.carts.read",
-      // "crm.objects.products.read",
-      // "crm.objects.orders.read",
-      // "crm.objects.line_items.read",
-      // "crm.objects.invoices.read",
-      // "crm.objects.quotes.read",
-      // "crm.objects.subscriptions.read",
-      // "crm.objects.users.read",
-      // "crm.objects.owners.read",
-      "content",
-      "crm.objects.companies.read",
-      "crm.objects.companies.write",
-      "crm.objects.contacts.read",
-      "crm.objects.contacts.write",
-      "crm.objects.deals.write",
-      "forms",
-      "oauth",
-      "timeline",
+    scopes: [],
+    allowedTools: [
+      "HUBSPOT_SEARCH_CONTACTS_BY_CRITERIA",
+      "HUBSPOT_SEARCH_COMPANIES",
+      "HUBSPOT_SEARCH_DEALS",
+      "HUBSPOT_SEARCH_TICKETS",
+      "HUBSPOT_READ_CONTACT",
+      "HUBSPOT_GET_COMPANY",
+      "HUBSPOT_GET_DEAL",
+      "HUBSPOT_GET_TICKET",
     ],
-    oauthConfig: {
-      // authorization_endpoint: "https://mcp.hubspot.com/oauth/authorize/user",
-      authorization_endpoint: "https://app.hubspot.com/oauth/authorize",
-      token_endpoint: "https://mcp.hubspot.com/oauth/v1/token",
-    },
-    comingSoon: true,
   },
-  // clickup: {
-  //   name: "clickup",
-  //   displayName: "ClickUp",
-  //   serverUrl: "",
-  //   authType: "oauth",
-  //   scopes: [],
-  //   allowedTools: [],
-  //   oauthConfig: {
-  //     authorization_endpoint: "",
-  //     token_endpoint: "",
-  //   },
-  //   comingSoon: true,
-  // },
-  // airtable: {
-  //   name: "airtable",
-  //   displayName: "Airtable",
-  //   serverUrl: "",
-  //   authType: "oauth",
-  //   scopes: [],
-  //   allowedTools: [],
-  //   oauthConfig: {
-  //     authorization_endpoint: "",
-  //     token_endpoint: "",
-  //   },
-  //   comingSoon: true,
-  // },
-  // salesforce: {
-  //   name: "salesforce",
-  //   displayName: "Salesforce",
-  //   serverUrl: "",
-  //   authType: "oauth",
-  //   scopes: [],
-  //   allowedTools: [],
-  //   oauthConfig: {
-  //     authorization_endpoint: "",
-  //     token_endpoint: "",
-  //   },
-  //   comingSoon: true,
-  // },
-  // todoist: {
-  //   name: "todoist",
-  //   displayName: "Todoist",
-  //   serverUrl: "",
-  //   authType: "oauth",
-  //   scopes: [],
-  //   allowedTools: [],
-  //   oauthConfig: {
-  //     authorization_endpoint: "",
-  //     token_endpoint: "",
-  //   },
-  //   comingSoon: true,
-  // },
+  salesforce: {
+    name: "salesforce",
+    displayName: "Salesforce",
+    url: "salesforce.com",
+    provider: { id: "composio", app: "salesforce" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "SALESFORCE_SEARCH_CONTACTS",
+      "SALESFORCE_SEARCH_ACCOUNTS",
+      "SALESFORCE_SEARCH_LEADS",
+      "SALESFORCE_SEARCH_OPPORTUNITIES",
+      "SALESFORCE_GET_CONTACT",
+      "SALESFORCE_GET_ACCOUNT",
+      "SALESFORCE_GET_OPPORTUNITY",
+    ],
+  },
+  airtable: {
+    name: "airtable",
+    displayName: "Airtable",
+    url: "airtable.com",
+    provider: { id: "composio", app: "airtable" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "AIRTABLE_LIST_BASES",
+      "AIRTABLE_GET_BASE_SCHEMA",
+      "AIRTABLE_LIST_RECORDS",
+      "AIRTABLE_GET_RECORD",
+    ],
+  },
+  googlesheets: {
+    name: "googlesheets",
+    displayName: "Google Sheets",
+    url: "sheets.google.com",
+    provider: { id: "composio", app: "googlesheets" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "GOOGLESHEETS_SEARCH_SPREADSHEETS",
+      "GOOGLESHEETS_GET_SPREADSHEET_INFO",
+      "GOOGLESHEETS_LOOKUP_SPREADSHEET_ROW",
+      "GOOGLESHEETS_BATCH_GET",
+    ],
+  },
+  slack: {
+    name: "slack",
+    displayName: "Slack",
+    url: "slack.com",
+    provider: { id: "composio", app: "slack" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "SLACK_SEARCH_MESSAGES",
+      "SLACK_FETCH_MESSAGE_THREAD_FROM_A_CONVERSATION",
+      "SLACK_FIND_USER_BY_EMAIL_ADDRESS",
+      "SLACK_FIND_CHANNELS",
+    ],
+  },
+  asana: {
+    name: "asana",
+    displayName: "Asana",
+    url: "asana.com",
+    provider: { id: "composio", app: "asana" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "ASANA_SEARCH_TASKS_IN_WORKSPACE",
+      "ASANA_GET_MULTIPLE_WORKSPACES",
+      "ASANA_GET_A_TASK",
+      "ASANA_GET_TASKS_FROM_A_PROJECT",
+    ],
+  },
+  clickup: {
+    name: "clickup",
+    displayName: "ClickUp",
+    url: "clickup.com",
+    provider: { id: "composio", app: "clickup" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "CLICKUP_GET_FILTERED_TEAM_TASKS",
+      "CLICKUP_GET_TASK",
+      "CLICKUP_GET_TASK_COMMENTS",
+    ],
+  },
+  jira: {
+    name: "jira",
+    displayName: "Jira",
+    url: "atlassian.com",
+    provider: { id: "composio", app: "jira" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "JIRA_SEARCH_ISSUES",
+      "JIRA_GET_ISSUE",
+      "JIRA_LIST_ISSUE_COMMENTS",
+      "JIRA_GET_ALL_PROJECTS",
+    ],
+  },
+  zendesk: {
+    name: "zendesk",
+    displayName: "Zendesk",
+    url: "zendesk.com",
+    provider: { id: "composio", app: "zendesk" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "ZENDESK_SEARCH_ZENDESK",
+      "ZENDESK_SEARCH_ZENDESK_USERS",
+      "ZENDESK_GET_USERS_REQUESTED_TICKETS",
+      "ZENDESK_GET_ZENDESK_TICKET_BY_ID",
+      "ZENDESK_GET_TICKET_COMMENTS",
+      "ZENDESK_GET_ZENDESK_ORGANIZATION",
+    ],
+  },
+  quickbooks: {
+    name: "quickbooks",
+    displayName: "QuickBooks",
+    url: "quickbooks.intuit.com",
+    provider: { id: "composio", app: "quickbooks" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "QUICKBOOKS_QUERY_CUSTOMERS",
+      "QUICKBOOKS_READ_CUSTOMER",
+      "QUICKBOOKS_QUERY_INVOICES",
+      "QUICKBOOKS_CUSTOMER_BALANCE_REPORT",
+    ],
+  },
+  calendly: {
+    name: "calendly",
+    displayName: "Calendly",
+    url: "calendly.com",
+    provider: { id: "composio", app: "calendly" },
+    authType: "oauth",
+    scopes: [],
+    allowedTools: [
+      "CALENDLY_LIST_SCHEDULED_EVENTS",
+      "CALENDLY_GET_EVENT",
+      "CALENDLY_LIST_EVENT_INVITEES",
+      "CALENDLY_GET_EVENT_INVITEE",
+    ],
+  },
+  pipedream: {
+    name: "pipedream",
+    displayName: "HubSpot, Slack, Airtable, Todoist, and more (via Pipedream)",
+    shortName: "Pipedream",
+    description: "Hundreds more apps",
+    url: "pipedream.com",
+    serverUrl: "https://mcp.pipedream.net/v2",
+    authType: "oauth",
+    scopes: ["mcp", "offline_access"],
+    skipResourceParam: true, // Pipedream doesn't support RFC 8707 resource parameter
+    filterWriteTools: true,
+    // No fixed allowlist because Pipedream's catalog is dynamic
+    // OAuth endpoints auto-discovered via RFC 8414
+  },
 };
 
 export type IntegrationKey = keyof typeof MCP_INTEGRATIONS;
@@ -187,16 +359,11 @@ export function getIntegration(
   return integration;
 }
 
-export function getStaticCredentials(
-  integration: IntegrationKey,
-): { clientId?: string; clientSecret?: string } | undefined {
-  switch (integration) {
-    // case "hubspot":
-    //   return {
-    //     clientId: env.HUBSPOT_MCP_CLIENT_ID,
-    //     clientSecret: env.HUBSPOT_MCP_CLIENT_SECRET,
-    //   };
-    default:
-      return undefined;
-  }
+// For untrusted names (URL params, stored connection names). getIntegration throws instead.
+export function findIntegration(
+  name: string,
+): (typeof MCP_INTEGRATIONS)[IntegrationKey] | undefined {
+  return Object.hasOwn(MCP_INTEGRATIONS, name)
+    ? MCP_INTEGRATIONS[name]
+    : undefined;
 }

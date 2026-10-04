@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { env } from "@/env";
 import prisma from "@/utils/prisma";
+import { auth } from "@/utils/auth";
+import { createAccountLinkingRedirect } from "@/utils/oauth/account-linking-redirect";
 import {
   getLinkingOAuth2Config,
   FASTMAIL_OAUTH_TOKEN_URL,
@@ -9,7 +11,10 @@ import {
 import { FASTMAIL_LINKING_STATE_COOKIE_NAME } from "@/utils/fastmail/constants";
 import { withError } from "@/utils/middleware";
 import { validateOAuthCallback } from "@/utils/oauth/callback-validation";
-import { handleAccountLinking } from "@/utils/oauth/account-linking";
+import {
+  getMailboxLinkingBlockedRedirect,
+  handleAccountLinking,
+} from "@/utils/oauth/account-linking";
 import { mergeAccount } from "@/utils/user/merge-account";
 import { handleOAuthCallbackError } from "@/utils/oauth/error-handler";
 import {
@@ -53,6 +58,19 @@ export const GET = withError("fastmail/linking/callback", async (request) => {
   }
 
   const { targetUserId, code } = validation;
+  const actorSession = await auth(request.headers);
+  if (!actorSession?.user || actorSession.user.id !== targetUserId) {
+    return createAccountLinkingRedirect({
+      query: { error: "invalid_state" },
+      stateCookieName: FASTMAIL_LINKING_STATE_COOKIE_NAME,
+    });
+  }
+  const blockedRedirect = getMailboxLinkingBlockedRedirect({
+    session: actorSession,
+    logger,
+    stateCookieName: FASTMAIL_LINKING_STATE_COOKIE_NAME,
+  });
+  if (blockedRedirect) return blockedRedirect;
 
   const cachedResult = await getOAuthCodeResult(code);
   if (cachedResult) {
@@ -245,7 +263,10 @@ export const GET = withError("fastmail/linking/callback", async (request) => {
       return successResponse;
     }
 
-    if (linkingResult.type === "update_tokens") {
+    if (
+      linkingResult.type === "update_tokens" ||
+      linkingResult.type === "update_existing_account"
+    ) {
       logger.info("Updating tokens for existing Fastmail account", {
         email: providerEmail,
         targetUserId,
@@ -255,6 +276,7 @@ export const GET = withError("fastmail/linking/callback", async (request) => {
       await prisma.account.update({
         where: { id: linkingResult.existingAccountId },
         data: {
+          providerAccountId,
           access_token: tokens.access_token,
           refresh_token: tokens.refresh_token,
           expires_at: tokens.expires_in
@@ -321,10 +343,8 @@ export const GET = withError("fastmail/linking/callback", async (request) => {
   } catch (error) {
     await clearOAuthCode(code);
 
-    const errorUrl = new URL("/accounts", env.NEXT_PUBLIC_BASE_URL);
     return handleOAuthCallbackError({
       error,
-      redirectUrl: errorUrl,
       stateCookieName: FASTMAIL_LINKING_STATE_COOKIE_NAME,
       logger,
     });

@@ -1,5 +1,12 @@
+import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import prisma from "@/utils/prisma";
+import { getEmailProviderRateLimitState } from "@/utils/email/rate-limit";
+import {
+  LAST_EMAIL_ACCOUNT_COOKIE,
+  ownedLastEmailAccountId,
+  parseLastEmailAccountCookieValue,
+} from "@/utils/cookies";
 import { withAuth } from "@/utils/middleware";
 
 export type GetEmailAccountsResponse = Awaited<
@@ -7,6 +14,12 @@ export type GetEmailAccountsResponse = Awaited<
 >;
 
 async function getEmailAccounts({ userId }: { userId: string }) {
+  const cookieStore = await cookies();
+  const lastEmailAccountCookieId = parseLastEmailAccountCookieValue({
+    userId,
+    cookieValue: cookieStore.get(LAST_EMAIL_ACCOUNT_COOKIE)?.value,
+  });
+
   const emailAccounts = await prisma.emailAccount.findMany({
     where: { userId },
     select: {
@@ -15,8 +28,10 @@ async function getEmailAccounts({ userId }: { userId: string }) {
       accountId: true,
       name: true,
       image: true,
+      includeInAllAccounts: true,
       account: {
         select: {
+          disconnectedAt: true,
           provider: true,
         },
       },
@@ -33,7 +48,30 @@ async function getEmailAccounts({ userId }: { userId: string }) {
     },
   });
 
-  const accountsWithNames = emailAccounts.map((account) => {
+  const accountsWithRateLimits = await Promise.all(
+    emailAccounts.map(async (account) => {
+      const providerRateLimit = await getEmailProviderRateLimitState({
+        emailAccountId: account.id,
+      });
+
+      return {
+        ...account,
+        account: {
+          ...account.account,
+          disconnectedAt: account.account.disconnectedAt?.toISOString() ?? null,
+        },
+        providerRateLimit: providerRateLimit
+          ? {
+              provider: providerRateLimit.provider,
+              retryAt: providerRateLimit.retryAt.toISOString(),
+              source: providerRateLimit.source,
+            }
+          : null,
+      };
+    }),
+  );
+
+  const accountsWithNames = accountsWithRateLimits.map((account) => {
     // Old accounts don't have a name attached, so use the name from the user
     if (account.user.email === account.email) {
       return {
@@ -47,7 +85,13 @@ async function getEmailAccounts({ userId }: { userId: string }) {
     return { ...account, isPrimary: false };
   });
 
-  return { emailAccounts: accountsWithNames };
+  return {
+    emailAccounts: accountsWithNames,
+    lastEmailAccountId: ownedLastEmailAccountId(
+      lastEmailAccountCookieId,
+      emailAccounts.map((account) => account.id),
+    ),
+  };
 }
 
 export const GET = withAuth("user/email-accounts", async (request) => {

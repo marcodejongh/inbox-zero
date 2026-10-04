@@ -71,23 +71,83 @@ describe("Outlook email formatting", () => {
       message,
     });
 
-    // Verify Aptos font is present
-    expect(html).toContain(
-      "font-family: Aptos, Calibri, Arial, Helvetica, sans-serif",
+    expect(html).toBe(
+      `<div dir="ltr" style="font-family: Aptos, Calibri, Arial, Helvetica, sans-serif; font-size: 12pt; color: rgb(0, 0, 0);">This is my reply</div>
+<br>
+<div style="border-top: 1px solid #e1e1e1; padding-top: 10px; margin-top: 10px;">
+  <div dir="ltr" style="font-size: 11pt; color: rgb(0, 0, 0);">On Thu, 6 Feb 2025 at 21:23, John Doe &lt;john@example.com&gt; wrote:<br></div>
+  <div style="margin-top: 10px;">
+    <div>Original message content</div>
+  </div>
+</div>`.trim(),
     );
-    expect(html).toContain("font-size: 11pt");
-    expect(html).toContain("color: rgb(0, 0, 0)");
+  });
 
-    // Verify content is present
-    expect(html).toContain("This is my reply");
+  it("preserves source newlines inside an HTML signature", () => {
+    const textContent = `Thanks for your email.
+
+<table cellspacing="0" cellpadding="0">
+  <tr>
+    <td>
+      <img src="https://example.com/logo.jpg" width="262" height="109" alt="Company logo" />
+    </td>
+    <td>
+      <div>Employee Name</div>
+      <div>Job Title</div>
+    </td>
+  </tr>
+</table>`;
+    const message: Pick<ParsedMessage, "headers" | "textPlain" | "textHtml"> = {
+      headers: {
+        date: "Thu, 6 Feb 2025 23:23:47 +0200",
+        from: "John Doe <john@example.com>",
+        subject: "Test Email",
+        to: "jane@example.com",
+        "message-id": "<123@example.com>",
+      },
+      textPlain: "Original message content",
+      textHtml: "<div>Original message content</div>",
+    };
+
+    const { html } = createOutlookReplyContent({
+      textContent,
+      message,
+    });
+
     expect(html).toContain(
-      "On Thu, 6 Feb 2025 at 21:23, John Doe <john@example.com> wrote:",
+      'Thanks for your email.<br><br><table cellspacing="0" cellpadding="0">',
     );
-    expect(html).toContain("<div>Original message content</div>");
+    expect(html).toContain(
+      '<img src="https://example.com/logo.jpg" width="262" height="109" alt="Company logo">',
+    );
+    expect(html).not.toMatch(/<table[^>]*><br>/);
+    expect(html).not.toMatch(/<tr><br>/);
+    expect(html).not.toMatch(/<td><br>/);
+  });
 
-    // Verify it does NOT use Gmail-specific classes
-    expect(html).not.toContain("gmail_quote");
-    expect(html).not.toContain("gmail_attr");
+  it("keeps escaped markup in text content escaped", () => {
+    const message: Pick<ParsedMessage, "headers" | "textPlain" | "textHtml"> = {
+      headers: {
+        date: "Thu, 6 Feb 2025 23:23:47 +0200",
+        from: "John Doe <john@example.com>",
+        subject: "Test Email",
+        to: "jane@example.com",
+        "message-id": "<123@example.com>",
+      },
+      textPlain: "Original message content",
+      textHtml: "<div>Original message content</div>",
+    };
+
+    const { html } = createOutlookReplyContent({
+      textContent:
+        'Use &lt;script&gt;alert("unsafe")&lt;/script&gt;\nNext line',
+      message,
+    });
+
+    expect(html).toContain(
+      'Use &lt;script&gt;alert("unsafe")&lt;/script&gt;<br>Next line',
+    );
+    expect(html).not.toContain("<script>");
   });
 
   it("formats reply email correctly for RTL content with Outlook styling", () => {
@@ -110,17 +170,16 @@ describe("Outlook email formatting", () => {
       message,
     });
 
-    // Verify RTL direction is set
-    expect(html).toContain('dir="rtl"');
-
-    // Verify Aptos font is still present
-    expect(html).toContain(
-      "font-family: Aptos, Calibri, Arial, Helvetica, sans-serif",
+    expect(html).toBe(
+      `<div dir="rtl" style="font-family: Aptos, Calibri, Arial, Helvetica, sans-serif; font-size: 12pt; color: rgb(0, 0, 0);">שלום, מה שלומך?</div>
+<br>
+<div style="border-top: 1px solid #e1e1e1; padding-top: 10px; margin-top: 10px;">
+  <div dir="rtl" style="font-size: 11pt; color: rgb(0, 0, 0);">On Thu, 6 Feb 2025 at 21:23, David Cohen &lt;david@example.com&gt; wrote:<br></div>
+  <div style="margin-top: 10px;">
+    <div>תוכן ההודעה המקורית</div>
+  </div>
+</div>`.trim(),
     );
-
-    // Verify Hebrew content
-    expect(html).toContain("שלום, מה שלומך?");
-    expect(html).toContain("<div>תוכן ההודעה המקורית</div>");
   });
 
   it("generates proper plain text format", () => {
@@ -151,4 +210,43 @@ On Thu, 6 Feb 2025 at 21:23, John Doe <john@example.com> wrote:
 > Original message content`,
     );
   });
+  it("escapes plain-text reply content while keeping line breaks", () => {
+    const { html } = createOutlookReplyContent({
+      textContent: "Is a < b & c?\nNext line",
+      message: getMessage(),
+    });
+
+    expect(html).toContain("Is a &lt; b &amp; c?<br>Next line");
+  });
+
+  it("escapes quoted plain text when the original has no HTML body", () => {
+    const { html, text } = createOutlookReplyContent({
+      textContent: "Thanks",
+      message: getMessage({
+        textPlain: "Contact <name@example.com>\nif a < b",
+        textHtml: undefined,
+      }),
+    });
+
+    expect(html).toContain("Contact &lt;name@example.com&gt;<br>if a &lt; b");
+    expect(html).not.toContain("<name@example.com>");
+    expect(text).toContain("> Contact <name@example.com>\n> if a < b");
+  });
 });
+
+function getMessage(
+  overrides: Partial<Pick<ParsedMessage, "textPlain" | "textHtml">> = {},
+): Pick<ParsedMessage, "headers" | "textPlain" | "textHtml"> {
+  return {
+    headers: {
+      date: "Thu, 6 Feb 2025 23:23:47 +0200",
+      from: "John Doe <john@example.com>",
+      subject: "Test Email",
+      to: "jane@example.com",
+      "message-id": "<123@example.com>",
+    },
+    textPlain: "Original message content",
+    textHtml: "<div>Original message content</div>",
+    ...overrides,
+  };
+}

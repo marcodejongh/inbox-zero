@@ -8,8 +8,9 @@ import {
 } from "./conversation-status-config";
 import { getRuleLabel } from "@/utils/rule/consts";
 import { labelMessageAndSync } from "@/utils/label.server";
+import { logReplyTrackerError } from "./error-logging";
 
-type LabelIds = Record<
+export type LabelIds = Record<
   ConversationStatus,
   {
     labelId: string | null;
@@ -33,11 +34,13 @@ export async function removeConflictingThreadStatusLabels({
   dbLabels?: LabelIds;
   providerLabels?: EmailLabel[];
   logger: Logger;
-}): Promise<void> {
-  const [dbLabels, providerLabels] = await Promise.all([
-    providedDbLabels ?? getLabelsFromDb(emailAccountId),
-    providedProviderLabels ?? provider.getLabels(),
-  ]);
+}): Promise<boolean> {
+  const [dbLabels, providerLabels] = await fetchThreadStatusLabels({
+    emailAccountId,
+    provider,
+    dbLabels: providedDbLabels,
+    providerLabels: providedProviderLabels,
+  });
 
   const removeLabelIds: string[] = [];
   const providerLabelIds = new Set(providerLabels.map((l) => l.id));
@@ -47,18 +50,28 @@ export async function removeConflictingThreadStatusLabels({
 
     let label = dbLabels[type as ConversationStatus];
 
-    // If DB has a label ID, verify it still exists in the provider
-    // If not, fall back to looking up by name (label may have been recreated)
+    // provider.getLabels() may omit hidden Gmail labels, so verify by ID before
+    // treating a DB label as stale.
     if (label.labelId && !providerLabelIds.has(label.labelId)) {
-      logger.warn("DB label ID not found in provider, looking up by name", {
-        type,
-        staleId: label.labelId,
-      });
-      label = { labelId: null, label: null };
+      const labelById = await provider.getLabelById(label.labelId);
+      if (labelById?.id) {
+        label = {
+          labelId: labelById.id,
+          label: labelById.name,
+        };
+      } else {
+        logger.warn("DB label ID not found in provider, looking up by name", {
+          type,
+          staleId: label.labelId,
+        });
+        label = { labelId: null, label: null };
+      }
     }
 
     if (!label.labelId && !label.label) {
-      const l = providerLabels.find((l) => l.name === getRuleLabel(type));
+      const l =
+        providerLabels.find((l) => l.name === getRuleLabel(type)) ||
+        (await provider.getLabelByName(getRuleLabel(type)));
       if (!l?.id) {
         continue;
       }
@@ -75,19 +88,30 @@ export async function removeConflictingThreadStatusLabels({
 
   if (removeLabelIds.length === 0) {
     logger.info("No conflicting labels to remove");
-    return;
+    return true;
   }
 
-  await provider.removeThreadLabels(threadId, removeLabelIds).catch((error) =>
-    logger.error("Failed to remove conflicting thread labels", {
-      removeLabelIds,
+  try {
+    await provider.removeThreadLabels(threadId, removeLabelIds);
+  } catch (error) {
+    await logReplyTrackerError({
+      logger,
+      emailAccountId,
+      scope: "label-helpers",
+      message: "Failed to remove conflicting thread labels",
+      operation: "remove-conflicting-thread-status-labels",
       error,
-    }),
-  );
+      context: {
+        removeLabelCount: removeLabelIds.length,
+      },
+    });
+    return false;
+  }
 
   logger.info("Removed conflicting thread status labels", {
     removedCount: removeLabelIds.length,
   });
+  return true;
 }
 
 /**
@@ -112,12 +136,12 @@ export async function applyThreadStatusLabel({
   provider: EmailProvider;
   logger: Logger;
 }): Promise<void> {
-  const [dbLabels, providerLabels] = await Promise.all([
-    getLabelsFromDb(emailAccountId),
-    provider.getLabels(),
-  ]);
+  const [dbLabels, providerLabels] = await fetchThreadStatusLabels({
+    emailAccountId,
+    provider,
+  });
 
-  const addLabel = async () => {
+  const addLabel = async (): Promise<boolean> => {
     let targetLabel = dbLabels[systemType];
 
     // If we don't have labelId from DB, fetch/create it
@@ -139,26 +163,37 @@ export async function applyThreadStatusLabel({
         systemType,
         labelName: getRuleLabel(systemType),
       });
-      return;
+      return false;
     }
 
-    return labelMessageAndSync({
-      provider,
-      messageId,
-      labelId: targetLabel.labelId,
-      labelName: targetLabel.label,
-      emailAccountId,
-      logger,
-    }).catch((error) =>
-      logger.error("Failed to apply thread status label", {
+    try {
+      await labelMessageAndSync({
+        provider,
+        messageId,
         labelId: targetLabel.labelId,
         labelName: targetLabel.label,
+        emailAccountId,
+        logger,
+      });
+      return true;
+    } catch (error) {
+      await logReplyTrackerError({
+        logger,
+        emailAccountId,
+        scope: "label-helpers",
+        message: "Failed to apply thread status label",
+        operation: "apply-thread-status-label",
         error,
-      }),
-    );
+        context: {
+          labelId: targetLabel.labelId,
+          labelName: targetLabel.label,
+        },
+      });
+      return false;
+    }
   };
 
-  await Promise.all([
+  const [removedConflicts, addedTargetLabel] = await Promise.all([
     removeConflictingThreadStatusLabels({
       emailAccountId,
       threadId,
@@ -171,10 +206,20 @@ export async function applyThreadStatusLabel({
     addLabel(),
   ]);
 
+  if (!removedConflicts || !addedTargetLabel) {
+    logger.warn("Thread status label application completed with errors", {
+      removedConflicts,
+      addedTargetLabel,
+    });
+    return;
+  }
+
   logger.info("Thread status label applied successfully");
 }
 
-async function getLabelsFromDb(emailAccountId: string): Promise<LabelIds> {
+export async function getLabelsFromDb(
+  emailAccountId: string,
+): Promise<LabelIds> {
   const rules = await prisma.rule.findMany({
     where: {
       emailAccountId,
@@ -208,4 +253,21 @@ async function getLabelsFromDb(emailAccountId: string): Promise<LabelIds> {
   }
 
   return dbLabels;
+}
+
+async function fetchThreadStatusLabels({
+  emailAccountId,
+  provider,
+  dbLabels,
+  providerLabels,
+}: {
+  emailAccountId: string;
+  provider: EmailProvider;
+  dbLabels?: LabelIds;
+  providerLabels?: EmailLabel[];
+}): Promise<[LabelIds, EmailLabel[]]> {
+  return Promise.all([
+    dbLabels ?? getLabelsFromDb(emailAccountId),
+    providerLabels ?? provider.getLabels({ includeHidden: true }),
+  ]);
 }

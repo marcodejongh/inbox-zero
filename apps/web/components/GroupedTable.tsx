@@ -39,8 +39,8 @@ import {
 import { toastError, toastSuccess } from "@/components/Toast";
 import { Button } from "@/components/ui/button";
 import {
-  addToArchiveSenderQueue,
   useArchiveSenderStatus,
+  useArchiveSenderQueueActions,
 } from "@/store/archive-sender-queue";
 import { getEmailUrl, getGmailSearchUrl } from "@/utils/url";
 import { MessageText } from "@/components/Typography";
@@ -60,6 +60,7 @@ const COLUMNS = 4;
 
 type EmailGroup = {
   address: string;
+  name?: string | null;
   category: CategoryWithRules | null;
   meta?: { width?: string };
 };
@@ -72,16 +73,16 @@ export function GroupedTable({
   categories: CategoryWithRules[];
 }) {
   const { emailAccountId, userEmail } = useAccount();
+  const { queueArchiveSenders } = useArchiveSenderQueueActions(emailAccountId);
 
-  const categoryMap = useMemo(() => {
-    return categories.reduce<Record<string, CategoryWithRules>>(
-      (acc, category) => {
+  const categoryMap = useMemo(
+    () =>
+      categories.reduce<Record<string, CategoryWithRules>>((acc, category) => {
         acc[category.name] = category;
         return acc;
-      },
-      {},
-    );
-  }, [categories]);
+      }, {}),
+    [categories],
+  );
 
   const groupedEmails = useMemo(() => {
     const grouped = groupBy(
@@ -109,8 +110,8 @@ export function GroupedTable({
     () => [
       {
         id: "expander",
-        cell: ({ row }) => {
-          return row.getCanExpand() ? (
+        cell: ({ row }) =>
+          row.getCanExpand() ? (
             <button
               type="button"
               onClick={row.getToggleExpandedHandler()}
@@ -123,8 +124,7 @@ export function GroupedTable({
                 )}
               />
             </button>
-          ) : null;
-        },
+          ) : null,
         meta: { size: "20px" },
       },
       {
@@ -146,9 +146,12 @@ export function GroupedTable({
       },
       {
         accessorKey: "preview",
-        cell: ({ row }) => {
-          return <ArchiveStatusCell sender={row.original.address} />;
-        },
+        cell: ({ row }) => (
+          <ArchiveStatusCell
+            emailAccountId={emailAccountId}
+            sender={row.original.address}
+          />
+        ),
       },
       {
         accessorKey: "date",
@@ -204,12 +207,9 @@ export function GroupedTable({
             const isCategoryExpanded = expanded?.includes(categoryName);
 
             const onArchiveAll = async () => {
-              for (const sender of senders) {
-                await addToArchiveSenderQueue({
-                  sender: sender.address,
-                  emailAccountId,
-                });
-              }
+              await queueArchiveSenders({
+                senders: senders.map((sender) => sender.address),
+              });
             };
 
             const onEditCategory = () => {
@@ -299,8 +299,8 @@ export function SendersTable({
     () => [
       {
         id: "expander",
-        cell: ({ row }) => {
-          return row.getCanExpand() ? (
+        cell: ({ row }) =>
+          row.getCanExpand() ? (
             <button
               type="button"
               onClick={row.getToggleExpandedHandler()}
@@ -313,8 +313,7 @@ export function SendersTable({
                 )}
               />
             </button>
-          ) : null;
-        },
+          ) : null,
         meta: { size: "20px" },
       },
       {
@@ -323,6 +322,7 @@ export function SendersTable({
           <div className="flex items-center justify-between">
             <EmailCell
               emailAddress={row.original.address}
+              name={row.original.name}
               className="flex gap-2"
             />
           </div>
@@ -333,16 +333,14 @@ export function SendersTable({
       },
       {
         accessorKey: "category",
-        cell: ({ row }) => {
-          return (
-            <CategorySelect
-              emailAccountId={emailAccountId}
-              sender={row.original.address}
-              senderCategory={row.original.category}
-              categories={categories}
-            />
-          );
-        },
+        cell: ({ row }) => (
+          <CategorySelect
+            emailAccountId={emailAccountId}
+            sender={row.original.address}
+            senderCategory={row.original.category}
+            categories={categories}
+          />
+        ),
       },
     ],
     [categories, emailAccountId],
@@ -460,7 +458,9 @@ function SenderRows({
             <TableCell
               key={cell.id}
               style={{
-                width: (cell.column.columnDef.meta as any)?.size || "auto",
+                width:
+                  (cell.column.columnDef.meta as { size?: string } | undefined)
+                    ?.size || "auto",
               }}
               className="py-1"
             >
@@ -551,28 +551,34 @@ function ExpandedRows({
   );
 }
 
-function ArchiveStatusCell({ sender }: { sender: string }) {
-  const status = useArchiveSenderStatus(sender);
+function ArchiveStatusCell({
+  emailAccountId,
+  sender,
+}: {
+  emailAccountId: string;
+  sender: string;
+}) {
+  const status = useArchiveSenderStatus(emailAccountId, sender);
 
   switch (status?.status) {
-    case "completed":
-      if (status.threadsTotal) {
-        return (
-          <span className="text-green-500">
-            Archived {status.threadsTotal} emails!
-          </span>
-        );
-      }
-      return <span className="text-muted-foreground">Archived</span>;
+    case "pending":
+      return <span className="text-muted-foreground">Queued</span>;
     case "processing":
       return (
         <span className="text-blue-500">
-          Archiving... {status.threadsTotal - status.threadIds.length} /{" "}
-          {status.threadsTotal}
+          {status.threadsTotal
+            ? `${status.threadsTotal - status.threadIds.length} / ${status.threadsTotal}`
+            : "Archiving..."}
         </span>
       );
-    case "pending":
-      return <span className="text-muted-foreground">Pending...</span>;
+    case "completed":
+      return (
+        <span className="text-muted-foreground">
+          {status.threadsTotal ? `Archived ${status.threadsTotal}` : "Archived"}
+        </span>
+      );
+    case "failed":
+      return <span className="text-red-500">Failed</span>;
     default:
       return null;
   }

@@ -1,10 +1,19 @@
 "use client";
 
 import { SparklesIcon } from "lucide-react";
-import { CardBasic } from "@/components/ui/card";
+import {
+  Card,
+  CardBasic,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Container } from "@/components/Container";
 import {
   PageHeading,
+  PageSubHeading,
   SectionDescription,
   SectionHeader,
   MessageText,
@@ -12,11 +21,14 @@ import {
   TypographyH3,
   TypographyH4,
   TextLink,
+  MutedText,
 } from "@/components/Typography";
 import { Button } from "@/components/Button";
 import { Button as ShadButton } from "@/components/ui/button";
 import { Badge } from "@/components/Badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Table, TableBody, TableRow, TableCell } from "@/components/ui/table";
+import { ActionCard } from "@/components/ui/card";
 import { AlertBasic } from "@/components/Alert";
 import { Notice } from "@/components/Notice";
 import { TestErrorButton } from "@/app/(landing)/components/TestError";
@@ -25,32 +37,92 @@ import {
   MultiSelectFilter,
   useMultiSelectFilter,
 } from "@/components/MultiSelectFilter";
+import { TagInput } from "@/components/TagInput";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Select as NativeSelect } from "@/components/Select";
 import { TooltipExplanation } from "@/components/TooltipExplanation";
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import { PremiumAiAssistantAlert } from "@/components/PremiumAlert";
 import { ActionType, ExecutedRuleStatus } from "@/generated/prisma/enums";
 import type { Rule } from "@/generated/prisma/client";
 import { SettingCard } from "@/components/SettingCard";
+import { ListCard } from "@/components/ListCard";
+import { RadioCardGroup } from "@/components/RadioCardGroup";
+import { Toggle } from "@/components/Toggle";
+import {
+  Item,
+  ItemContent,
+  ItemDescription,
+  ItemTitle,
+} from "@/components/ui/item";
 import { IconCircle } from "@/app/(app)/[emailAccountId]/onboarding/IconCircle";
+import { isValidEmail } from "@/utils/email";
+import { EmailAccountPreviewProvider } from "@/providers/EmailAccountProvider";
 import { ActionBadges } from "@/app/(app)/[emailAccountId]/assistant/Rules";
 import { DismissibleVideoCard } from "@/components/VideoCard";
 import { PremiumExpiredCardContent } from "@/components/PremiumCard";
+import { AnnouncementDialogDemo } from "@/components/feature-announcements/AnnouncementDialogDemo";
 import {
   ResultsDisplay,
   ResultDisplayContent,
 } from "@/app/(app)/[emailAccountId]/assistant/ResultDisplay";
+import {
+  ActivityLog,
+  type ActivityLogEntry,
+} from "@/app/(app)/[emailAccountId]/assistant/BulkProcessActivityLog";
 
 export const maxDuration = 3;
 
 export default function Components() {
+  return (
+    <EmailAccountPreviewProvider>
+      <ComponentsDemo />
+    </EmailAccountPreviewProvider>
+  );
+}
+
+function ComponentsDemo() {
   const { selectedValues, setSelectedValues } = useMultiSelectFilter([
     "alerts",
   ]);
-
+  const [basicTags, setBasicTags] = useState<string[]>(["react", "typescript"]);
+  const [emailTags, setEmailTags] = useState<string[]>([
+    "alice@example.com",
+    "bob@example.com",
+  ]);
+  const [joinRule, setJoinRule] = useState("all");
+  const [notifyByEmail, setNotifyByEmail] = useState(true);
+  const [demoCategory, setDemoCategory] = useState("newsletters");
   return (
     <Container>
       <div className="space-y-8 py-8">
         <h1>A Storybook style page demoing components we use.</h1>
+
+        <div className="space-y-1">
+          <div>
+            <TextLink href="/components/tools">Assistant Tools →</TextLink>
+          </div>
+          <div>
+            <TextLink href="/components/chat">Chat Components →</TextLink>
+          </div>
+          <div>
+            <TextLink href="/components/slack">Slack Components →</TextLink>
+          </div>
+          <div>
+            <TextLink href="/components/onboarding">
+              Onboarding Components →
+            </TextLink>
+          </div>
+        </div>
 
         <div className="space-y-6">
           <div className="underline">Typography</div>
@@ -58,15 +130,82 @@ export default function Components() {
           <TypographyH3>TypographyH3</TypographyH3>
           <TypographyH4>TypographyH4</TypographyH4>
           <SectionHeader>SectionHeader</SectionHeader>
+          <PageSubHeading>PageSubHeading</PageSubHeading>
           <SectionDescription>SectionDescription</SectionDescription>
           <MessageText>MessageText</MessageText>
           <TypographyP>TypographyP</TypographyP>
+          <MutedText>MutedText</MutedText>
           <TextLink href="#">TextLink</TextLink>
         </div>
 
         <div className="space-y-6">
           <div className="underline">Card</div>
           <CardBasic>This is a basic card.</CardBasic>
+
+          <div className="grid gap-6 md:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Default Card</CardTitle>
+                <CardDescription>
+                  This card uses the default size.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <p>
+                  The default card has larger padding and text for better
+                  readability in standard layouts.
+                </p>
+              </CardContent>
+              <CardFooter>
+                <ShadButton variant="outline" className="w-full">
+                  Action
+                </ShadButton>
+              </CardFooter>
+            </Card>
+
+            <Card size="sm">
+              <CardHeader>
+                <CardTitle>Small Card</CardTitle>
+                <CardDescription>
+                  This card uses the small size variant.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <p>
+                  The card component supports a size prop that can be set to
+                  &quot;sm&quot; for a more compact appearance.
+                </p>
+              </CardContent>
+              <CardFooter>
+                <ShadButton variant="outline" size="sm" className="w-full">
+                  Action
+                </ShadButton>
+              </CardFooter>
+            </Card>
+          </div>
+
+          <div className="space-y-4">
+            <ActionCard
+              icon={<SparklesIcon className="size-5" />}
+              title="Action Card (Green)"
+              description="This is the default green variant of the ActionCard component."
+              action={<ShadButton variant="primaryBlack">Click Me</ShadButton>}
+            />
+            <ActionCard
+              variant="blue"
+              icon={<SparklesIcon className="size-5" />}
+              title="Action Card (Blue)"
+              description="This is the blue variant of the ActionCard component."
+              action={<ShadButton variant="primaryBlack">Click Me</ShadButton>}
+            />
+            <ActionCard
+              variant="destructive"
+              icon={<SparklesIcon className="size-5" />}
+              title="Action Card (Destructive)"
+              description="This is the destructive variant of the ActionCard component."
+              action={<ShadButton variant="primaryBlack">Click Me</ShadButton>}
+            />
+          </div>
         </div>
 
         <div className="space-y-6">
@@ -115,15 +254,16 @@ export default function Components() {
 
         <div className="space-y-6">
           <div className="underline">Badges</div>
-          <div className="space-x-4">
+          <div className="flex flex-wrap gap-2">
+            <Badge color="blue">Blue</Badge>
+            <Badge color="gray">Gray</Badge>
+            <Badge color="green">Green</Badge>
+            <Badge color="indigo">Indigo</Badge>
+            <Badge color="orange">Orange</Badge>
+            <Badge color="pink">Pink</Badge>
+            <Badge color="purple">Purple</Badge>
             <Badge color="red">Red</Badge>
             <Badge color="yellow">Yellow</Badge>
-            <Badge color="green">Green</Badge>
-            <Badge color="blue">Blue</Badge>
-            <Badge color="indigo">Indigo</Badge>
-            <Badge color="purple">Purple</Badge>
-            <Badge color="pink">Pink</Badge>
-            <Badge color="gray">Gray</Badge>
           </div>
         </div>
 
@@ -202,27 +342,23 @@ export default function Components() {
           <div className="underline">Premium Alerts</div>
           <div className="mt-4 space-y-4">
             <div>
-              <p className="mb-2 text-sm text-muted-foreground">
+              <MutedText className="mb-2">
                 Basic Plan (needs upgrade to Business):
-              </p>
+              </MutedText>
               <PremiumAiAssistantAlert
                 showSetApiKey={false}
                 tier={"BASIC_MONTHLY"}
               />
             </div>
             <div>
-              <p className="mb-2 text-sm text-muted-foreground">
-                Pro Plan (needs API key):
-              </p>
+              <MutedText className="mb-2">Pro Plan (needs API key):</MutedText>
               <PremiumAiAssistantAlert
                 showSetApiKey={true}
                 tier={"PRO_MONTHLY"}
               />
             </div>
             <div>
-              <p className="mb-2 text-sm text-muted-foreground">
-                Free Plan (needs upgrade):
-              </p>
+              <MutedText className="mb-2">Free Plan (needs upgrade):</MutedText>
               <PremiumAiAssistantAlert showSetApiKey={false} tier={null} />
             </div>
           </div>
@@ -241,6 +377,13 @@ export default function Components() {
               thumbnailSrc="https://img.youtube.com/vi/SoeNDVr7ve4/0.jpg"
               storageKey={`video-dismissible-${Date.now()}`}
             />
+          </div>
+        </div>
+
+        <div>
+          <div className="underline">AnnouncementDialog</div>
+          <div className="mt-4">
+            <AnnouncementDialogDemo />
           </div>
         </div>
 
@@ -330,6 +473,11 @@ export default function Components() {
                   label: "Digest",
                   id: "digest",
                 },
+                {
+                  type: ActionType.NOTIFY_SENDER,
+                  label: "Notify sender",
+                  id: "notify_sender",
+                },
               ]}
               provider="gmail"
               labels={[{ id: "label", name: "Label" }]}
@@ -359,9 +507,9 @@ export default function Components() {
             />
 
             <div className="mt-8">
-              <p className="mb-2 text-sm text-muted-foreground">
+              <MutedText className="mb-2">
                 Complex example with multiple batches:
-              </p>
+              </MutedText>
               <ResultsDisplay
                 results={[
                   // Batch 1 (most recent): 2 rules
@@ -545,6 +693,131 @@ export default function Components() {
                 }}
               />
             </div>
+
+            <div className="p-4 border border-border rounded mt-4">
+              <ResultDisplayContent
+                result={{
+                  createdAt: new Date("2025-01-01"),
+                  reason:
+                    "The email looks automated and part of an existing thread, so no eligible rule was selected.",
+                  status: ExecutedRuleStatus.SKIPPED,
+                  selectionMetadata: {
+                    isThread: true,
+                    skippedThreadRuleNames: [
+                      "Notification",
+                      "Newsletter",
+                      "Marketing",
+                    ],
+                    continuedThreadRuleNames: [],
+                    learnedPatternExcludedRules: [],
+                    filteredConversationRuleNames: [],
+                    conversationFilterReason: undefined,
+                    remainingAiRuleNames: [],
+                  },
+                }}
+              />
+            </div>
+
+            <div className="p-4 border border-border rounded mt-4">
+              <ResultDisplayContent
+                result={{
+                  createdAt: new Date("2025-01-01"),
+                  reason:
+                    "A learned exclusion removed the expected system rule before AI matching.",
+                  status: ExecutedRuleStatus.SKIPPED,
+                  selectionMetadata: {
+                    isThread: false,
+                    skippedThreadRuleNames: [],
+                    continuedThreadRuleNames: [],
+                    learnedPatternExcludedRules: [
+                      {
+                        ruleId: "notification-rule",
+                        ruleName: "Notification",
+                        groupId: "notification-group",
+                        groupName: "Notification",
+                        itemType: "FROM",
+                        itemValue: "updates@example.com",
+                      },
+                    ],
+                    filteredConversationRuleNames: [],
+                    conversationFilterReason: undefined,
+                    remainingAiRuleNames: [
+                      "Calendar",
+                      "Receipt",
+                      "Marketing",
+                      "Newsletter",
+                      "Conversations",
+                    ],
+                  },
+                }}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="underline">ActivityLog</div>
+          <div className="mt-4 space-y-4">
+            <MutedText>Default with mixed states:</MutedText>
+            <ActivityLog
+              entries={getActivityLogEntries()}
+              processingCount={2}
+            />
+
+            <MutedText>Paused state:</MutedText>
+            <ActivityLog
+              entries={getActivityLogEntries()}
+              processingCount={2}
+              paused={true}
+            />
+
+            <MutedText>Long text truncation test:</MutedText>
+            <ActivityLog
+              entries={[
+                {
+                  id: "long-1",
+                  from: '"Very Long Sender Name That Should Definitely Be Truncated" <extremely-long-email-address-that-goes-on-forever@really-long-domain-name.com>',
+                  subject:
+                    "This is an extremely long subject line that should definitely truncate properly when displayed in the activity log component - it just keeps going and going with more text",
+                  status: "completed",
+                  ruleName: "Newsletter",
+                },
+                {
+                  id: "long-2",
+                  from: "Short <short@test.com>",
+                  subject: "Short subject",
+                  status: "processing",
+                },
+              ]}
+              processingCount={1}
+            />
+
+            <MutedText>All completed:</MutedText>
+            <ActivityLog
+              entries={[
+                {
+                  id: "done-1",
+                  from: "Alice <alice@example.com>",
+                  subject: "Meeting notes",
+                  status: "completed",
+                  ruleName: "Work",
+                },
+                {
+                  id: "done-2",
+                  from: "Bob <bob@example.com>",
+                  subject: "Project update",
+                  status: "completed",
+                  ruleName: "FYI",
+                },
+                {
+                  id: "done-3",
+                  from: "Newsletter <news@company.com>",
+                  subject: "Weekly digest",
+                  status: "completed",
+                },
+              ]}
+              processingCount={0}
+            />
           </div>
         </div>
 
@@ -562,6 +835,93 @@ export default function Components() {
               selectedValues={selectedValues}
               setSelectedValues={setSelectedValues}
             />
+          </div>
+        </div>
+
+        <div>
+          <div className="underline">Form fields</div>
+          <div className="mt-4 max-w-md space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="demo-input">Input</Label>
+              <Input id="demo-input" placeholder="name@company.com" />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="demo-input-disabled">Input, disabled</Label>
+              <Input id="demo-input-disabled" placeholder="Disabled" disabled />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="demo-textarea">Textarea</Label>
+              <Textarea
+                id="demo-textarea"
+                placeholder="Describe what should land here…"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="demo-select">Select</Label>
+              <Select value={demoCategory} onValueChange={setDemoCategory}>
+                <SelectTrigger id="demo-select">
+                  <SelectValue placeholder="Pick a category" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="receipts">Receipts</SelectItem>
+                  <SelectItem value="newsletters">Newsletters</SelectItem>
+                  <SelectItem value="updates">Updates</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <NativeSelect
+              name="demo-native-select"
+              label="Select, native"
+              options={[
+                { label: "Receipts", value: "receipts" },
+                { label: "Newsletters", value: "newsletters" },
+                { label: "Updates", value: "updates" },
+              ]}
+            />
+          </div>
+        </div>
+
+        <div>
+          <div className="underline">TagInput</div>
+          <div className="mt-4 space-y-6">
+            <div>
+              <MutedText className="mb-2">
+                Basic (type and press Enter):
+              </MutedText>
+              <TagInput
+                value={basicTags}
+                onChange={setBasicTags}
+                placeholder="Add tags..."
+                label="Tags"
+                className="max-w-md"
+              />
+            </div>
+            <div>
+              <MutedText className="mb-2">With email validation:</MutedText>
+              <TagInput
+                value={emailTags}
+                onChange={setEmailTags}
+                placeholder="Enter email addresses"
+                label="Email addresses"
+                validate={(email) =>
+                  isValidEmail(email)
+                    ? null
+                    : "Please enter a valid email address"
+                }
+                className="max-w-md"
+              />
+            </div>
+            <div>
+              <MutedText className="mb-2">With external error:</MutedText>
+              <TagInput
+                value={["tag1", "tag2"]}
+                onChange={() => {}}
+                placeholder="Add tags..."
+                label="Tags"
+                error="This field has an error"
+                className="max-w-md"
+              />
+            </div>
           </div>
         </div>
 
@@ -595,12 +955,94 @@ export default function Components() {
         </div>
 
         <div>
+          <div className="underline">RadioCardGroup</div>
+          <MutedText className="mt-2">
+            A one-of-N choice where the options should all be visible rather
+            than hidden behind a Select. Labels only, by design: a description
+            under every option reads as noise. Native radios, so arrow keys work
+            and the group is a single tab stop.
+          </MutedText>
+          <div className="mt-4 max-w-lg space-y-4">
+            <RadioCardGroup
+              name="demoJoinRule"
+              ariaLabel="Which meetings to join"
+              value={joinRule}
+              onChange={setJoinRule}
+              options={[
+                { value: "all", label: "Every call with a video link" },
+                {
+                  value: "external",
+                  label: "Only calls with people outside my company",
+                },
+                { value: "off", label: "Only the ones I turn on myself" },
+              ]}
+            />
+
+            <div>
+              <MutedText className="mb-2">Disabled:</MutedText>
+              <RadioCardGroup
+                name="demoJoinRuleDisabled"
+                ariaLabel="Disabled example"
+                value="a"
+                onChange={() => {}}
+                disabled
+                options={[
+                  { value: "a", label: "Selected" },
+                  { value: "b", label: "Not selected" },
+                ]}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="underline">ListCard</div>
+          <MutedText className="mt-2">
+            A bordered card of rows separated by rules, for lists where each row
+            is a record rather than a standalone card. Pass <code>Item</code>{" "}
+            rows with <code>rounded-none</code>.
+          </MutedText>
+          <div className="mt-4 max-w-2xl space-y-4">
+            <ListCard>
+              <Item>
+                <ItemContent>
+                  <ItemTitle>Email me the notes</ItemTitle>
+                  <ItemDescription>
+                    Send the summary to your inbox after each call
+                  </ItemDescription>
+                </ItemContent>
+                <Toggle
+                  name="demoNotifyByEmail"
+                  enabled={notifyByEmail}
+                  onChange={setNotifyByEmail}
+                />
+              </Item>
+              <Item>
+                <ItemContent>
+                  <ItemTitle>Weekly digest</ItemTitle>
+                  <ItemDescription>
+                    One summary every Monday morning
+                  </ItemDescription>
+                </ItemContent>
+                <Badge color="green">On</Badge>
+              </Item>
+              <Item>
+                <ItemContent>
+                  <ItemTitle>Row without a description</ItemTitle>
+                </ItemContent>
+                <ShadButton variant="outline" size="sm">
+                  Configure
+                </ShadButton>
+              </Item>
+            </ListCard>
+          </div>
+        </div>
+
+        <div>
           <div className="underline">Premium Expired Banners</div>
           <div className="mt-4 space-y-4">
             <div>
-              <p className="mb-2 text-sm text-muted-foreground">
-                Stripe Past Due:
-              </p>
+              <MutedText className="mb-2">Stripe Past Due:</MutedText>
               <PremiumExpiredCardContent
                 premium={{
                   lemonSqueezyRenewsAt: null,
@@ -612,23 +1054,19 @@ export default function Components() {
               />
             </div>
             <div>
-              <p className="mb-2 text-sm text-muted-foreground">
-                Stripe Canceled:
-              </p>
+              <MutedText className="mb-2">Stripe Canceled:</MutedText>
               <PremiumExpiredCardContent
                 premium={{
                   lemonSqueezyRenewsAt: null,
                   stripeSubscriptionId: "sub_test456",
                   stripeSubscriptionStatus: "canceled",
                   lemonSqueezySubscriptionId: null,
-                  tier: "BUSINESS_MONTHLY",
+                  tier: "STARTER_MONTHLY",
                 }}
               />
             </div>
             <div>
-              <p className="mb-2 text-sm text-muted-foreground">
-                LemonSqueezy Expired:
-              </p>
+              <MutedText className="mb-2">LemonSqueezy Expired:</MutedText>
               <PremiumExpiredCardContent
                 premium={{
                   lemonSqueezyRenewsAt: new Date(
@@ -642,9 +1080,9 @@ export default function Components() {
               />
             </div>
             <div>
-              <p className="mb-2 text-sm text-muted-foreground">
+              <MutedText className="mb-2">
                 No Banner (Active Premium):
-              </p>
+              </MutedText>
               <div className="min-h-[20px] text-xs text-muted-foreground">
                 <PremiumExpiredCardContent
                   premium={{
@@ -652,21 +1090,28 @@ export default function Components() {
                     stripeSubscriptionId: "sub_active123",
                     stripeSubscriptionStatus: "active",
                     lemonSqueezySubscriptionId: null,
-                    tier: "BUSINESS_MONTHLY",
+                    tier: "STARTER_MONTHLY",
                   }}
                 />
                 Banner should not appear for active users
               </div>
             </div>
             <div>
-              <p className="mb-2 text-sm text-muted-foreground">
+              <MutedText className="mb-2">
                 No Banner (Never Had Premium):
-              </p>
+              </MutedText>
               <div className="min-h-[20px] text-xs text-muted-foreground">
                 <PremiumExpiredCardContent premium={null} />
                 Banner should not appear for users who never had premium
               </div>
             </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="underline">Email Row Truncation</div>
+          <div className="mt-4">
+            <EmailRowExample />
           </div>
         </div>
 
@@ -696,6 +1141,8 @@ function getRule(): Rule {
     automate: true,
     runOnThreads: true,
     emailAccountId: "emailAccountId",
+    organizationRuleId: null,
+    organizationRuleMemberEnabled: null,
     promptText: null,
     categoryFilterType: null,
     systemType: null,
@@ -708,4 +1155,78 @@ function getRuleWithName(name: string): Rule {
     id: name.toLowerCase().replace(/\s+/g, "-"),
     name,
   };
+}
+
+function getActivityLogEntries(): ActivityLogEntry[] {
+  return [
+    {
+      id: "1",
+      from: "Lenny's Newsletter <lenny@substack.com>",
+      subject: "How Zapier's EA built an army of AI interns",
+      status: "completed",
+      ruleName: "Newsletter",
+    },
+    {
+      id: "2",
+      from: "ZenDaily <zendaily@substack.com>",
+      subject: "🔮 ZenDaily - 15th Dec 2025 🔮",
+      status: "processing",
+      ruleName: "Newsletter",
+    },
+    {
+      id: "3",
+      from: "Elie Steinbock <elie@getinboxzero.com>",
+      subject: "talk tomorrow",
+      status: "processing",
+    },
+    {
+      id: "4",
+      from: "Morning Brew <crew@morningbrew.com>",
+      subject: "☕ Gathering storm",
+      status: "waiting",
+    },
+    {
+      id: "5",
+      from: "GitHub <notifications@github.com>",
+      subject: "PR review requested",
+      status: "completed",
+      ruleName: "To Review",
+    },
+  ];
+}
+
+function EmailRowExample() {
+  return (
+    <div className="border rounded-md overflow-hidden">
+      <Table>
+        <TableBody>
+          <TableRow>
+            <TableCell>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0 flex-1">
+                  <MessageText className="flex items-center">
+                    <span className="max-w-[300px] truncate">
+                      Extremely Long Sender Name That Should Definitely Be
+                      Truncated
+                    </span>
+                  </MessageText>
+                  <MessageText className="mt-1 truncate font-bold">
+                    This is an extremely long subject line that used to cause
+                    the table to grow horizontally
+                  </MessageText>
+                  <MessageText className="mt-1 line-clamp-2 break-all">
+                    This snippet contains a very long URL that does not break:
+                    https://www.this-is-a-very-long-url-that-goes-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on.com/test
+                  </MessageText>
+                </div>
+                <div className="ml-4 shrink-0">
+                  <ShadButton size="sm">Test</ShadButton>
+                </div>
+              </div>
+            </TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+    </div>
+  );
 }

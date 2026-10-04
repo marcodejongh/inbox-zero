@@ -4,40 +4,51 @@
   "scripts": {
     "build": "turbo build --filter=./apps/web",
     "dev": "turbo dev --filter=./apps/web",
-    "test": "turbo run test --filter=./apps/web",
+    "local:start": "node --import tsx apps/web/scripts/local-dev.ts",
+    "desktop": "pnpm --filter @inboxzero/desktop dev",
+    "desktop:dist": "pnpm --filter @inboxzero/desktop dist",
+    "worker": "pnpm --filter @inboxzero/worker start",
+    "test": "turbo run test --filter=./apps/web -- --run",
+    "test-db": "pnpm --filter inbox-zero-ai test-db",
+    "test-integration": "pnpm --filter inbox-zero-ai test-integration",
+    "test:packages": "pnpm -r --filter '!inbox-zero-ai' --if-present test",
+    "typecheck:packages": "pnpm -r --filter '!inbox-zero-ai' --if-present typecheck",
     "lint": "turbo lint",
+    "postinstall": "sh clone-marketing.sh",
     "prepare": "husky install",
     "ncu": "ncu -u -ws",
-    "format-and-lint": "biome check .",
-    "format-and-lint:fix": "biome check . --write",
-    "setup": "tsx packages/cli/src/main.ts setup"
+    "check": "ultracite check",
+    "fix": "ultracite fix",
+    "konsistent": "konsistent",
+    "dev-setup": "tsx scripts/dev-setup.ts",
+    "setup": "tsx packages/cli/src/main.ts setup",
+    "setup-aws": "tsx packages/cli/src/main.ts setup-aws",
+    "setup-terraform": "tsx packages/cli/src/main.ts setup-terraform",
+    "start:cli": "tsx packages/cli/src/main.ts start",
+    "docker:local:build": "./docker/scripts/publish-ghcr.sh --local",
+    "docker:local:push": "./docker/scripts/publish-ghcr.sh",
+    "docker:local:run": "./docker/scripts/run-local.sh"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.2.2",
-    "@clack/prompts": "0.11.0",
-    "@turbo/gen": "2.6.2",
-    "commander": "14.0.2",
+    "@biomejs/biome": "2.5.2",
+    "@clack/prompts": "1.8.0",
+    "@turbo/gen": "2.10.12",
+    "commander": "15.0.0",
     "husky": "9.1.7",
-    "lint-staged": "16.2.5",
-    "prettier": "3.6.2",
-    "tsconfig-paths": "^4.2.0",
-    "tsx": "4.21.0",
-    "turbo": "2.6.3",
-    "ultracite": "5.3.3"
+    "konsistent": "1.0.0-beta.4",
+    "lint-staged": "17.5.0",
+    "tsconfig-paths": "4.2.0",
+    "tsx": "4.23.13",
+    "turbo": "2.10.12",
+    "ultracite": "7.8.4"
   },
-  "packageManager": "pnpm@10.24.0",
+  "packageManager": "pnpm@11.19.0",
   "lint-staged": {
     "*.{js,jsx,ts,tsx,json,jsonc,css,scss,md,mdx}": [
-      "npx ultracite fix"
+      "ultracite fix"
     ]
   },
   "engines": {
-    "node": ">=22.0.0"
-  },
-  "pnpm": {
-    "overrides": {
-      "@types/react": "19.0.10",
-      "@types/react-dom": "19.0.4"
-    }
+    "node": "24.x"
   }
 }

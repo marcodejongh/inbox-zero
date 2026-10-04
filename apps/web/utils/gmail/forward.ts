@@ -1,9 +1,8 @@
-import { formatEmailDate } from "@/utils/gmail/reply";
+import { formatEmailDate } from "@/utils/email/reply-quote";
 import type { ParsedMessage } from "@/utils/types";
+import { escapeHtml, textToHtmlParagraphs } from "@/utils/string";
 
-export const forwardEmailSubject = (subject: string) => {
-  return `Fwd: ${subject}`;
-};
+export const forwardEmailSubject = (subject: string) => `Fwd: ${subject}`;
 
 export const forwardEmailHtml = ({
   content,
@@ -13,16 +12,19 @@ export const forwardEmailHtml = ({
   message: ParsedMessage;
 }) => {
   const quotedDate = formatEmailDate(new Date(message.headers.date));
+  const messageContent =
+    message.textHtml || textToHtmlParagraphs(message.textPlain);
 
-  return `<div dir="ltr">${content}<br><br>
+  // Escape content and subject to prevent prompt injection attacks
+  return `<div dir="ltr">${escapeHtml(content)}<br><br>
 <div class="gmail_quote gmail_quote_container">
   <div dir="ltr" class="gmail_attr">---------- Forwarded message ----------<br>
 From: ${formatFromEmailWithName(message.headers.from)}<br>
 Date: ${quotedDate}<br>
-Subject: ${message.headers.subject}<br>
+Subject: ${escapeHtml(message.headers.subject)}<br>
 To: ${formatToEmailWithName(message.headers.to)}<br>
 </div><br><br>
-${message.textHtml}
+${messageContent}
 </div></div>`.trim();
 };
 
@@ -32,8 +34,7 @@ export const forwardEmailText = ({
 }: {
   content: string;
   message: ParsedMessage;
-}) => {
-  return `${content}
+}) => `${content}
         
 ---------- Forwarded message ----------
 From: ${message.headers.from}
@@ -42,24 +43,25 @@ Subject: ${message.headers.subject}
 To: ${message.headers.to}
 
 ${message.textPlain}`;
-};
 
 const formatFromEmailWithName = (emailHeader: string) => {
   const match = emailHeader?.match(/(.*?)\s*<([^>]+)>/);
-  if (!match) return emailHeader || "";
+  if (!match) return escapeHtml(emailHeader || "");
 
   const [, name, email] = match;
-  const trimmedName = name.trim();
+  const safeName = escapeHtml(name.trim());
+  const safeEmail = escapeHtml(email);
 
-  return `<strong class="gmail_sendername" dir="auto">${trimmedName}</strong> <span dir="auto">&lt;<a href="mailto:${email}">${email}</a>&gt;</span>`;
+  return `<strong class="gmail_sendername" dir="auto">${safeName}</strong> <span dir="auto">&lt;<a href="mailto:${safeEmail}">${safeEmail}</a>&gt;</span>`;
 };
 
 const formatToEmailWithName = (emailHeader: string) => {
   const match = emailHeader?.match(/(.*?)\s*<([^>]+)>/);
-  if (!match) return emailHeader || "";
+  if (!match) return escapeHtml(emailHeader || "");
 
   const [, name, email] = match;
-  const trimmedName = name.trim();
+  const safeName = escapeHtml(name.trim());
+  const safeEmail = escapeHtml(email);
 
-  return `${trimmedName} &lt;<a href="mailto:${email}">${email}</a>&gt;`;
+  return `${safeName} &lt;<a href="mailto:${safeEmail}">${safeEmail}</a>&gt;`;
 };

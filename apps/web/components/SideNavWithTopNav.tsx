@@ -3,7 +3,6 @@
 import { Suspense } from "react";
 import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
-import { NavBottom } from "@/components/NavBottom";
 import {
   SidebarInset,
   SidebarProvider,
@@ -18,23 +17,36 @@ const CrispWithNoSSR = dynamic(() => import("@/components/CrispChat"));
 
 function ContentWrapper({ children }: { children: React.ReactNode }) {
   const { state } = useSidebar();
-  const isRightSidebarOpen = state.includes("chat-sidebar");
+  const pathname = usePathname();
+  const isAssistantRoute = pathname?.includes("/assistant");
+  const isMailRoute = pathname?.includes("/mail");
+  const isRightSidebarOpen =
+    !isAssistantRoute && state.includes("chat-sidebar");
+
+  // The padding only exists to clear the fixed MobileHeader, which neither of
+  // these routes renders — on mail it showed up as a blank strip above the
+  // screen's own sidebar and toolbar.
+  const noTopPadding = isAssistantRoute || isMailRoute;
 
   return (
     <div
       className={cn(
-        "flex-1 transition-all duration-200 ease-linear",
+        "min-w-0 flex-1 transition-all duration-200 ease-linear",
         isRightSidebarOpen && "lg:mr-[450px]",
       )}
     >
-      <SidebarInset className="overflow-hidden bg-background pt-9 max-w-full">
+      <SidebarInset
+        className={cn(
+          // clip, not hidden: hidden makes this a scroll container, which
+          // stops sticky descendants from sticking to the page scroll
+          "overflow-clip bg-background pt-9 max-w-full",
+          noTopPadding && "pt-0",
+          // The mail page fills the viewport and scrolls its thread list
+          // internally, so layout banners shrink it instead of overflowing
+          isMailRoute && "h-svh",
+        )}
+      >
         {children}
-        <div
-          className="md:hidden md:pt-0"
-          style={{ paddingTop: "calc(env(safe-area-inset-bottom) + 1rem)" }}
-        >
-          <NavBottom />
-        </div>
       </SidebarInset>
       <Suspense>
         <CrispWithNoSSR />
@@ -46,37 +58,57 @@ function ContentWrapper({ children }: { children: React.ReactNode }) {
 export function SideNavWithTopNav({
   children,
   defaultOpen,
+  feedbackEnabled,
 }: {
   children: React.ReactNode;
   defaultOpen: boolean;
+  feedbackEnabled: boolean;
 }) {
   const pathname = usePathname();
 
   if (!pathname) return null;
 
+  const isAssistantRoute = pathname.includes("/assistant");
+  // The mail screen ships its own sidebar, so this one would be a second copy.
+  const isMailRoute = pathname.includes("/mail");
+
   // Ugly code. May change the onboarding path later so we don't need to do this.
-  // Only return children for the main onboarding page: /[emailAccountId]/onboarding
+  // Only return children for the onboarding or onboarding-brief pages: /[emailAccountId]/onboarding or /[emailAccountId]/onboarding-brief
   const segments = pathname.split("/").filter(Boolean);
-  if (segments.length === 2 && segments[1] === "onboarding") return children;
+  if (
+    segments.length === 2 &&
+    (segments[1] === "onboarding" || segments[1] === "onboarding-brief")
+  )
+    return children;
 
   return (
     <SidebarProvider
       defaultOpen={defaultOpen ? ["left-sidebar"] : []}
       sidebarNames={["left-sidebar", "chat-sidebar"]}
+      keyboardShortcutName="left-sidebar"
     >
-      <MobileHeader />
-      <SideNav name="left-sidebar" />
+      {/* Mail supplies its own sidebar and trigger for this shared state, so
+          the global navigation and its mobile header would be duplicates. */}
+      {!isMailRoute && (
+        <>
+          <MobileHeader />
+          <SideNav name="left-sidebar" feedbackEnabled={feedbackEnabled} />
+        </>
+      )}
       <ContentWrapper>{children}</ContentWrapper>
-      <SidebarRight name="chat-sidebar" />
+      {!isAssistantRoute ? <SidebarRight name="chat-sidebar" /> : null}
     </SidebarProvider>
   );
 }
 
 function MobileHeader() {
   return (
-    <header className="fixed top-0 left-0 right-0 z-50 h-9 md:hidden">
+    <header className="pointer-events-none fixed top-0 left-0 right-0 z-50 h-9 md:hidden">
       <div className="flex h-full items-center px-4">
-        <SidebarTrigger name="left-sidebar" className="size-6" />
+        <SidebarTrigger
+          name="left-sidebar"
+          className="pointer-events-auto size-6"
+        />
       </div>
     </header>
   );

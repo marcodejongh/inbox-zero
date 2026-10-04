@@ -1,14 +1,16 @@
 "use client";
 
+import Link from "next/link";
+import { BarChartIcon } from "lucide-react";
 import { useCallback } from "react";
 import { type SubmitHandler, useForm } from "react-hook-form";
 import useSWR from "swr";
 import { Button } from "@/components/ui/button";
-import { FormSection, FormSectionLeft } from "@/components/Form";
 import { toastError, toastSuccess } from "@/components/Toast";
 import { Input } from "@/components/Input";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { LoadingContent } from "@/components/LoadingContent";
+import { SettingsSection } from "@/components/SettingsSection";
 import {
   saveAiSettingsBody,
   type SaveAiSettingsBody,
@@ -22,48 +24,48 @@ import {
   providerOptions,
 } from "@/utils/llms/config";
 import { useUser } from "@/hooks/useUser";
+import { useAccount } from "@/providers/EmailAccountProvider";
+import { prefixPath } from "@/utils/path";
 import { updateAiSettingsAction } from "@/utils/actions/settings";
 
 export function ModelSection() {
+  const { emailAccountId } = useAccount();
   const { data, isLoading, error, mutate } = useUser();
 
   const { data: dataModels, isLoading: isLoadingModels } =
     useSWR<OpenAiModelsResponse>(
-      data?.aiApiKey && data?.aiProvider === Provider.OPEN_AI
+      data?.hasAiApiKey && data.aiProvider === Provider.OPEN_AI
         ? "/api/ai/models"
         : null,
     );
 
   return (
-    <FormSection>
-      <FormSectionLeft
-        title="AI Model"
-        description="Use the default model at no cost, or choose a custom model with your own API key."
-      />
-
+    <SettingsSection>
       <LoadingContent loading={isLoading || isLoadingModels} error={error}>
         {data && (
           <ModelSectionForm
             aiProvider={data.aiProvider}
             aiModel={data.aiModel}
-            aiApiKey={data.aiApiKey}
+            hasAiApiKey={data.hasAiApiKey}
             models={dataModels}
             refetchUser={mutate}
+            emailAccountId={emailAccountId}
           />
         )}
       </LoadingContent>
-    </FormSection>
+    </SettingsSection>
   );
 }
 
 function ModelSectionForm(props: {
   aiProvider: SaveAiSettingsBody["aiProvider"] | null;
   aiModel: SaveAiSettingsBody["aiModel"] | null;
-  aiApiKey: SaveAiSettingsBody["aiApiKey"] | null;
+  hasAiApiKey: boolean;
   models?: OpenAiModelsResponse;
   refetchUser: () => void;
+  emailAccountId: string;
 }) {
-  const { refetchUser } = props;
+  const { refetchUser, emailAccountId } = props;
 
   const {
     register,
@@ -75,11 +77,15 @@ function ModelSectionForm(props: {
     defaultValues: {
       aiProvider: props.aiProvider ?? DEFAULT_PROVIDER,
       aiModel: props.aiModel ?? "",
-      aiApiKey: props.aiApiKey ?? undefined,
+      aiApiKey: undefined,
     },
   });
 
   const aiProvider = watch("aiProvider");
+  const aiApiKey = watch("aiApiKey");
+  const hasStoredAiApiKey =
+    props.hasAiApiKey && props.aiProvider === aiProvider;
+  const hasAnyApiKey = !!aiApiKey || hasStoredAiApiKey;
 
   const onSubmit: SubmitHandler<SaveAiSettingsBody> = useCallback(
     async (data) => {
@@ -87,7 +93,7 @@ function ModelSectionForm(props: {
 
       if (res?.serverError) {
         toastError({
-          description: "There was an error updating the settings.",
+          description: res.serverError,
         });
       } else {
         toastSuccess({
@@ -101,18 +107,18 @@ function ModelSectionForm(props: {
     [refetchUser],
   );
 
-  const globalError = (errors as any)[""];
+  const globalError = (errors as Record<string, { message?: string }>)[""];
 
   const modelSelectOptions =
-    aiProvider === Provider.OPEN_AI && watch("aiApiKey")
-      ? props.models?.map((m) => ({
-          label: m.id,
-          value: m.id,
+    aiProvider === Provider.OPEN_AI && hasAnyApiKey
+      ? props.models?.map((model) => ({
+          label: model.id,
+          value: model.id,
         })) || []
       : [];
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+    <form onSubmit={handleSubmit(onSubmit)} className="max-w-sm space-y-4">
       <Select
         label="Provider"
         options={providerOptions}
@@ -120,7 +126,7 @@ function ModelSectionForm(props: {
         error={errors.aiProvider}
       />
 
-      {watch("aiProvider") !== DEFAULT_PROVIDER && (
+      {aiProvider !== DEFAULT_PROVIDER && (
         <>
           {modelSelectOptions.length ? (
             <Select
@@ -145,18 +151,28 @@ function ModelSectionForm(props: {
             label="API Key"
             registerProps={register("aiApiKey")}
             error={errors.aiApiKey}
+            placeholder={
+              hasStoredAiApiKey
+                ? "Leave blank to keep the current key"
+                : undefined
+            }
+            explainText={
+              hasStoredAiApiKey
+                ? "Leave this blank to keep the current API key, or enter a new key to replace it."
+                : undefined
+            }
           />
         </>
       )}
 
-      {globalError && (
+      {globalError?.message && (
         <AlertError title="Error saving" description={globalError.message} />
       )}
 
-      {watch("aiProvider") === Provider.OPEN_AI &&
-        watch("aiApiKey") &&
+      {aiProvider === Provider.OPEN_AI &&
+        hasAnyApiKey &&
         modelSelectOptions.length === 0 &&
-        (props.aiApiKey ? (
+        (hasStoredAiApiKey ? (
           <AlertError
             title="Invalid API Key"
             description="We couldn't validate your API key. Please try again."
@@ -168,9 +184,17 @@ function ModelSectionForm(props: {
           />
         ))}
 
-      <Button type="submit" loading={isSubmitting}>
-        Save
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button type="submit" size="sm" loading={isSubmitting}>
+          Save
+        </Button>
+        <Button asChild variant="outline" size="sm">
+          <Link href={prefixPath(emailAccountId, "/usage")}>
+            <BarChartIcon className="mr-2 size-4" />
+            View usage
+          </Link>
+        </Button>
+      </div>
     </form>
   );
 }

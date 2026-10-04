@@ -4,7 +4,7 @@ import type { EmailAccountWithAI } from "@/utils/llms/types";
 import type { EmailForLLM } from "@/utils/types";
 import { getEmailListPrompt, getTodayForLLM } from "@/utils/ai/helpers";
 import { preprocessBooleanLike } from "@/utils/zod";
-import { getModel } from "@/utils/llms/model";
+import { getModelForUseCase, LlmUseCase } from "@/utils/llms/use-cases";
 import { createGenerateObject } from "@/utils/llms";
 import { getUserInfoPrompt } from "@/utils/ai/helpers";
 
@@ -32,8 +32,7 @@ const getUserPrompt = ({
   currentThreadMessages: EmailForLLM[];
   historicalMessages: EmailForLLM[];
   emailAccount: EmailAccountWithAI;
-}) => {
-  return `<current_email_thread>
+}) => `<current_email_thread>
 ${getEmailListPrompt({ messages: currentThreadMessages, messageMaxLength: 10_000 })}
 </current_email_thread>
 
@@ -49,7 +48,6 @@ ${getUserInfoPrompt({ emailAccount })}
 
 ${getTodayForLLM()}
 Analyze the historical email threads and extract any relevant information that would be helpful for drafting a response to the current email thread. Provide a concise summary of the key historical context.`;
-};
 
 const schema = z.object({
   hasHistoricalContext: z
@@ -87,17 +85,21 @@ export async function aiExtractFromEmailHistory({
       emailAccount,
     });
 
-    const modelOptions = getModel(emailAccount.user, "economy");
+    const modelOptions = getModelForUseCase(
+      emailAccount.user,
+      LlmUseCase.EmailHistoryExtraction,
+    );
 
     const generateObject = createGenerateObject({
       emailAccount,
       label: "Email history extraction",
       modelOptions,
+      promptHardening: { trust: "untrusted", level: "compact" },
     });
 
     const result = await generateObject({
       ...modelOptions,
-      system,
+      instructions: system,
       prompt,
       schema,
     });

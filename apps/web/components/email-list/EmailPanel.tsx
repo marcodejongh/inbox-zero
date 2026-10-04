@@ -7,6 +7,7 @@ import { PlanExplanation } from "@/components/email-list/PlanExplanation";
 import { useIsInAiQueue } from "@/store/ai-queue";
 import { EmailThread } from "@/components/email-list/EmailThread";
 import { useAccount } from "@/providers/EmailAccountProvider";
+import { MutedText } from "@/components/Typography";
 
 export function EmailPanel({
   row,
@@ -31,7 +32,7 @@ export function EmailPanel({
   const plan = row.plan;
 
   return (
-    <div className="flex h-full flex-col overflow-y-hidden border-l border-border">
+    <div className="flex h-full min-w-0 flex-col overflow-y-hidden border-l border-border">
       <div className="sticky border-b border-border p-4 md:flex md:items-center md:justify-between">
         <div className="md:w-0 md:flex-1">
           <h1
@@ -40,9 +41,9 @@ export function EmailPanel({
           >
             {lastMessage.headers.subject}
           </h1>
-          <p className="mt-1 truncate text-sm text-muted-foreground">
+          <MutedText className="mt-1 truncate">
             {lastMessage.headers.from}
-          </p>
+          </MutedText>
         </div>
 
         <div className="mt-3 flex items-center md:ml-2 md:mt-0">
@@ -64,7 +65,7 @@ export function EmailPanel({
           </Tooltip>
         </div>
       </div>
-      <div className="flex flex-1 flex-col overflow-y-auto">
+      <div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-4">
         {plan?.rule && <PlanExplanation thread={row} provider={provider} />}
         <EmailThread
           key={row.id}

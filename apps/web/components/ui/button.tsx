@@ -16,26 +16,35 @@ const buttonVariants = cva(
           "bg-destructive text-destructive-foreground hover:bg-destructive/90",
         destructiveSoft:
           "border border-red-200 text-red-600 hover:text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-950/50",
+        destructiveGhost:
+          "text-muted-foreground hover:bg-destructive/10 hover:text-destructive",
         outline:
           "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         ghost: "text-foreground hover:bg-accent hover:text-accent-foreground",
+        ghostMuted:
+          "text-muted-foreground hover:bg-accent hover:text-foreground",
         link: "text-primary underline-offset-4 hover:underline",
         green:
           "bg-green-100 text-green-900 hover:bg-green-100/80 dark:bg-green-800 dark:text-green-50 dark:hover:bg-green-800/80",
         red: "bg-red-100 text-red-900 hover:bg-red-100/80 dark:bg-red-800 dark:text-red-50 dark:hover:bg-red-800/80",
         blue: "bg-blue-100 text-blue-900 hover:bg-blue-100/80 dark:bg-blue-800 dark:text-blue-50 dark:hover:bg-blue-800/80",
         primaryBlack: "bg-primary text-primary-foreground hover:bg-primary/90",
+        gradient:
+          "border border-[hsl(var(--button-gradient-border))] [background-image:var(--button-gradient)] text-white transition-shadow shadow-[0_2px_10.1px_hsl(var(--button-gradient-shadow)/0.2)] hover:shadow-[0_2px_14px_hsl(var(--button-gradient-shadow)/0.32)]",
       },
       size: {
         default: "h-10 px-4 py-2",
         xs: "h-6 rounded-sm px-1.5 text-xs",
         "xs-2": "h-7 rounded-md px-2 text-xs",
         sm: "h-9 rounded-md px-3",
+        inline: "h-auto px-1 py-1 text-xs",
         lg: "h-11 rounded-md px-8",
         icon: "h-10 w-10 flex-shrink-0",
         iconSm: "h-8 w-8 flex-shrink-0",
+        iconXs: "h-7 w-7 flex-shrink-0",
+        icon2xs: "h-6 w-6 flex-shrink-0",
       },
       loading: {
         true: "opacity-50 cursor-not-allowed",
@@ -53,8 +62,8 @@ export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
-  loading?: boolean;
   Icon?: React.ElementType;
+  loading?: boolean;
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(

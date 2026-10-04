@@ -1,26 +1,38 @@
 import { ActionType } from "@/generated/prisma/enums";
+import type { GetMessagingChannelsResponse } from "@/app/api/user/messaging-channels/route";
 import { Card, CardContent } from "@/components/ui/card";
 import { getActionIcon } from "@/utils/action-display";
 import { SectionHeader } from "@/components/Typography";
 import { useAccount } from "@/providers/EmailAccountProvider";
+import { useMessagingChannels } from "@/hooks/useMessagingChannels";
 import {
   getAvailableActions,
   getExtraActions,
 } from "@/utils/ai/rule/create-rule-schema";
 import { TooltipExplanation } from "@/components/TooltipExplanation";
+import { getMessagingProviderName } from "@/utils/messaging/platforms";
+import { getConnectedRuleNotificationChannels } from "@/utils/messaging/routes";
+import { getIntegrationActionLabel } from "@/utils/mcp/tool-specs";
+import { useIntegrationActionsEnabled } from "@/hooks/useFeatureFlags";
 
 const actionNames: Record<ActionType, string> = {
   [ActionType.LABEL]: "Label",
   [ActionType.MOVE_FOLDER]: "Move to folder",
   [ActionType.ARCHIVE]: "Archive",
+  [ActionType.DELETE]: "Delete",
   [ActionType.DRAFT_EMAIL]: "Draft replies",
+  [ActionType.DRAFT_MESSAGING_CHANNEL]: "Draft replies",
   [ActionType.REPLY]: "Send replies",
   [ActionType.FORWARD]: "Forward",
   [ActionType.MARK_READ]: "Mark as read",
+  [ActionType.STAR]: "Star",
   [ActionType.MARK_SPAM]: "Mark as spam",
   [ActionType.SEND_EMAIL]: "Send email",
   [ActionType.CALL_WEBHOOK]: "Call webhook",
   [ActionType.DIGEST]: "Add to digest",
+  [ActionType.NOTIFY_MESSAGING_CHANNEL]: "Notify",
+  [ActionType.NOTIFY_SENDER]: "Notify sender",
+  [ActionType.INTEGRATION]: getIntegrationActionLabel(),
 };
 
 const actionTooltips: Partial<Record<ActionType, string>> = {
@@ -31,13 +43,23 @@ const actionTooltips: Partial<Record<ActionType, string>> = {
 };
 
 export function AvailableActionsPanel() {
-  const { provider } = useAccount();
+  const { emailAccountId, provider } = useAccount();
+  const integrationActionsEnabled = useIntegrationActionsEnabled();
+  const { data: messagingChannelsData } = useMessagingChannels(emailAccountId);
+  const notifyActionName = getNotifyActionName(messagingChannelsData);
+
   return (
     <Card className="h-fit bg-slate-50 dark:bg-slate-900 hidden sm:block">
       <CardContent className="pt-4">
         <div className="grid gap-2">
           <ActionSection
-            actions={[...getAvailableActions(provider), ...getExtraActions()]}
+            actions={[
+              ...getAvailableActions(provider),
+              ...getExtraActions({
+                integrationActionsEnabled,
+              }),
+            ]}
+            notifyActionName={notifyActionName}
             title="Available Actions"
           />
         </div>
@@ -49,9 +71,11 @@ export function AvailableActionsPanel() {
 function ActionSection({
   title,
   actions,
+  notifyActionName,
 }: {
   title: string;
   actions: ActionType[];
+  notifyActionName: string;
 }) {
   return (
     <div>
@@ -63,7 +87,11 @@ function ActionSection({
           return (
             <div key={actionType} className="flex items-center gap-2">
               <Icon className="size-3.5 text-muted-foreground" />
-              <span className="text-sm">{actionNames[actionType]}</span>
+              <span className="text-sm">
+                {actionType === ActionType.NOTIFY_MESSAGING_CHANNEL
+                  ? notifyActionName
+                  : actionNames[actionType]}
+              </span>
               {tooltip && <TooltipExplanation text={tooltip} size="sm" />}
             </div>
           );
@@ -71,4 +99,30 @@ function ActionSection({
       </div>
     </div>
   );
+}
+
+function getNotifyActionName(
+  messagingChannelsData: GetMessagingChannelsResponse | undefined,
+) {
+  const connectedChannels = getConnectedRuleNotificationChannels(
+    messagingChannelsData?.channels,
+  );
+  const providers =
+    connectedChannels.length > 0
+      ? connectedChannels.map((channel) => channel.provider)
+      : (messagingChannelsData?.availableProviders ?? []);
+  const providerNames = Array.from(
+    new Set(providers.map(getMessagingProviderName)),
+  );
+
+  return providerNames.length > 0
+    ? `Notify on ${formatProviderList(providerNames)}`
+    : "Notify";
+}
+
+function formatProviderList(providerNames: string[]) {
+  if (providerNames.length === 1) return providerNames[0];
+  if (providerNames.length === 2) return providerNames.join(" or ");
+
+  return `${providerNames.slice(0, -1).join(", ")}, or ${providerNames.at(-1)}`;
 }

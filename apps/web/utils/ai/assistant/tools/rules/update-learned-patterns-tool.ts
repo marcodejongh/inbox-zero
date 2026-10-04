@@ -1,0 +1,200 @@
+import { type InferUITool, tool } from "ai";
+import { z } from "zod";
+import type { Logger } from "@/utils/logger";
+import prisma from "@/utils/prisma";
+import { GroupItemType } from "@/generated/prisma/enums";
+import { saveLearnedPatterns } from "@/utils/rule/learned-patterns";
+import { hideToolErrorFromUser } from "../../tool-error-visibility";
+import type { RuleReadState } from "../../chat-rule-state";
+import {
+  buildHiddenRuleNotFoundError,
+  buildVisibleOrgManagedRuleError,
+  trackRuleToolCall,
+  validateRuleWasReadRecently,
+} from "./shared";
+
+export const updateLearnedPatternsTool = ({
+  email,
+  emailAccountId,
+  logger,
+  getRuleReadState,
+}: {
+  email: string;
+  emailAccountId: string;
+  logger: Logger;
+  getRuleReadState?: () => RuleReadState | null;
+}) =>
+  tool({
+    description:
+      "Update the learned patterns of an existing inbox rule after you have identified the exact rule to change. Use when an existing category rule already fits and the user wants recurring senders added or removed, including feedback that a message from a known sender should have matched that existing rule. Save the precise learned sender or subject pattern instead of broadly rewriting the rule's AI instructions, creating a new rule, or editing static from/to fields. If a recurring sender should move from one rule to another, update both rules with learned-pattern includes and excludes. Report a successful save as an intended matching improvement, not a guarantee about every future message.",
+    inputSchema: z.object({
+      ruleName: z.string().describe("The name of the rule to update"),
+      learnedPatterns: z
+        .array(
+          z
+            .object({
+              include: z
+                .object({
+                  from: z
+                    .string()
+                    .nullish()
+                    .describe("Sender pattern to include in the rule."),
+                  subject: z
+                    .string()
+                    .nullish()
+                    .describe("Subject pattern to include in the rule."),
+                })
+                .describe("Patterns that should match the rule.")
+                .nullish(),
+              exclude: z
+                .object({
+                  from: z
+                    .string()
+                    .nullish()
+                    .describe("Sender pattern to exclude from the rule."),
+                  subject: z
+                    .string()
+                    .nullish()
+                    .describe("Subject pattern to exclude from the rule."),
+                })
+                .describe("Patterns that should not match the rule.")
+                .nullish(),
+            })
+            .describe("One learned-pattern update entry."),
+        )
+        .describe("Learned sender and subject patterns to save for the rule.")
+        .min(1, "At least one learned pattern is required"),
+    }),
+    execute: async ({ ruleName, learnedPatterns }) => {
+      trackRuleToolCall({ tool: "update_learned_patterns", email, logger });
+      try {
+        const readValidationError = validateRuleWasReadRecently({
+          ruleName,
+          getRuleReadState,
+        });
+
+        if (readValidationError) {
+          return hideToolErrorFromUser({
+            success: false,
+            error: readValidationError,
+          });
+        }
+
+        const rule = await prisma.rule.findUnique({
+          where: { name_emailAccountId: { name: ruleName, emailAccountId } },
+          select: {
+            id: true,
+            name: true,
+            updatedAt: true,
+            organizationRuleId: true,
+            emailAccount: {
+              select: {
+                rulesRevision: true,
+              },
+            },
+          },
+        });
+
+        if (!rule) {
+          return buildHiddenRuleNotFoundError();
+        }
+
+        if (rule.organizationRuleId) {
+          return buildVisibleOrgManagedRuleError();
+        }
+
+        const staleReadError = validateRuleWasReadRecently({
+          ruleName,
+          getRuleReadState,
+          currentRulesRevision: rule.emailAccount.rulesRevision,
+          currentRuleUpdatedAt: rule.updatedAt,
+        });
+        if (staleReadError) {
+          return hideToolErrorFromUser({
+            success: false,
+            error: staleReadError,
+          });
+        }
+
+        const patternsToSave: Array<{
+          type: GroupItemType;
+          value: string;
+          exclude?: boolean;
+        }> = [];
+
+        for (const pattern of learnedPatterns) {
+          if (pattern.include?.from) {
+            patternsToSave.push({
+              type: GroupItemType.FROM,
+              value: pattern.include.from,
+              exclude: false,
+            });
+          }
+
+          if (pattern.include?.subject) {
+            patternsToSave.push({
+              type: GroupItemType.SUBJECT,
+              value: pattern.include.subject,
+              exclude: false,
+            });
+          }
+
+          if (pattern.exclude?.from) {
+            patternsToSave.push({
+              type: GroupItemType.FROM,
+              value: pattern.exclude.from,
+              exclude: true,
+            });
+          }
+
+          if (pattern.exclude?.subject) {
+            patternsToSave.push({
+              type: GroupItemType.SUBJECT,
+              value: pattern.exclude.subject,
+              exclude: true,
+            });
+          }
+        }
+
+        if (patternsToSave.length === 0) {
+          return hideToolErrorFromUser({
+            success: false,
+            error:
+              "No learned patterns were saved because no sender or subject pattern was provided.",
+          });
+        }
+
+        const result = await saveLearnedPatterns({
+          emailAccountId,
+          ruleName: rule.name,
+          patterns: patternsToSave,
+          logger,
+        });
+
+        if (result?.error) {
+          return {
+            success: false,
+            error: result.error,
+          };
+        }
+
+        return {
+          success: true,
+          ruleId: rule.id,
+          futureMatchGuaranteed: false,
+          summary:
+            "The learned patterns were saved. They are intended to improve future matching but do not guarantee that every future message will match or execute.",
+        };
+      } catch (error) {
+        logger.error("Failed to update learned patterns", { error, ruleName });
+        return {
+          success: false,
+          error: "Failed to update learned patterns",
+        };
+      }
+    },
+  });
+
+export type UpdateLearnedPatternsTool = InferUITool<
+  ReturnType<typeof updateLearnedPatternsTool>
+>;

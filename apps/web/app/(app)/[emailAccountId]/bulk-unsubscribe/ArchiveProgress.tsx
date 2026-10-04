@@ -1,33 +1,43 @@
 "use client";
 
 import { memo, useEffect } from "react";
-import { resetTotalThreads, useQueueState } from "@/store/archive-queue";
+import {
+  clearArchiveSenderStatuses,
+  useArchiveQueueProgress,
+} from "@/store/archive-sender-queue";
 import { ProgressPanel } from "@/components/ProgressPanel";
+import { useAccount } from "@/providers/EmailAccountProvider";
 
 export const ArchiveProgress = memo(() => {
-  const { totalThreads, activeThreads } = useQueueState();
-
-  // Make sure activeThreads is an object as this was causing an error.
-  const threadsRemaining = Object.values(activeThreads || {}).length;
-  const totalProcessed = totalThreads - threadsRemaining;
-  const progress = (totalProcessed / totalThreads) * 100;
-  const isCompleted = progress === 100;
+  const { emailAccountId } = useAccount();
+  const bulkArchiveProgress = useArchiveQueueProgress(emailAccountId);
+  const totalItems = bulkArchiveProgress?.totalItems ?? 0;
+  const completedItems = bulkArchiveProgress?.completedItems ?? 0;
+  const failedItems = bulkArchiveProgress?.failedItems ?? 0;
+  const activeItems = bulkArchiveProgress?.activeItems ?? 0;
 
   useEffect(() => {
-    if (isCompleted) {
-      setTimeout(() => {
-        resetTotalThreads();
-      }, 5000);
-    }
-  }, [isCompleted]);
+    if (!totalItems || activeItems) return;
+    const timeoutId = setTimeout(
+      () => clearArchiveSenderStatuses(emailAccountId),
+      3000,
+    );
+    return () => clearTimeout(timeoutId);
+  }, [activeItems, emailAccountId, totalItems]);
+
+  if (!totalItems) return null;
 
   return (
     <ProgressPanel
-      totalItems={totalThreads}
-      remainingItems={threadsRemaining}
-      inProgressText="Archiving emails..."
-      completedText="Archiving complete!"
-      itemLabel="emails"
+      totalItems={totalItems}
+      remainingItems={activeItems}
+      inProgressText={`Archiving senders...${failedItems ? ` ${failedItems} failed.` : ""}`}
+      completedText={
+        failedItems
+          ? `Archiving finished: ${completedItems} succeeded, ${failedItems} failed.`
+          : "Archiving complete!"
+      }
+      itemLabel="senders"
     />
   );
 });

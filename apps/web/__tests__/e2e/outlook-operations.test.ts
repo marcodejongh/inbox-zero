@@ -16,7 +16,7 @@ import { describe, test, expect, beforeAll, vi } from "vitest";
 import { NextRequest } from "next/server";
 import prisma from "@/utils/prisma";
 import { createEmailProvider } from "@/utils/email/provider";
-import { webhookBodySchema } from "@/app/api/outlook/webhook/types";
+import { webhookBodySchema } from "@/utils/webhook/outlook/types";
 import {
   ensureCatchAllTestRule,
   ensureTestPremiumAccount,
@@ -24,6 +24,9 @@ import {
 } from "@/__tests__/e2e/helpers";
 import { sleep } from "@/utils/sleep";
 import type { EmailProvider } from "@/utils/email/types";
+import { createTestLogger } from "@/__tests__/helpers";
+
+const logger = createTestLogger();
 
 // ============================================
 // TEST DATA - SET VIA ENVIRONMENT VARIABLES
@@ -35,23 +38,12 @@ const TEST_CONVERSATION_ID =
   "AQQkADAwATNiZmYAZS05YWEAYy1iNWY0LTAwAi0wMAoAEABuo-fmt9KvQ4u55KlWB32H"; // Real conversation ID from demoinboxzero@outlook.com
 const TEST_CATEGORY_NAME = process.env.TEST_CATEGORY_NAME || "To Reply";
 
-vi.mock("server-only", () => ({}));
-
 vi.mock("@/utils/redis/message-processing", () => ({
+  acquireOutboundMessageLock: vi.fn().mockResolvedValue("lock-token-1"),
+  clearOutboundMessageLock: vi.fn().mockResolvedValue(true),
   markMessageAsProcessing: vi.fn().mockResolvedValue(true),
+  markOutboundMessageProcessed: vi.fn().mockResolvedValue(true),
 }));
-
-// Mock Next.js after() to run synchronously and await in tests
-vi.mock("next/server", async () => {
-  const actual =
-    await vi.importActual<typeof import("next/server")>("next/server");
-  return {
-    ...actual,
-    after: async (fn: () => void | Promise<void>) => {
-      await fn();
-    },
-  };
-});
 
 describe.skipIf(!RUN_E2E_TESTS)("Outlook Operations Integration Tests", () => {
   let provider: EmailProvider;
@@ -87,6 +79,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Outlook Operations Integration Tests", () => {
     provider = await createEmailProvider({
       emailAccountId: emailAccount.id,
       provider: "microsoft",
+      logger,
     });
 
     console.log(`\n✅ Using account: ${emailAccount.email}`);
@@ -331,6 +324,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Outlook Webhook Payload", () => {
     const provider = await createEmailProvider({
       emailAccountId: emailAccount.id,
       provider: "microsoft",
+      logger,
     });
 
     const testMessage = await findOldMessage(provider, 7);
@@ -450,6 +444,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Outlook Webhook Payload", () => {
       const provider = await createEmailProvider({
         emailAccountId: emailAccount.id,
         provider: "microsoft",
+        logger,
       });
 
       const draft = await provider.getDraft(draftAction.draftId);
@@ -466,7 +461,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Outlook Webhook Payload", () => {
       console.log(`      Subject: ${draft?.subject || "(no subject)"}`);
       console.log("      Content:");
       console.log(
-        `        ${draft?.textPlain?.substring(0, 200).replace(/\n/g, "\n        ") || "(empty)"}`,
+        `        ${draft?.textPlain?.slice(0, 200).replace(/\n/g, "\n        ") || "(empty)"}`,
       );
       if (draft?.textPlain && draft.textPlain.length > 200) {
         console.log(`        ... (${draft.textPlain.length} total characters)`);
@@ -484,6 +479,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Outlook Webhook Payload", () => {
     const provider = await createEmailProvider({
       emailAccountId: emailAccount.id,
       provider: "microsoft",
+      logger,
     });
 
     const testMessage = await findOldMessage(provider, 7);
@@ -509,7 +505,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Outlook Webhook Payload", () => {
     console.log(`      Draft ID: ${draftResult.draftId}`);
     console.log(`      Fetched ID: ${fetchedDraft?.id}`);
     console.log(
-      `      Content preview: ${fetchedDraft?.textPlain?.substring(0, 50) || "(empty)"}...`,
+      `      Content preview: ${fetchedDraft?.textPlain?.slice(0, 50) || "(empty)"}...`,
     );
 
     // Clean up - delete the test draft

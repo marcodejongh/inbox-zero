@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { Logger } from "@/utils/logger";
 import type { Knowledge } from "@/generated/prisma/client";
 import type { EmailAccountWithAI } from "@/utils/llms/types";
-import { getModel } from "@/utils/llms/model";
+import { getModelForUseCase, LlmUseCase } from "@/utils/llms/use-cases";
 import { createGenerateObject } from "@/utils/llms";
 import { getUserInfoPrompt } from "@/utils/ai/helpers";
 
@@ -88,17 +88,21 @@ export async function aiExtractRelevantKnowledge({
 
     const prompt = getUserPrompt({ knowledgeBase, emailContent, emailAccount });
 
-    const modelOptions = getModel(emailAccount.user, "economy");
+    const modelOptions = getModelForUseCase(
+      emailAccount.user,
+      LlmUseCase.KnowledgeExtraction,
+    );
 
     const generateObject = createGenerateObject({
       emailAccount,
       label: "Knowledge extraction",
       modelOptions,
+      promptHardening: { trust: "untrusted", level: "compact" },
     });
 
     const result = await generateObject({
       ...modelOptions,
-      system,
+      instructions: system,
       prompt,
       schema: extractionSchema,
     });

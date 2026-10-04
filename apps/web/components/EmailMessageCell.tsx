@@ -1,22 +1,19 @@
 "use client";
 
-import { ExternalLinkIcon } from "lucide-react";
+import { ExternalLinkIcon, MailIcon, TagsIcon } from "lucide-react";
 import Link from "next/link";
-import { MessageText } from "@/components/Typography";
-import { getEmailUrlForMessage } from "@/utils/url";
 import { decodeSnippet } from "@/utils/gmail/decode";
-import { ViewEmailButton } from "@/components/ViewEmailButton";
+import { Tooltip } from "@/components/Tooltip";
+import { useDisplayedEmail } from "@/hooks/useDisplayedEmail";
 import { useThread } from "@/hooks/useThread";
 import { snippetRemoveReply } from "@/utils/gmail/snippet";
 import { extractNameFromEmail } from "@/utils/email";
-import { Badge } from "@/components/ui/badge";
-import { useEmail } from "@/providers/EmailProvider";
+import { useEmailLabels } from "@/providers/EmailLabelsProvider";
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { useMemo } from "react";
-import { isDefined } from "@/utils/types";
-import { isGoogleProvider } from "@/utils/email/provider-types";
-import { getRuleLabel } from "@/utils/rule/consts";
-import { SystemType } from "@/generated/prisma/enums";
+import { getEmailMessageCellLabels } from "@/components/EmailMessageCellLabels";
+import { getEmailMessageCellActions } from "@/components/EmailMessageCellActions";
+import { LabelBadges } from "@/components/LabelBadges";
 
 export function EmailMessageCell({
   sender,
@@ -26,8 +23,10 @@ export function EmailMessageCell({
   threadId,
   messageId,
   hideViewEmailButton,
+  externalUrl,
   labelIds,
   filterReplyTrackerLabels,
+  collapseLabels,
 }: {
   sender: string;
   userEmail: string;
@@ -36,97 +35,93 @@ export function EmailMessageCell({
   threadId: string;
   messageId: string;
   hideViewEmailButton?: boolean;
+  externalUrl?: string;
   labelIds?: string[];
   filterReplyTrackerLabels?: boolean;
+  collapseLabels?: boolean;
 }) {
-  const { userLabels } = useEmail();
+  const { userLabels } = useEmailLabels();
   const { provider } = useAccount();
+  const { showEmail } = useDisplayedEmail();
 
-  const labelsToDisplay = useMemo(() => {
-    const labels = labelIds
-      ?.map((idOrName) => {
-        // First try to find by ID
-        let label = userLabels[idOrName];
+  const labelsToDisplay = useMemo(
+    () =>
+      getEmailMessageCellLabels({
+        labelIds,
+        userLabels,
+        filterReplyTrackerLabels,
+        provider,
+      }),
+    [labelIds, userLabels, filterReplyTrackerLabels, provider],
+  );
 
-        // If not found by ID, try to find by name
-        if (!label) {
-          const foundLabel = Object.values(userLabels).find(
-            (l) => l.name.toLowerCase() === idOrName.toLowerCase(),
-          );
-          if (foundLabel) {
-            label = foundLabel;
-          }
-        }
-
-        if (!label) return null;
-        return { id: label.id, name: label.name };
-      })
-      .filter(isDefined)
-      .filter((label) => {
-        if (filterReplyTrackerLabels) {
-          if (
-            label.name === getRuleLabel(SystemType.TO_REPLY) ||
-            label.name === getRuleLabel(SystemType.AWAITING_REPLY)
-          ) {
-            return false;
-          }
-        }
-
-        if (label.name.includes("/")) {
-          return false;
-        }
-        return true;
-      });
-
-    if (labelIds && !labelIds.includes("INBOX")) {
-      labels?.unshift({ id: "ARCHIVE", name: "Archived" });
-    }
-
-    return labels;
-  }, [labelIds, userLabels, filterReplyTrackerLabels]);
-
+  const emailActions = getEmailMessageCellActions({
+    externalUrl,
+    hideViewEmailButton,
+    messageId,
+    provider,
+    threadId,
+    userEmail,
+  });
   return (
-    <div className="min-w-0 break-words">
-      <MessageText className="flex items-center">
-        <span className="max-w-[300px] truncate">
+    <div className="min-w-0 break-words text-sm text-slate-700 dark:text-foreground">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="order-1 max-w-[240px] shrink-0 truncate font-semibold">
           {extractNameFromEmail(sender)}
         </span>
-        {!hideViewEmailButton && isGoogleProvider(provider) && (
-          <>
-            <Link
-              className="ml-2 hover:text-foreground"
-              href={getEmailUrlForMessage(
-                messageId,
-                threadId,
-                userEmail,
-                provider,
-              )}
-              target="_blank"
-            >
-              <ExternalLinkIcon className="h-4 w-4" />
-            </Link>
-            <ViewEmailButton
-              threadId={threadId}
-              messageId={messageId}
-              size="xs"
-              className="ml-1.5"
-            />
-          </>
+        <span className="order-4 min-w-0 max-w-full basis-full truncate sm:order-2 sm:max-w-md sm:basis-auto">
+          {subject}
+        </span>
+        {collapseLabels
+          ? labelsToDisplay &&
+            labelsToDisplay.length > 0 && (
+              <div className="order-5 flex shrink-0 items-center sm:order-3">
+                <Tooltip
+                  content={labelsToDisplay.map((l) => l.name).join(", ")}
+                >
+                  <span className="text-muted-foreground">
+                    <TagsIcon className="h-4 w-4" />
+                  </span>
+                </Tooltip>
+              </div>
+            )
+          : labelsToDisplay && (
+              <LabelBadges
+                labels={labelsToDisplay}
+                className="order-5 sm:order-3"
+              />
+            )}
+        {emailActions && (
+          <div className="order-2 ml-auto flex shrink-0 items-center gap-2 text-muted-foreground sm:order-4 sm:ml-0">
+            {emailActions.openUrl && (
+              <Link
+                className="hover:text-foreground"
+                href={emailActions.openUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Open in email"
+              >
+                <ExternalLinkIcon className="h-4 w-4" />
+              </Link>
+            )}
+            {emailActions.showViewEmailButton && (
+              <Tooltip content="View email">
+                <button
+                  type="button"
+                  className="hover:text-foreground"
+                  onClick={() => showEmail({ threadId, messageId })}
+                  aria-label="View email"
+                >
+                  <MailIcon className="h-4 w-4" />
+                </button>
+              </Tooltip>
+            )}
+          </div>
         )}
-        {labelsToDisplay && labelsToDisplay.length > 0 && (
-          <span className="ml-2 flex flex-wrap items-center gap-1">
-            {labelsToDisplay.map((label) => (
-              <Badge variant="secondary" key={label.id}>
-                {label.name}
-              </Badge>
-            ))}
-          </span>
-        )}
-      </MessageText>
-      <MessageText className="mt-1 font-bold">{subject}</MessageText>
-      <MessageText className="mt-1">
+      </div>
+      <p className="mt-1 line-clamp-2 max-w-2xl break-all text-sm text-muted-foreground">
         {snippetRemoveReply(decodeSnippet(snippet)).trim()}
-      </MessageText>
+      </p>
     </div>
   );
 }
@@ -144,7 +139,8 @@ export function EmailMessageCellWithData({
 }) {
   const { data, isLoading, error } = useThread({ id: threadId });
 
-  const firstMessage = data?.thread.messages?.[0];
+  const firstMessage = data?.thread?.messages?.[0];
+  const emailNotFound = !isLoading && !error && !firstMessage;
 
   return (
     <EmailMessageCell
@@ -155,12 +151,22 @@ export function EmailMessageCellWithData({
           ? "Error loading email"
           : isLoading
             ? "Loading email..."
-            : firstMessage?.headers.subject || ""
+            : emailNotFound
+              ? "Email not found"
+              : firstMessage?.headers.subject || ""
       }
-      snippet={error ? "" : isLoading ? "" : firstMessage?.snippet || ""}
+      snippet={
+        error || emailNotFound
+          ? ""
+          : isLoading
+            ? ""
+            : firstMessage?.snippet || ""
+      }
       threadId={threadId}
       messageId={messageId}
+      externalUrl={firstMessage?.externalUrl}
       labelIds={firstMessage?.labelIds}
+      hideViewEmailButton={emailNotFound || !!error}
     />
   );
 }

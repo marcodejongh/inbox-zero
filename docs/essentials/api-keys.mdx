@@ -1,0 +1,69 @@
+---
+title: 'Use Your Own AI API Key'
+description: 'Choose an AI provider, model, and provider API key for Inbox Zero features.'
+icon: 'key'
+---
+
+Inbox Zero covers AI costs by default, but you can optionally use your own model-provider API key.
+
+<Note>
+This setting is for the AI provider that powers Inbox Zero features. It is different from the developer API keys in the **Developer** settings section, which authenticate requests to the Inbox Zero API.
+</Note>
+
+## Configure a Provider
+
+1. Open the account menu at the bottom of the sidebar and choose **Settings**.
+2. Expand the relevant email account.
+3. Find the **AI Model** section.
+4. Select a provider, enter the provider's model identifier and API key, then click **Save**.
+5. Test the configuration on the **Assistant** or **Chat** page.
+
+Leave the provider set to **Default** to use the AI service included with Inbox Zero.
+
+## Providers in Settings
+
+### Anthropic
+
+Create a key in the [Anthropic Console](https://console.anthropic.com/settings/keys). Enter an Anthropic model identifier in the Model field.
+
+### OpenAI
+
+Create a key on the [OpenAI API keys page](https://platform.openai.com/api-keys).
+
+<iframe
+  width="560"
+  height="315"
+  src="https://www.youtube.com/embed/AQtB0j6Zmt0"
+  title="YouTube video player"
+  frameBorder="0"
+  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+  allowFullScreen
+></iframe>
+
+### Azure OpenAI
+
+Use an Azure OpenAI API key and enter the Azure deployment name in the Model field.
+
+### Google
+
+Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/app/apikey) and enter the corresponding model identifier.
+
+### Groq
+
+Create a key in the [Groq Console](https://console.groq.com/keys) and enter a model available to your Groq account.
+
+### Cerebras
+
+Create a key in the [Cerebras Cloud Console](https://cloud.cerebras.ai) and enter a Cerebras model ID such as `qwen-3.8-27b`.
+
+### OpenRouter
+
+Create a key in [OpenRouter](https://openrouter.ai/settings/keys). Use OpenRouter's provider-qualified model identifier, such as `provider/model`.
+
+### Vercel AI Gateway
+
+Create an AI Gateway API key in Vercel and use the model identifier expected by [Vercel AI Gateway](https://vercel.com/ai-gateway). Provider-qualified identifiers are recommended.
+
+## Usage and Billing
+
+When you use your own provider key, the provider bills that account according to its pricing and limits. Click **View usage** in the AI Model section to review the usage recorded by Inbox Zero. Provider-side billing remains the source of truth for charges.

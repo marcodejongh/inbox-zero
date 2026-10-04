@@ -1,31 +1,104 @@
 import { env } from "@/env";
+import { secureCompare } from "@/utils/crypto-compare";
 import type { IntegrationKey } from "@/utils/mcp/integrations";
 import crypto from "node:crypto";
 
-/**
- * Generates a secure OAuth state parameter
- * @param data - The data to encode in the state
- * @returns Base64URL encoded state string
- */
-export function generateOAuthState<T extends Record<string, unknown>>(
-  data: T & { nonce?: string },
+const OAUTH_STATE_DEFAULT_MAX_AGE_MS = 10 * 60 * 1000;
+
+export function generateSignedOAuthState<T extends Record<string, unknown>>(
+  data: T & { nonce?: string; issuedAt?: number },
 ): string {
-  const stateObject = {
+  const payload = {
     ...data,
     nonce: data.nonce || crypto.randomUUID(),
+    issuedAt: data.issuedAt ?? Date.now(),
   };
-  return Buffer.from(JSON.stringify(stateObject)).toString("base64url");
+  const payloadEncoded = Buffer.from(JSON.stringify(payload)).toString(
+    "base64url",
+  );
+  const signature = signOAuthStatePayload(payloadEncoded);
+  return `${payloadEncoded}.${signature}`;
 }
 
-/**
- * Parses an OAuth state parameter
- * @param state - Base64URL encoded state string
- * @returns The decoded state object
- */
-export function parseOAuthState<T extends Record<string, unknown>>(
+export function parseSignedOAuthState<T extends Record<string, unknown>>(
   state: string,
-): T & { nonce: string } {
-  return JSON.parse(Buffer.from(state, "base64url").toString("utf8"));
+  options?: { maxAgeMs?: number },
+): T & { nonce: string; issuedAt: number } {
+  const [payloadEncoded, signature] = state.split(".");
+
+  if (!payloadEncoded || !signature) {
+    throw new Error("Invalid signed OAuth state format");
+  }
+
+  const expectedSignature = signOAuthStatePayload(payloadEncoded);
+  if (!secureCompare(expectedSignature, signature)) {
+    throw new Error("Invalid OAuth state signature");
+  }
+
+  const payload = JSON.parse(
+    Buffer.from(payloadEncoded, "base64url").toString("utf8"),
+  ) as T & { nonce?: unknown; issuedAt?: unknown };
+
+  if (typeof payload.nonce !== "string" || payload.nonce.length < 8) {
+    throw new Error("Invalid OAuth state nonce");
+  }
+
+  if (
+    typeof payload.issuedAt !== "number" ||
+    !Number.isFinite(payload.issuedAt)
+  ) {
+    throw new Error("Invalid OAuth state issuedAt");
+  }
+
+  const maxAgeMs = options?.maxAgeMs ?? OAUTH_STATE_DEFAULT_MAX_AGE_MS;
+  const now = Date.now();
+  const elapsedMs = now - payload.issuedAt;
+  if (elapsedMs < -60_000 || elapsedMs > maxAgeMs) {
+    throw new Error("OAuth state expired");
+  }
+
+  return payload as T & { nonce: string; issuedAt: number };
+}
+
+export function validateSignedOAuthState<
+  T extends Record<string, unknown>,
+>(params: {
+  receivedState: string | null;
+  storedState: string | undefined;
+  maxAgeMs?: number;
+}):
+  | {
+      success: true;
+      state: T & { nonce: string; issuedAt: number };
+    }
+  | {
+      success: false;
+      error: "invalid_state" | "invalid_state_format";
+    } {
+  if (
+    !params.storedState ||
+    !params.receivedState ||
+    params.storedState !== params.receivedState
+  ) {
+    return {
+      success: false,
+      error: "invalid_state",
+    };
+  }
+
+  try {
+    return {
+      success: true,
+      state: parseSignedOAuthState<T>(params.storedState, {
+        maxAgeMs: params.maxAgeMs,
+      }),
+    };
+  } catch {
+    return {
+      success: false,
+      error: "invalid_state_format",
+    };
+  }
 }
 
 /**
@@ -47,3 +120,26 @@ export const getMcpPkceCookieName = (integration: IntegrationKey) =>
 
 export const getMcpOAuthStateType = (integration: IntegrationKey) =>
   `${integration}-mcp`;
+
+function signOAuthStatePayload(payloadEncoded: string): string {
+  // OAuth state needs an HMAC signature for integrity, not a password hashing
+  // algorithm.
+  // codeql[js/insufficient-password-hash]
+  const signature = crypto
+    .createHmac("sha256", getOAuthStateSigningSecret())
+    .update(payloadEncoded)
+    .digest("base64url");
+
+  return signature;
+}
+
+function getOAuthStateSigningSecret(): string {
+  const secret = env.AUTH_SECRET || env.NEXTAUTH_SECRET;
+  if (!secret) {
+    throw new Error(
+      "Either AUTH_SECRET or NEXTAUTH_SECRET environment variable must be defined",
+    );
+  }
+
+  return secret;
+}

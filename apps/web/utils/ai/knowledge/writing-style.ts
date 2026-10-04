@@ -4,7 +4,7 @@ import type { EmailAccountWithAI } from "@/utils/llms/types";
 import type { EmailForLLM } from "@/utils/types";
 import { truncate } from "@/utils/string";
 import { removeExcessiveWhitespace } from "@/utils/string";
-import { getModel } from "@/utils/llms/model";
+import { getModelForUseCase, LlmUseCase } from "@/utils/llms/use-cases";
 import { createGenerateObject } from "@/utils/llms";
 import { getUserInfoPrompt } from "@/utils/ai/helpers";
 
@@ -65,17 +65,21 @@ ${emails
 
 ${getUserInfoPrompt({ emailAccount })}`;
 
-  const modelOptions = getModel(emailAccount.user);
+  const modelOptions = getModelForUseCase(
+    emailAccount.user,
+    LlmUseCase.WritingStyleAnalysis,
+  );
 
   const generateObject = createGenerateObject({
     emailAccount,
     label: "Writing Style Analysis",
     modelOptions,
+    promptHardening: { trust: "untrusted", level: "none" },
   });
 
   const result = await generateObject({
     ...modelOptions,
-    system,
+    instructions: system,
     prompt,
     schema: z.object({
       typicalLength: z.string(),

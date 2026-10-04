@@ -1,0 +1,66 @@
+# Desktop app
+
+Electron shell for the hosted Inbox Zero web app.
+
+## Run
+
+Against production:
+
+```sh
+pnpm --filter @inboxzero/desktop dev
+```
+
+Against a local web app:
+
+```sh
+INBOX_ZERO_APP_URL=http://localhost:3000 pnpm --filter @inboxzero/desktop dev
+```
+
+Sign-in uses the system browser and returns through `inboxzero://`. The web app's `DESKTOP_AUTH_ORIGIN` defaults to this scheme.
+
+## Multiple windows
+
+File → New Window (⌘N / Ctrl+N) opens another mailbox window. ⌘-click or Ctrl-click an account in the switcher to open that inbox in its own window. Each window keeps its own account and size; they are restored on the next launch.
+
+Clicking a new-mail notification focuses a window already showing that account, or opens one if needed.
+
+## Mail badge and notifications
+
+The macOS Dock badge shows the combined unread inbox count across connected accounts, refreshed about once a minute and on focus. Linux uses the supported launcher badge; Windows does not currently display a numeric badge.
+
+New unread inbox mail produces a native notification while the app is in the background. Clicking it opens that account's inbox. Alerts contain no sender or subject preview. Mail from before app startup or more than five minutes ago is suppressed, and repeated sync results do not replay alerts. Notifications follow the existing mailbox sync schedule (normally about a minute), rather than a server push channel.
+
+The app must remain running; hiding the Mac window is supported, fully quitting stops updates. macOS notifications require a signed app and notification permission in System Settings. Use the OS notification settings to disable alerts or sounds. Both the desktop release and hosted web changes are needed; older desktop versions safely ignore the new integration.
+
+## Record diagnostics
+
+Help → Record Diagnostics… captures 30 seconds of performance data while the user reproduces a slowdown (clicking the progress notification stops early). It writes an `Inbox-Zero-Diagnostics-<timestamp>` folder to Downloads and reveals it:
+
+- `trace.json.gz`: a Chromium trace of the main and renderer processes (timeline, task, IPC, and sampled JS stack categories). Open it in the DevTools Performance panel or [Perfetto](https://ui.perfetto.dev). Paint, layer, and screenshot categories are excluded, and URL query strings are stripped.
+- `diagnostics.json`: app, Electron, and OS versions, per-process CPU and memory, system memory, mail database file sizes, and local mail engine sync and queue counts. It contains no messages, subjects, or addresses.
+
+When Sentry is configured, the app offers to send both files as attachments on a `User diagnostics` event (tag `area: diagnostics`) and shows the event ID for the user to quote to support.
+
+## Package
+
+```sh
+pnpm --filter @inboxzero/desktop dist:mac
+pnpm --filter @inboxzero/desktop dist:win
+```
+
+Installers land in `apps/desktop/release/`. macOS packaging requires a Developer ID certificate and notarization credentials.
+
+## Release
+
+Push a `desktop-v*` tag to build and publish a release, or run the [Desktop Release workflow](../../.github/workflows/desktop-release.yml) manually with optional publishing. It packages macOS (DMG/ZIP) and Windows (NSIS) for arm64 and x64.
+
+The macOS release requires these GitHub secrets:
+
+- `MAC_CSC_LINK` / `MAC_CSC_KEY_PASSWORD` — Developer ID Application `.p12` (base64) for signed Mac builds
+- `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` / `APPLE_API_KEY_P8` / `APPLE_TEAM_ID` — Apple credentials used to notarize the signed build
+
+Windows signing uses `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD` for the Authenticode `.p12`.
+
+Error reporting from the main process (including renderer, GPU, and native crashes) uses the optional `DESKTOP_SENTRY_DSN` secret, injected at build time as `INBOX_ZERO_SENTRY_DSN`. Builds without it, including local development, don't report to Sentry.
+
+Auto-update metadata (`latest-mac.yml` / `latest.yml`) is published to the `desktop-updates` release; installers stay on `desktop-v*` releases.

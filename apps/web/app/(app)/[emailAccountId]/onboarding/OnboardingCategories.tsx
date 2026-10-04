@@ -44,6 +44,7 @@ import {
   isGoogleProvider,
   isMicrosoftProvider,
 } from "@/utils/email/provider-types";
+import { MutedText } from "@/components/Typography";
 
 // copy paste of old file
 export function CategoriesSetup({
@@ -55,7 +56,7 @@ export function CategoriesSetup({
   provider: string;
   onNext: () => void;
 }) {
-  const { data, isLoading, error } = usePersona();
+  const { isLoading, error } = usePersona();
 
   // State for managing suggested and basic categories separately
   const [suggestedCategories, setSuggestedCategories] = React.useState<
@@ -72,7 +73,7 @@ export function CategoriesSetup({
     })),
   );
 
-  const suggestedLabels = usersRolesInfo[data?.role || ""]?.suggestedLabels;
+  const suggestedLabels = usersRolesInfo.Other.suggestedLabels;
 
   // Initialize categories when persona data loads
   useEffect(() => {
@@ -157,22 +158,20 @@ export function CategoriesSetup({
           <>
             <SectionHeader className="mt-8">SUGGESTED FOR YOU</SectionHeader>
             <div className="grid grid-cols-1 gap-2">
-              {suggestedCategories.map((category, index) => {
-                return (
-                  <CategoryCard
-                    key={category.name}
-                    index={index}
-                    label={category.name}
-                    Icon={icons[index % icons.length]}
-                    iconColor="blue"
-                    description={category.description}
-                    update={updateSuggestedCategory}
-                    value={category.action}
-                    useTooltip={false}
-                    provider={provider}
-                  />
-                );
-              })}
+              {suggestedCategories.map((category, index) => (
+                <CategoryCard
+                  key={category.name}
+                  index={index}
+                  label={category.name}
+                  Icon={icons[index % icons.length]}
+                  iconColor="blue"
+                  description={category.description}
+                  update={updateSuggestedCategory}
+                  value={category.action}
+                  useTooltip={false}
+                  provider={provider}
+                />
+              ))}
               <CustomCategoryCard />
             </div>
           </>
@@ -183,8 +182,13 @@ export function CategoriesSetup({
         )}
       </LoadingContent>
 
-      <div className="flex justify-center mt-8">
-        <ContinueButton type="submit" onClick={onSubmit} />
+      <div className="flex w-full max-w-xs mx-auto mt-8">
+        <ContinueButton
+          type="submit"
+          onClick={onSubmit}
+          size="default"
+          className="w-full"
+        />
       </div>
     </div>
   );
@@ -213,32 +217,30 @@ function CategoryCard({
 }) {
   return (
     <Card>
-      <CardContent className="flex flex-col sm:flex-row sm:items-center gap-4 p-4">
-        <div className="flex items-center gap-2">
+      <CardContent className="flex items-center gap-4 p-4">
+        <div className="flex flex-1 min-w-0 items-center gap-2">
           <IconCircle size="sm" color={iconColor} Icon={Icon} />
           <div>
             {useTooltip ? (
-              <div className="flex flex-1 items-center gap-2 text-sm sm:text-base">
+              <div className="flex flex-1 min-w-0 items-center gap-2 text-sm sm:text-base">
                 {label}
                 {description && (
                   <TooltipExplanation
                     text={description}
-                    className="text-muted-foreground"
+                    className="text-muted-foreground hidden sm:inline-flex"
                   />
                 )}
               </div>
             ) : (
               <>
                 <div className="font-medium">{label}</div>
-                <div className="text-sm text-muted-foreground">
-                  {description}
-                </div>
+                <MutedText>{description}</MutedText>
               </>
             )}
           </div>
         </div>
 
-        <div className="sm:ml-auto flex items-center gap-4">
+        <div className="ml-auto flex shrink-0 items-center gap-4">
           <Select
             value={value || undefined}
             onValueChange={(value) => {
@@ -264,9 +266,7 @@ function CategoryCard({
               {isGoogleProvider(provider) && (
                 <>
                   <SelectItem value="label">Label</SelectItem>
-                  <SelectItem value="label_archive">
-                    Label & skip inbox
-                  </SelectItem>
+                  <SelectItem value="label_archive">Label & archive</SelectItem>
                   {/* <SelectItem value="label_archive_delayed">
                     Label & archive after a week
                   </SelectItem> */}
@@ -284,16 +284,13 @@ function CategoryCard({
 function CustomCategoryCard() {
   return (
     <Card>
-      <CardContent className="flex items-center gap-4 p-4">
+      <CardContent className="flex items-center gap-2 p-4">
         <IconCircle size="sm" color="purple" Icon={PencilLineIcon} />
-
         <div>
-          <div className="flex flex-1 items-center gap-2 font-medium">
-            Custom
-          </div>
+          <div className="flex flex-1 items-center font-medium">Custom</div>
           <div className="ml-auto flex items-center gap-4 text-muted-foreground text-sm">
             You can set your own custom categories later
-          </div>{" "}
+          </div>
         </div>
       </CardContent>
     </Card>

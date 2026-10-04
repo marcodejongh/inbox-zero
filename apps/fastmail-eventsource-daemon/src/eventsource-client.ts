@@ -10,14 +10,14 @@ export interface JMAPStateChange {
 }
 
 export interface EventSourceClientOptions {
-  eventSourceUrl: string;
   accessToken: string;
   accountId: string;
   emailAccountId: string;
-  onStateChange: (emailAccountId: string, newState: string) => void;
-  onError?: (emailAccountId: string, error: Error) => void;
+  eventSourceUrl: string;
   onConnected?: (emailAccountId: string) => void;
   onDisconnected?: (emailAccountId: string) => void;
+  onError?: (emailAccountId: string, error: Error) => void;
+  onStateChange: (emailAccountId: string, newState: string) => void;
 }
 
 /**

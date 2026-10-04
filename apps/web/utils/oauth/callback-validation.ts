@@ -1,20 +1,22 @@
-import { NextResponse } from "next/server";
-import { env } from "@/env";
+import type { NextResponse } from "next/server";
 import type { Logger } from "@/utils/logger";
-import { parseOAuthState } from "@/utils/oauth/state";
+import { createAccountLinkingRedirect } from "@/utils/oauth/account-linking-redirect";
+import { parseSignedOAuthState } from "@/utils/oauth/state";
 
 interface ValidateCallbackParams {
   code: string | null;
-  receivedState: string | null;
-  storedState: string | undefined;
-  stateCookieName: string;
   logger: Logger;
+  receivedState: string | null;
+  stateCookieName: string;
+  storedState: string | undefined;
 }
 
 type ValidationResult =
   | {
       success: true;
       targetUserId: string;
+      stateNonce: string;
+      reconnectEmailAccountId: string | null;
       code: string;
     }
   | {
@@ -29,57 +31,109 @@ export function validateOAuthCallback({
   stateCookieName,
   logger,
 }: ValidateCallbackParams): ValidationResult {
-  const redirectUrl = new URL("/accounts", env.NEXT_PUBLIC_BASE_URL);
-  const response = NextResponse.redirect(redirectUrl);
-
-  if (!storedState || !receivedState || storedState !== receivedState) {
-    logger.warn("Invalid state during OAuth callback", {
-      receivedState,
-      hasStoredState: !!storedState,
-    });
-    redirectUrl.searchParams.set("error", "invalid_state");
-    response.cookies.delete(stateCookieName);
+  const stateValidation = validateMatchingSignedOAuthState({
+    logger,
+    receivedState,
+    storedState,
+  });
+  if (!stateValidation.success) {
     return {
       success: false,
-      response: NextResponse.redirect(redirectUrl, {
-        headers: response.headers,
-      }),
-    };
-  }
-
-  let decodedState: {
-    userId: string;
-    nonce: string;
-  };
-  try {
-    decodedState = parseOAuthState(storedState);
-  } catch (error) {
-    logger.error("Failed to decode state", { error });
-    redirectUrl.searchParams.set("error", "invalid_state_format");
-    response.cookies.delete(stateCookieName);
-    return {
-      success: false,
-      response: NextResponse.redirect(redirectUrl, {
-        headers: response.headers,
+      response: createAccountLinkingRedirect({
+        query: { error: stateValidation.error },
+        stateCookieName,
       }),
     };
   }
 
   if (!code) {
     logger.warn("Missing code in OAuth callback");
-    redirectUrl.searchParams.set("error", "missing_code");
-    response.cookies.delete(stateCookieName);
     return {
       success: false,
-      response: NextResponse.redirect(redirectUrl, {
-        headers: response.headers,
+      response: createAccountLinkingRedirect({
+        query: { error: "missing_code" },
+        stateCookieName,
       }),
     };
   }
 
   return {
     success: true,
-    targetUserId: decodedState.userId,
+    targetUserId: stateValidation.targetUserId,
+    stateNonce: stateValidation.stateNonce,
+    reconnectEmailAccountId: stateValidation.reconnectEmailAccountId,
     code,
   };
+}
+
+export function hasValidMatchingSignedOAuthState(params: {
+  logger: Logger;
+  receivedState: string | null;
+  storedState: string | undefined;
+}) {
+  return validateMatchingSignedOAuthState(params).success;
+}
+
+function validateMatchingSignedOAuthState(params: {
+  logger: Logger;
+  receivedState: string | null;
+  storedState: string | undefined;
+}):
+  | {
+      success: true;
+      targetUserId: string;
+      stateNonce: string;
+      reconnectEmailAccountId: string | null;
+    }
+  | {
+      success: false;
+      error: "invalid_state" | "invalid_state_format";
+    } {
+  if (
+    !params.storedState ||
+    !params.receivedState ||
+    params.storedState !== params.receivedState
+  ) {
+    params.logger.warn("Invalid state during OAuth callback", {
+      receivedState: params.receivedState,
+      hasStoredState: !!params.storedState,
+    });
+    return {
+      success: false,
+      error: "invalid_state",
+    };
+  }
+
+  try {
+    const payload = parseSignedOAuthState<{
+      userId: string;
+      reconnectEmailAccountId?: string;
+    }>(params.storedState);
+
+    if (typeof payload.userId !== "string") {
+      params.logger.error("Failed to decode OAuth callback state", {
+        hasStoredState: !!params.storedState,
+      });
+      return {
+        success: false,
+        error: "invalid_state_format",
+      };
+    }
+
+    return {
+      success: true,
+      targetUserId: payload.userId,
+      stateNonce: payload.nonce,
+      reconnectEmailAccountId: payload.reconnectEmailAccountId ?? null,
+    };
+  } catch (error) {
+    params.logger.error("Failed to verify OAuth callback state", {
+      error,
+      hasStoredState: !!params.storedState,
+    });
+    return {
+      success: false,
+      error: "invalid_state_format",
+    };
+  }
 }

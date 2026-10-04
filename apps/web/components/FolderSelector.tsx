@@ -1,3 +1,4 @@
+import type { MouseEvent, WheelEvent } from "react";
 import { useState } from "react";
 import {
   Check,
@@ -26,11 +27,11 @@ import { FOLDER_SEPARATOR, type OutlookFolder } from "@/utils/outlook/folders";
 import type { FieldError } from "react-hook-form";
 
 interface FolderItemProps {
+  displayPath?: string;
   folder: OutlookFolder;
   level: number;
-  value: { name: string; id: string };
   onSelect: (folderId: string) => void;
-  displayPath?: string;
+  value: { name: string; id: string };
 }
 
 function FolderItem({
@@ -79,12 +80,12 @@ function FolderItem({
 }
 
 interface FolderSelectorProps {
+  error?: FieldError;
   folders: OutlookFolder[];
   isLoading: boolean;
-  value: { name: string; id: string };
   onChangeValue: (value: { name: string; id: string }) => void;
   placeholder?: string;
-  error?: FieldError;
+  value: { name: string; id: string };
 }
 
 export function FolderSelector({
@@ -221,9 +222,9 @@ export function FolderSelector({
               {value.id && !isLoading && (
                 <Button
                   variant="ghost"
-                  size="sm"
-                  className="h-6 w-6 p-0 hover:bg-muted"
-                  onClick={(e) => {
+                  size="icon2xs"
+                  className="hover:bg-muted"
+                  onClick={(e: MouseEvent<HTMLButtonElement>) => {
                     e.stopPropagation();
                     onChangeValue({ name: "", id: "" });
                   }}
@@ -244,7 +245,7 @@ export function FolderSelector({
               onValueChange={setSearchQuery}
             />
             <CommandList
-              onWheelCapture={(e) => {
+              onWheelCapture={(e: WheelEvent<HTMLDivElement>) => {
                 e.preventDefault();
                 e.currentTarget.scrollTop += e.deltaY;
               }}
@@ -258,18 +259,16 @@ export function FolderSelector({
                 <>
                   <CommandEmpty>No folder found.</CommandEmpty>
                   <CommandGroup>
-                    {filteredFolders.map(({ folder, displayPath }) => {
-                      return (
-                        <FolderItem
-                          key={folder.id}
-                          folder={folder}
-                          level={0}
-                          value={value}
-                          onSelect={handleFolderSelect}
-                          displayPath={displayPath}
-                        />
-                      );
-                    })}
+                    {filteredFolders.map(({ folder, displayPath }) => (
+                      <FolderItem
+                        key={folder.id}
+                        folder={folder}
+                        level={0}
+                        value={value}
+                        onSelect={handleFolderSelect}
+                        displayPath={displayPath}
+                      />
+                    ))}
                   </CommandGroup>
                 </>
               )}

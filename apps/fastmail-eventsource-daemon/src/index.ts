@@ -44,7 +44,7 @@ async function main(): Promise<void> {
     try {
       await manager.stop();
       process.exit(0);
-    } catch (_error) {
+    } catch {
       process.exit(1);
     }
   };
@@ -69,7 +69,7 @@ async function main(): Promise<void> {
     setInterval(() => {
       const _stats = manager.getStats();
     }, 60_000); // Every minute
-  } catch (_error) {
+  } catch {
     process.exit(1);
   }
 }

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Testimonials } from "@/components/new-landing/sections/Testimonials";
-import { Hero, HeroVideoPlayer } from "@/app/(landing)/home/Hero";
+import { Hero, HeroContent } from "@/app/(landing)/home/Hero";
 import { Pricing } from "@/components/new-landing/sections/Pricing";
 import { Awards } from "@/components/new-landing/sections/Awards";
 import { EverythingElseSection } from "@/components/new-landing/sections/EverythingElseSection";
@@ -8,15 +8,28 @@ import { StartedInMinutes } from "@/components/new-landing/sections/StartedInMin
 import { BulkUnsubscribe } from "@/components/new-landing/sections/BulkUnsubscribe";
 import { OrganizedInbox } from "@/components/new-landing/sections/OrganizedInbox";
 import { PreWrittenDrafts } from "@/components/new-landing/sections/PreWrittenDrafts";
+import { ManageFromAnywhere } from "@/components/new-landing/sections/ManageFromAnywhere";
 import { BasicLayout } from "@/components/layouts/BasicLayout";
 import { FAQs } from "@/app/(landing)/home/FAQs";
 import { FinalCTA } from "@/app/(landing)/home/FinalCTA";
 import { WordReveal } from "@/components/new-landing/common/WordReveal";
-import { BrandScroller } from "@/components/new-landing/BrandScroller";
+import { env } from "@/env";
+import { BRAND_NAME } from "@/utils/branding";
 
 export const metadata: Metadata = { alternates: { canonical: "/" } };
 
 export default function NewLanding() {
+  if (env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) {
+    return (
+      <BasicLayout>
+        <Hero
+          title={`${BRAND_NAME} for self-hosted teams`}
+          subtitle={`Deploy ${BRAND_NAME} on your own infrastructure and automate your inbox with full data control.`}
+        />
+      </BasicLayout>
+    );
+  }
+
   return (
     <BasicLayout>
       <Hero
@@ -35,10 +48,9 @@ export default function NewLanding() {
             ]}
           />
         }
-        subtitle=" Inbox Zero organizes your inbox, drafts replies in your voice, and helps you reach inbox zero fast. Never miss an important email again."
+        subtitle={`${BRAND_NAME} organizes your inbox and calendar, drafts replies in your voice, and helps you reach inbox zero fast. Never miss an important email again.`}
       >
-        <HeroVideoPlayer />
-        <BrandScroller />
+        <HeroContent />
       </Hero>
       <OrganizedInbox
         title={
@@ -54,6 +66,7 @@ export default function NewLanding() {
         title="Pre-written drafts waiting in your inbox"
         subtitle="When you check your inbox, every email needing a response will have a pre-drafted reply in your tone, ready for you to send."
       />
+      <ManageFromAnywhere />
       <StartedInMinutes
         title="Get started in minutes"
         subtitle="One-click setup. Start organizing and drafting replies in minutes."

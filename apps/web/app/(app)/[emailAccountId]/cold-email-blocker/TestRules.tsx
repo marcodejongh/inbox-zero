@@ -149,17 +149,19 @@ function TestRulesContentRow({
       }
     >
       <TableCell>
-        <div className="flex items-center justify-between">
-          <EmailMessageCell
-            sender={message.headers.from}
-            subject={message.headers.subject}
-            snippet={message.snippet}
-            userEmail={userEmail}
-            threadId={message.threadId}
-            messageId={message.id}
-            labelIds={message.labelIds}
-          />
-          <div className="ml-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <EmailMessageCell
+              sender={message.headers.from}
+              subject={message.headers.subject}
+              snippet={message.snippet}
+              userEmail={userEmail}
+              threadId={message.threadId}
+              messageId={message.id}
+              labelIds={message.labelIds}
+            />
+          </div>
+          <div className="ml-4 shrink-0">
             <Button
               color="white"
               loading={testing}
@@ -203,14 +205,18 @@ function Result(props: { coldEmailResponse: ColdEmailBlockerResponse | null }) {
       />
     );
   }
+
+  let title = "Our AI determined this is not a cold email!";
+  if (coldEmailResponse.reason === "hasPreviousEmail") {
+    title = "This person has previously emailed you. This is not a cold email!";
+  } else if (coldEmailResponse.reason === "applicationSender") {
+    title = "This is an application notification, not a cold email!";
+  }
+
   return (
     <AlertBasic
       variant="success"
-      title={
-        coldEmailResponse.reason === "hasPreviousEmail"
-          ? "This person has previously emailed you. This is not a cold email!"
-          : "Our AI determined this is not a cold email!"
-      }
+      title={title}
       description={coldEmailResponse.aiReason}
     />
   );

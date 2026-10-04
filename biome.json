@@ -1,9 +1,9 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.2.2/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.1/schema.json",
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "style": {
         "noNonNullAssertion": "off",
         "noUselessElse": "off",
@@ -20,7 +20,8 @@
         "useDefaultSwitchClause": "off",
         "useCollapsedElseIf": "off",
         "useConsistentObjectDefinitions": "off",
-        "noMagicNumbers": "off"
+        "noMagicNumbers": "off",
+        "useConsistentTypeDefinitions": "off"
       },
       "suspicious": {
         "noConsole": "warn",
@@ -35,7 +36,9 @@
         "noTsIgnore": "off",
         "useIterableCallbackReturn": "off",
         "noUnknownAtRules": "off",
-        "noAlert": "off"
+        "noAlert": "off",
+        "noShadow": "off",
+        "noUnnecessaryConditions": "off"
       },
       "complexity": {
         "noForEach": "off",
@@ -44,12 +47,7 @@
         "useArrowFunction": "off"
       },
       "nursery": {
-        "useSortedClasses": "off",
-        "noShadow": "off",
-        "noUselessUndefined": "off",
-        "useMaxParams": "off",
-        "useConsistentTypeDefinitions": "off",
-        "noUnnecessaryConditions": "off"
+        "useSortedClasses": "off"
       },
       "performance": {
         "useTopLevelRegex": "off",
@@ -83,6 +81,7 @@
       "!*.config.*",
       "!*.json",
       "!**/tsconfig*.json",
+      "!**/*.svg",
       "!.turbo/**",
       "!.next/**"
     ]
@@ -101,10 +100,12 @@
       "!*.config.*",
       "!*.json",
       "!**/tsconfig*.json",
+      "!**/*.svg",
       "!.turbo",
       "!.next",
       "!sw.js",
-      "!.vscode"
+      "!.vscode",
+      "!.claude"
     ]
   },
   "assist": {
@@ -117,11 +118,20 @@
   },
   "overrides": [
     {
+      "includes": ["**/__tests__/**", "**/*.test.*", "**/*.spec.*"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "off"
+          }
+        }
+      }
+    },
+    {
       "includes": [
         "**/__tests__/**",
         "**/*.test.*",
         "**/*.spec.*",
-        "apps/unsubscriber/**",
         "packages/**",
         "**/*.tsx",
         "**/scripts/**"
@@ -135,5 +145,5 @@
       }
     }
   ],
-  "extends": ["ultracite"]
+  "extends": ["ultracite/biome/core", "ultracite/biome/next"]
 }

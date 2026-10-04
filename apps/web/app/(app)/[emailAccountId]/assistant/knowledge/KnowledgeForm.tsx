@@ -25,7 +25,7 @@ import { Tiptap, type TiptapHandle } from "@/components/editor/Tiptap";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/utils";
 import { useAccount } from "@/providers/EmailAccountProvider";
-import { usePremium } from "@/components/PremiumAlert";
+import { usePremium } from "@/hooks/usePremium";
 import { hasTierAccess } from "@/utils/premium";
 import { AlertWithButton } from "@/components/Alert";
 import { KNOWLEDGE_BASIC_MAX_ITEMS } from "@/utils/config";
@@ -46,7 +46,7 @@ export function KnowledgeForm({
 
   const hasFullAccess = hasTierAccess({
     tier: tier || null,
-    minimumTier: "BUSINESS_PLUS_MONTHLY",
+    minimumTier: "PLUS_MONTHLY",
   });
 
   const {
@@ -111,9 +111,7 @@ export function KnowledgeForm({
           <AlertWithButton
             title="Upgrade to add more knowledge base entries"
             description={
-              <>
-                Switch to the Business plan to add more knowledge base entries.
-              </>
+              <>Switch to the Plus plan to add more knowledge base entries.</>
             }
             icon={<CrownIcon className="h-4 w-4" />}
             button={
@@ -147,7 +145,8 @@ export function KnowledgeForm({
               <Tiptap
                 ref={editorRef}
                 initialContent={field.value ?? ""}
-                className="mt-1"
+                input="markdown"
+                className="mt-1 prose prose-sm dark:prose-invert max-w-none"
                 autofocus={false}
               />
             </div>

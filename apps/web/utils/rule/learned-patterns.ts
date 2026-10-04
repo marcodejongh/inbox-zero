@@ -1,7 +1,12 @@
 import prisma from "@/utils/prisma";
 import type { Logger } from "@/utils/logger";
-import { GroupItemType } from "@/generated/prisma/enums";
+import { GroupItemSource, GroupItemType } from "@/generated/prisma/enums";
 import { isDuplicateError } from "@/utils/prisma-helpers";
+import { findMatchingGroupItem } from "@/utils/group/find-matching-group";
+import {
+  normalizeGroupItemValue,
+  saveGroupItem,
+} from "@/utils/group/group-item";
 
 /**
  * Saves a learned pattern for a rule
@@ -11,59 +16,106 @@ import { isDuplicateError } from "@/utils/prisma-helpers";
 export async function saveLearnedPattern({
   emailAccountId,
   from,
-  ruleName,
+  ruleId,
+  exclude,
   logger,
+  reason,
+  threadId,
+  messageId,
+  source,
 }: {
   emailAccountId: string;
   from: string;
-  ruleName: string;
+  ruleId: string;
+  exclude?: boolean;
   logger: Logger;
+  reason?: string | null;
+  threadId?: string | null;
+  messageId?: string | null;
+  source: GroupItemSource;
 }) {
   const rule = await prisma.rule.findUnique({
-    where: {
-      name_emailAccountId: {
-        name: ruleName,
-        emailAccountId,
-      },
-    },
-    select: { id: true, groupId: true },
+    where: { id: ruleId, emailAccountId },
+    select: { id: true, name: true, groupId: true },
   });
 
   if (!rule) {
-    logger.error("Rule not found", { emailAccountId, ruleName });
+    logger.error("Rule not found", { ruleId });
     return;
   }
 
-  let groupId = rule.groupId;
+  const groupId = await getOrCreateGroupForRule({
+    emailAccountId,
+    ruleId: rule.id,
+    ruleName: rule.name,
+    existingGroupId: rule.groupId,
+    logger,
+  });
 
-  if (!groupId) {
-    // Create a new group for this rule if one doesn't exist
-    const newGroup = await prisma.group.create({
-      data: {
-        emailAccountId,
-        name: ruleName,
-        rule: { connect: { id: rule.id } },
-      },
-    });
+  await saveGroupItem({
+    groupId,
+    type: GroupItemType.FROM,
+    value: from,
+    exclude,
+    reason,
+    threadId,
+    messageId,
+    source,
+  });
+}
 
-    groupId = newGroup.id;
-  }
-
-  await prisma.groupItem.upsert({
+/**
+ * Removes an AI-inferred sender inclusion from a rule, so the rule goes back to
+ * judging each email from that sender on its own. User-authored patterns and
+ * exclusions are kept.
+ */
+export async function removeAiLearnedPattern({
+  emailAccountId,
+  from,
+  ruleId,
+}: {
+  emailAccountId: string;
+  from: string;
+  ruleId: string;
+}) {
+  const { count } = await prisma.groupItem.deleteMany({
     where: {
-      groupId_type_value: {
-        groupId,
-        type: GroupItemType.FROM,
-        value: from,
-      },
-    },
-    update: {},
-    create: {
-      groupId,
+      group: { emailAccountId, rule: { is: { id: ruleId } } },
       type: GroupItemType.FROM,
-      value: from,
+      value: normalizeGroupItemValue(from),
+      source: GroupItemSource.AI,
+      exclude: false,
     },
   });
+  return count;
+}
+
+/**
+ * Whether another enabled rule already includes this sender, by a pattern the
+ * user wrote or one learned for that rule. Uses the rule matcher's own FROM
+ * semantics, so a domain pattern like "@example.com" counts.
+ */
+export async function hasIncludePatternOnAnotherRule({
+  emailAccountId,
+  from,
+  ruleId,
+}: {
+  emailAccountId: string;
+  from: string;
+  ruleId: string;
+}) {
+  const items = await prisma.groupItem.findMany({
+    where: {
+      type: GroupItemType.FROM,
+      exclude: false,
+      group: {
+        emailAccountId,
+        rule: { is: { enabled: true, id: { not: ruleId } } },
+      },
+    },
+    select: { type: true, value: true, exclude: true },
+  });
+  return !!findMatchingGroupItem({ from, subject: "" }, items);
 }
 
 /**
@@ -100,61 +152,31 @@ export async function saveLearnedPatterns({
     return { error: "Rule not found" };
   }
 
-  let groupId = rule.groupId;
-
-  if (!groupId) {
-    try {
-      const newGroup = await prisma.group.create({
-        data: {
-          emailAccountId,
-          name: ruleName,
-          rule: { connect: { id: rule.id } },
-        },
-      });
-
-      groupId = newGroup.id;
-    } catch (error) {
-      if (isDuplicateError(error)) {
-        logger.error("Group already exists", { emailAccountId, ruleName });
-        const newGroup2 = await prisma.group.create({
-          data: {
-            emailAccountId,
-            name: `${ruleName} (${new Date().toISOString()})`,
-            rule: { connect: { id: rule.id } },
-          },
-        });
-        groupId = newGroup2.id;
-      } else {
-        logger.error("Error creating learned patterns group", { error });
-        return { error: "Error creating learned patterns group" };
-      }
-    }
+  let groupId: string;
+  try {
+    groupId = await getOrCreateGroupForRule({
+      emailAccountId,
+      ruleId: rule.id,
+      ruleName: ruleName,
+      existingGroupId: rule.groupId,
+      logger,
+    });
+  } catch (error) {
+    logger.error("Error creating learned patterns group", { error });
+    return { error: "Error creating learned patterns group" };
   }
 
   const errors: string[] = [];
 
   // Process all patterns in a single function
   for (const pattern of patterns) {
-    // Store pattern with the exclude flag properly set in the database
-    // This maps directly to the new exclude field in the GroupItem model
     try {
-      await prisma.groupItem.upsert({
-        where: {
-          groupId_type_value: {
-            groupId,
-            type: pattern.type,
-            value: pattern.value,
-          },
-        },
-        update: {
-          exclude: pattern.exclude || false,
-        },
-        create: {
-          groupId,
-          type: pattern.type,
-          value: pattern.value,
-          exclude: pattern.exclude || false,
-        },
+      await saveGroupItem({
+        groupId,
+        type: pattern.type,
+        value: pattern.value,
+        exclude: pattern.exclude,
+        source: GroupItemSource.USER,
       });
     } catch (error) {
       const message = `${pattern.value} (${pattern.type}) ${
@@ -174,4 +196,69 @@ export async function saveLearnedPatterns({
   }
 
   return { success: true };
+}
+
+async function getOrCreateGroupForRule({
+  emailAccountId,
+  ruleId,
+  ruleName,
+  existingGroupId,
+  logger,
+}: {
+  emailAccountId: string;
+  ruleId: string;
+  ruleName: string;
+  existingGroupId: string | null;
+  logger: Logger;
+}): Promise<string> {
+  if (existingGroupId) return existingGroupId;
+
+  // Try to create the group
+  try {
+    const newGroup = await prisma.group.create({
+      data: {
+        emailAccountId,
+        name: ruleName,
+        rule: { connect: { id: ruleId } },
+      },
+    });
+    return newGroup.id;
+  } catch (error) {
+    if (!isDuplicateError(error)) throw error;
+  }
+
+  // Handle duplicate: check if rule was concurrently updated with a group
+  const updatedRule = await prisma.rule.findUnique({
+    where: { id: ruleId, emailAccountId },
+    select: { groupId: true },
+  });
+  if (updatedRule?.groupId) return updatedRule.groupId;
+
+  // Check if a group with the same name exists
+  const existingGroup = await prisma.group.findUnique({
+    where: { name_emailAccountId: { name: ruleName, emailAccountId } },
+    select: { id: true },
+  });
+
+  if (existingGroup) {
+    // Attempt to link it (ignore failures from concurrent updates)
+    await prisma.rule
+      .update({
+        where: { id: ruleId, emailAccountId },
+        data: { groupId: existingGroup.id },
+      })
+      .catch((error) => {
+        logger.warn(
+          "Failed to link existing group to rule (likely concurrent update)",
+          {
+            ruleId,
+            groupId: existingGroup.id,
+            error,
+          },
+        );
+      });
+    return existingGroup.id;
+  }
+
+  throw new Error(`Failed to create or find group for rule: ${ruleName}`);
 }

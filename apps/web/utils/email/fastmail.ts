@@ -1,3 +1,5 @@
+import { SafeError } from "@/utils/error";
+import type { SendEmailBody } from "@/utils/types/mail";
 import type { ParsedMessage } from "@/utils/types";
 import type {
   FastmailClient,
@@ -6,7 +8,7 @@ import type {
 import { getAccessTokenFromClient } from "@/utils/fastmail/client";
 import { FastmailMailbox } from "@/utils/fastmail/constants";
 import type { InboxZeroLabel } from "@/utils/label";
-import type { ThreadsQuery } from "@/app/api/threads/validation";
+import type { ThreadsQuery } from "@/utils/threads/validation";
 import type { OutlookFolder } from "@/utils/outlook/folders";
 import type {
   EmailProvider,
@@ -14,6 +16,7 @@ import type {
   EmailLabel,
   EmailFilter,
   EmailSignature,
+  SentMessagePage,
 } from "@/utils/email/types";
 import { createScopedLogger, type Logger } from "@/utils/logger";
 import {
@@ -53,113 +56,108 @@ const EMAIL_PROPERTIES = [
 
 // JMAP Email type
 interface JMAPEmail {
-  id: string;
-  blobId: string;
-  threadId: string;
-  mailboxIds: Record<string, boolean>;
-  keywords: Record<string, boolean>;
-  size: number;
-  receivedAt: string;
-  messageId?: string[];
-  inReplyTo?: string[];
-  references?: string[];
-  sender?: JMAPEmailAddress[];
-  from?: JMAPEmailAddress[];
-  to?: JMAPEmailAddress[];
-  cc?: JMAPEmailAddress[];
+  attachments?: JMAPBodyPart[];
   bcc?: JMAPEmailAddress[];
-  replyTo?: JMAPEmailAddress[];
-  subject?: string;
-  sentAt?: string;
-  hasAttachment: boolean;
-  preview: string;
+  blobId: string;
   bodyStructure?: JMAPBodyPart;
   bodyValues?: Record<string, { value: string; isEncodingProblem: boolean }>;
-  textBody?: JMAPBodyPart[];
+  cc?: JMAPEmailAddress[];
+  from?: JMAPEmailAddress[];
+  hasAttachment: boolean;
   htmlBody?: JMAPBodyPart[];
-  attachments?: JMAPBodyPart[];
+  id: string;
+  inReplyTo?: string[];
+  keywords: Record<string, boolean>;
+  mailboxIds: Record<string, boolean>;
+  messageId?: string[];
+  preview: string;
+  receivedAt: string;
+  references?: string[];
+  replyTo?: JMAPEmailAddress[];
+  sender?: JMAPEmailAddress[];
+  sentAt?: string;
+  size: number;
+  subject?: string;
+  textBody?: JMAPBodyPart[];
+  threadId: string;
+  to?: JMAPEmailAddress[];
 }
 
 interface JMAPEmailAddress {
-  name?: string;
   email: string;
+  name?: string;
 }
 
 interface JMAPBodyPart {
-  partId?: string;
   blobId?: string;
-  size: number;
-  name?: string;
-  type: string;
   charset?: string;
-  disposition?: string;
   cid?: string;
+  disposition?: string;
+  name?: string;
+  partId?: string;
+  size: number;
   subParts?: JMAPBodyPart[];
-}
-
-interface JMAPThread {
-  id: string;
-  emailIds: string[];
+  type: string;
 }
 
 interface JMAPMailbox {
   id: string;
+  isSubscribed: boolean;
   name: string;
   parentId?: string;
   role?: string;
   sortOrder: number;
   totalEmails: number;
-  unreadEmails: number;
   totalThreads: number;
+  unreadEmails: number;
   unreadThreads: number;
-  isSubscribed: boolean;
 }
 
 interface JMAPIdentity {
-  id: string;
-  name: string;
-  email: string;
-  replyTo?: JMAPEmailAddress[];
   bcc?: JMAPEmailAddress[];
-  textSignature?: string;
+  email: string;
   htmlSignature?: string;
+  id: string;
   mayDelete: boolean;
+  name: string;
+  replyTo?: JMAPEmailAddress[];
+  textSignature?: string;
 }
 
 // Cache for mailbox lookups
 interface MailboxCache {
   byId: Map<string, JMAPMailbox>;
-  byRole: Map<string, JMAPMailbox>;
   byName: Map<string, JMAPMailbox>;
+  byRole: Map<string, JMAPMailbox>;
 }
 
 // JMAP response data types (simplified - JMAP has complex generic response types)
 interface JMAPGetResponse<T> {
   accountId: string;
-  state: string;
   list: T[];
   notFound?: string[];
+  state: string;
 }
 
 interface JMAPQueryResponse {
   accountId: string;
-  queryState: string;
+  canCalculateChanges?: boolean;
   ids: string[];
   position: number;
+  queryState: string;
   total?: number;
-  canCalculateChanges?: boolean;
 }
 
 interface JMAPSetResponse<T> {
   accountId: string;
-  oldState?: string;
-  newState: string;
   created?: Record<string, T>;
-  updated?: Record<string, T | null>;
   destroyed?: string[];
+  newState: string;
   notCreated?: Record<string, { type: string; description?: string }>;
-  notUpdated?: Record<string, { type: string; description?: string }>;
   notDestroyed?: Record<string, { type: string; description?: string }>;
+  notUpdated?: Record<string, { type: string; description?: string }>;
+  oldState?: string;
+  updated?: Record<string, T | null>;
 }
 
 /**
@@ -168,17 +166,16 @@ interface JMAPSetResponse<T> {
  */
 interface JMAPChangesResponse {
   accountId: string;
-  oldState: string;
-  newState: string;
-  hasMoreChanges: boolean;
   created: string[];
-  updated: string[];
   destroyed: string[];
+  hasMoreChanges: boolean;
+  newState: string;
+  oldState: string;
+  updated: string[];
 }
 
 // Helper to extract typed response data from JMAP method responses
 // JMAP responses are [methodName, data, callId] tuples where data structure varies by method
-// biome-ignore lint/suspicious/noExplicitAny: JMAP response types are complex and vary by method
 function getResponseData<T>(response: JMAPMethodResponse): T {
   return response[1] as T;
 }
@@ -243,6 +240,63 @@ export class FastmailProvider implements EmailProvider {
   private readonly logger: Logger;
   private mailboxCache: MailboxCache | null = null;
   private readonly inboxZeroLabels: Map<string, string> = new Map();
+
+  readonly localMailSyncStrategy = "account-history" as const;
+
+  // Upstream added these APIs after this fork; reject them until JMAP support is completed.
+  archiveMessages: EmailProvider["archiveMessages"] =
+    unsupportedFastmailOperation;
+  bulkArchiveThreads: EmailProvider["bulkArchiveThreads"] =
+    unsupportedFastmailOperation;
+  createDraft: EmailProvider["createDraft"] = unsupportedFastmailOperation;
+  deleteFolder: EmailProvider["deleteFolder"] = unsupportedFastmailOperation;
+  getAttachmentStream: EmailProvider["getAttachmentStream"] =
+    unsupportedFastmailOperation;
+  getDraftReferenceForMessage: EmailProvider["getDraftReferenceForMessage"] =
+    unsupportedFastmailOperation;
+  getFolderCounts: EmailProvider["getFolderCounts"] =
+    unsupportedFastmailOperation;
+  getForwardingAddresses: EmailProvider["getForwardingAddresses"] =
+    unsupportedFastmailOperation;
+  getInboxStats: EmailProvider["getInboxStats"] = unsupportedFastmailOperation;
+  getLatestMessageFromThreadSnapshot: EmailProvider["getLatestMessageFromThreadSnapshot"] =
+    unsupportedFastmailOperation;
+  getLatestMessageInThread: EmailProvider["getLatestMessageInThread"] =
+    unsupportedFastmailOperation;
+  getMailboxSyncPage: EmailProvider["getMailboxSyncPage"] =
+    unsupportedFastmailOperation;
+  getMessagesWithAttachments: EmailProvider["getMessagesWithAttachments"] =
+    unsupportedFastmailOperation;
+  getThreadsWithLabel: EmailProvider["getThreadsWithLabel"] =
+    unsupportedFastmailOperation;
+  markMessagesReadState: EmailProvider["markMessagesReadState"] =
+    unsupportedFastmailOperation;
+  markMessagesStarredState: EmailProvider["markMessagesStarredState"] =
+    unsupportedFastmailOperation;
+  markNotSpam: EmailProvider["markNotSpam"] = unsupportedFastmailOperation;
+  renameFolder: EmailProvider["renameFolder"] = unsupportedFastmailOperation;
+  searchContacts: EmailProvider["searchContacts"] =
+    unsupportedFastmailOperation;
+  searchMessages: EmailProvider["searchMessages"] =
+    unsupportedFastmailOperation;
+  searchThreads: EmailProvider["searchThreads"] = unsupportedFastmailOperation;
+  sendDraft: EmailProvider["sendDraft"] = unsupportedFastmailOperation;
+  starMessage: EmailProvider["starMessage"] = unsupportedFastmailOperation;
+  syncLocalMail: EmailProvider["syncLocalMail"] = unsupportedFastmailOperation;
+  trashMessages: EmailProvider["trashMessages"] = unsupportedFastmailOperation;
+  unarchiveMessages: EmailProvider["unarchiveMessages"] =
+    unsupportedFastmailOperation;
+  unarchiveThread: EmailProvider["unarchiveThread"] =
+    unsupportedFastmailOperation;
+  untrashMessages: EmailProvider["untrashMessages"] =
+    unsupportedFastmailOperation;
+  untrashThread: EmailProvider["untrashThread"] = unsupportedFastmailOperation;
+  updateDraft: EmailProvider["updateDraft"] = unsupportedFastmailOperation;
+  updateLabel: EmailProvider["updateLabel"] = unsupportedFastmailOperation;
+
+  async getOrCreateFolderIdByName(folderName: string): Promise<string> {
+    return this.getOrCreateOutlookFolderIdByName(folderName);
+  }
 
   /**
    * Creates a new FastmailProvider instance
@@ -879,10 +933,12 @@ export class FastmailProvider implements EmailProvider {
     maxResults: number;
     after?: Date;
     before?: Date;
-  }): Promise<{ id: string; threadId: string }[]> {
+    pageToken?: string;
+  }): Promise<SentMessagePage> {
     const sentMailbox = await this.getMailboxByRole(FastmailMailbox.SENT);
-    if (!sentMailbox) return [];
+    if (!sentMailbox) return { messages: [] };
 
+    const position = Number.parseInt(options.pageToken || "0", 10) || 0;
     const filter: Record<string, unknown> = { inMailbox: sentMailbox.id };
     if (options.after) {
       filter.after = options.after.toISOString();
@@ -899,6 +955,8 @@ export class FastmailProvider implements EmailProvider {
           filter,
           sort: [{ property: "receivedAt", isAscending: false }],
           limit: options.maxResults,
+          position,
+          calculateTotal: true,
         },
         "0",
       ],
@@ -920,7 +978,18 @@ export class FastmailProvider implements EmailProvider {
     const emails = getResponseData<JMAPGetResponse<JMAPEmail>>(
       response.methodResponses[1],
     ).list;
-    return emails.map((e) => ({ id: e.id, threadId: e.threadId }));
+    const query = getResponseData<JMAPQueryResponse>(
+      response.methodResponses[0],
+    );
+    return {
+      messages: emails.map((e) => ({ id: e.id, threadId: e.threadId })),
+      nextPageToken: calculateNextPageToken(
+        position,
+        emails.length,
+        options.maxResults,
+        query.total,
+      ),
+    };
   }
 
   async getSentThreadsExcluding(options: {
@@ -1405,8 +1474,8 @@ export class FastmailProvider implements EmailProvider {
     }
   }
 
-  async deleteDraft(draftId: string): Promise<void> {
-    await this.client.request([
+  async deleteDraft(draftId: string): Promise<boolean> {
+    const response = await this.client.request([
       [
         "Email/set",
         {
@@ -1416,6 +1485,15 @@ export class FastmailProvider implements EmailProvider {
         "0",
       ],
     ]);
+    const result = getResponseData<JMAPSetResponse<unknown>>(
+      response.methodResponses[0],
+    );
+    if (result.notDestroyed?.[draftId]) {
+      throw new Error(
+        result.notDestroyed[draftId].description || "Failed to delete draft",
+      );
+    }
+    return result.destroyed?.includes(draftId) ?? false;
   }
 
   async draftEmail(
@@ -1476,7 +1554,16 @@ export class FastmailProvider implements EmailProvider {
     return { draftId: created.id };
   }
 
-  async replyToEmail(email: ParsedMessage, content: string): Promise<void> {
+  async replyToEmail(
+    email: ParsedMessage,
+    content: string,
+    options?: Parameters<EmailProvider["replyToEmail"]>[2],
+  ): Promise<{ messageId: string }> {
+    if (options?.replyTo || options?.from || options?.attachments?.length) {
+      throw new SafeError(
+        "These Fastmail reply options are not supported yet.",
+      );
+    }
     const sent = await this.getMailboxByRole(FastmailMailbox.SENT);
     if (!sent) {
       throw new Error("Sent mailbox not found");
@@ -1509,7 +1596,7 @@ export class FastmailProvider implements EmailProvider {
       throw new Error("Could not extract email address from recipient");
     }
 
-    await this.client.request([
+    const response = await this.client.request([
       [
         "Email/set",
         {
@@ -1549,6 +1636,11 @@ export class FastmailProvider implements EmailProvider {
         "1",
       ],
     ]);
+    const created = getResponseData<JMAPSetResponse<{ id: string }>>(
+      response.methodResponses[0],
+    ).created?.reply;
+    if (!created?.id) throw new Error("Failed to send reply");
+    return { messageId: created.id };
   }
 
   /**
@@ -1566,7 +1658,7 @@ export class FastmailProvider implements EmailProvider {
     bcc?: string;
     subject: string;
     messageText: string;
-  }): Promise<void> {
+  }): Promise<{ messageId: string }> {
     const sent = await this.getMailboxByRole(FastmailMailbox.SENT);
     if (!sent) {
       throw new Error("Sent mailbox not found");
@@ -1599,7 +1691,7 @@ export class FastmailProvider implements EmailProvider {
       ? args.bcc.split(",").map((e) => ({ email: e.trim() }))
       : undefined;
 
-    await this.client.request([
+    const response = await this.client.request([
       [
         "Email/set",
         {
@@ -1635,6 +1727,11 @@ export class FastmailProvider implements EmailProvider {
         "1",
       ],
     ]);
+    const created = getResponseData<JMAPSetResponse<{ id: string }>>(
+      response.methodResponses[0],
+    ).created?.email;
+    if (!created?.id) throw new Error("Failed to send email");
+    return { messageId: created.id };
   }
 
   /**
@@ -1650,24 +1747,19 @@ export class FastmailProvider implements EmailProvider {
    * @param body.attachments - Optional array of attachments
    * @returns Object containing the created message ID and thread ID
    */
-  async sendEmailWithHtml(body: {
-    replyToEmail?: {
-      threadId: string;
-      headerMessageId: string;
-      references?: string;
-    };
-    to: string;
-    cc?: string;
-    bcc?: string;
-    replyTo?: string;
-    subject: string;
-    messageHtml: string;
-    attachments?: Array<{
-      filename: string;
-      content: string;
-      contentType: string;
-    }>;
-  }): Promise<{ messageId: string; threadId: string }> {
+  async sendEmailWithHtml(
+    body: SendEmailBody,
+  ): Promise<{ messageId: string; threadId: string }> {
+    if (
+      body.providerDraftId ||
+      body.replyToEmail?.forwardedMessageId ||
+      body.from ||
+      body.attachments?.some(
+        (attachment) => attachment.disposition === "inline",
+      )
+    ) {
+      throw new SafeError("This Fastmail send operation is not supported yet.");
+    }
     const sent = await this.getMailboxByRole(FastmailMailbox.SENT);
     if (!sent) {
       throw new Error("Sent mailbox not found");
@@ -1748,7 +1840,7 @@ export class FastmailProvider implements EmailProvider {
       emailCreate.attachments = uploadedAttachments;
     }
 
-    if (body.replyToEmail) {
+    if (body.replyToEmail?.headerMessageId) {
       emailCreate.inReplyTo = [body.replyToEmail.headerMessageId];
       if (body.replyToEmail.references) {
         emailCreate.references = body.replyToEmail.references.split(" ");
@@ -1795,13 +1887,13 @@ export class FastmailProvider implements EmailProvider {
   async forwardEmail(
     email: ParsedMessage,
     args: { to: string; cc?: string; bcc?: string; content?: string },
-  ): Promise<void> {
+  ): Promise<{ messageId: string }> {
     const originalContent = email.textHtml || email.textPlain || "";
     const forwardContent = args.content
       ? `${args.content}\n\n---------- Forwarded message ---------\n${originalContent}`
       : `---------- Forwarded message ---------\n${originalContent}`;
 
-    await this.sendEmailWithHtml({
+    return this.sendEmailWithHtml({
       to: args.to,
       cc: args.cc,
       bcc: args.bcc,
@@ -3112,4 +3204,8 @@ export class FastmailProvider implements EmailProvider {
       displayName: identity.name,
     }));
   }
+}
+
+async function unsupportedFastmailOperation(): Promise<never> {
+  throw new SafeError("This Fastmail operation is not supported yet.");
 }

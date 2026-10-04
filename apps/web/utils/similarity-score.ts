@@ -1,33 +1,249 @@
+import { stripBrandingSignatures } from "@/utils/referral/signature";
+import he from "he";
 import * as stringSimilarity from "string-similarity";
-import { parseReply } from "@/utils/mail";
+import {
+  convertEmailHtmlToText,
+  parseReply,
+  stripForwardedContent,
+} from "@/utils/mail";
+import { stripQuotedContent } from "@/utils/ai/choose-rule/draft-management";
+import { stripQuotedHtmlContent } from "@/utils/email/parse-message-reply";
+import {
+  stripPlainTextSignature,
+  stripProviderSignatureHtml,
+} from "@/utils/email/signature-normalization";
+import type { ParsedMessage } from "@/utils/types";
+
+const HTML_TAG_NAMES = [
+  "html",
+  "head",
+  "body",
+  "div",
+  "p",
+  "br",
+  "a",
+  "span",
+  "table",
+  "tr",
+  "td",
+  "blockquote",
+  "meta",
+];
+
+const HTML_TAG_PATTERN = new RegExp(
+  `<\\/?(?:${HTML_TAG_NAMES.join("|")})(?:\\s|\\/|>)`,
+  "i",
+);
 
 /**
- * Calculates the similarity between two strings using Dice Coefficient.
- * It first attempts to extract the main reply content from each string
- * and then normalizes the text before comparison.
+ * Normalizes content for Outlook (HTML) comparison.
+ * Converts \n to <br> and then to plain text, strips quoted content.
+ */
+function normalizeForOutlook(content: string, stripSignature = false): string {
+  const signatureStripped = stripSignature
+    ? stripProviderSignatureHtml(content)
+    : content;
+  const withBr = signatureStripped.replace(/\n/g, "<br>");
+  const plainText = convertEmailHtmlToText({
+    htmlText: stripQuotedHtmlContent(withBr),
+    includeLinks: false,
+  });
+  const withoutQuotedContent = stripQuotedContent(plainText);
+  const withoutForwardedContent = stripForwardedContent(withoutQuotedContent);
+  const withoutSignature = stripSignature
+    ? stripPlainTextSignature(withoutForwardedContent)
+    : withoutForwardedContent;
+  return stripBrandingSignatures(withoutSignature).toLowerCase().trim();
+}
+
+/**
+ * Decodes HTML entities (e.g., &#x1F44B; -> 👋) without modifying other content.
+ * Invalid code points (> 0x10FFFF) are left unchanged to avoid RangeError.
+ */
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => {
+      const codePoint = Number.parseInt(hex, 16);
+      if (!Number.isFinite(codePoint) || codePoint > 0x10_ff_ff) {
+        return match;
+      }
+      return String.fromCodePoint(codePoint);
+    })
+    .replace(/&#(\d+);/g, (match, dec) => {
+      const codePoint = Number.parseInt(dec, 10);
+      if (!Number.isFinite(codePoint) || codePoint > 0x10_ff_ff) {
+        return match;
+      }
+      return String.fromCodePoint(codePoint);
+    })
+    .replace(/&[a-zA-Z][a-zA-Z0-9]+;/g, (match) => he.decode(match));
+}
+
+/**
+ * Normalizes content for Gmail (plain text) comparison.
+ * Uses parseReply to extract the reply, decodes HTML entities, and strips quoted content.
+ */
+function normalizePlainText(content: string, stripSignature = false): string {
+  const signatureStripped = stripSignature
+    ? stripProviderSignatureHtml(content)
+    : content;
+  const plainText = looksLikeHtmlContent(signatureStripped)
+    ? convertEmailHtmlToText({
+        htmlText: stripQuotedHtmlContent(
+          signatureStripped.replace(/\n/g, "<br>"),
+        ),
+        includeLinks: false,
+      })
+    : signatureStripped;
+  const reply = parseReply(plainText);
+  const decoded = decodeHtmlEntities(reply);
+  const withoutQuotedContent = stripQuotedContent(decoded);
+  const withoutForwardedContent = stripForwardedContent(withoutQuotedContent);
+  const withoutSignature = stripSignature
+    ? stripPlainTextSignature(withoutForwardedContent)
+    : withoutForwardedContent;
+  return stripBrandingSignatures(withoutSignature).toLowerCase().trim();
+}
+
+/**
+ * Calculates the similarity between stored draft content and a provider message.
+ * Handles Outlook HTML content and properly strips quoted content.
  *
- * @param text1 The first string (e.g., original draft content).
- * @param text2 The second string (e.g., sent message content).
+ * @param storedContent The original stored draft content (from executedAction.content)
+ * @param providerMessage The message from the email provider (ParsedMessage or plain text)
  * @returns A similarity score between 0.0 and 1.0.
  */
 export function calculateSimilarity(
-  text1?: string | null,
-  text2?: string | null,
+  storedContent?: string | null,
+  providerMessage?: string | ParsedMessage | null,
+  options: { excludedSignatures?: string[] } = {},
 ): number {
-  if (!text1 || !text2) {
-    return 0.0; // If either text is missing, similarity is 0
+  return calculateSimilarityDetails(storedContent, providerMessage, options)
+    .score;
+}
+
+export function calculateSimilarityDetails(
+  storedContent?: string | null,
+  providerMessage?: string | ParsedMessage | null,
+  options: { excludedSignatures?: string[] } = {},
+): {
+  score: number;
+  normalizedStoredContentLength: number;
+  normalizedProviderMessageLength: number;
+} {
+  if (!storedContent || !providerMessage) {
+    return {
+      score: 0.0,
+      normalizedStoredContentLength: 0,
+      normalizedProviderMessageLength: 0,
+    };
   }
 
-  const reply1 = parseReply(text1 || "");
-  const reply2 = parseReply(text2 || "");
+  const baselinePair = normalizePair({
+    storedContent,
+    providerMessage,
+    stripSignature: false,
+    excludedSignatures: options.excludedSignatures,
+  });
+  const baselineScore = compareNormalizedStrings(...baselinePair);
 
-  const normalized1 = reply1.toLowerCase().trim();
-  const normalized2 = reply2.toLowerCase().trim();
+  const signatureStrippedPair = normalizePair({
+    storedContent,
+    providerMessage,
+    stripSignature: true,
+    excludedSignatures: options.excludedSignatures,
+  });
+  const signatureStrippedScore = compareNormalizedStrings(
+    ...signatureStrippedPair,
+  );
+  const useSignatureStrippedPair = signatureStrippedScore >= baselineScore;
+  const [normalizedStoredContent, normalizedProviderMessage] =
+    useSignatureStrippedPair ? signatureStrippedPair : baselinePair;
 
+  return {
+    score: Math.max(baselineScore, signatureStrippedScore),
+    normalizedStoredContentLength: normalizedStoredContent.length,
+    normalizedProviderMessageLength: normalizedProviderMessage.length,
+  };
+}
+
+function normalizePair({
+  storedContent,
+  providerMessage,
+  stripSignature,
+  excludedSignatures,
+}: {
+  storedContent: string;
+  providerMessage: string | ParsedMessage;
+  stripSignature: boolean;
+  excludedSignatures?: string[];
+}): [string, string] {
+  let normalizedStoredContent: string;
+  let normalizedProviderMessage: string;
+  let normalizeContent: (content: string, stripSignature: boolean) => string;
+
+  if (typeof providerMessage === "string") {
+    // Legacy: plain string from before ParsedMessage was threaded through callers
+    normalizeContent = normalizePlainText;
+    normalizedStoredContent = normalizeContent(storedContent, stripSignature);
+    normalizedProviderMessage = normalizeContent(
+      providerMessage,
+      stripSignature,
+    );
+  } else {
+    const isOutlook = providerMessage.bodyContentType === "html";
+    const text = providerMessage.textHtml || providerMessage.textPlain || "";
+    normalizeContent = isOutlook ? normalizeForOutlook : normalizePlainText;
+
+    normalizedStoredContent = normalizeContent(storedContent, stripSignature);
+    normalizedProviderMessage = normalizeContent(text, stripSignature);
+  }
+
+  // Normalize excluded signatures with stripSignature=false so the signature
+  // strippers don't reduce the user's saved signature to empty before we use
+  // it to remove that signature from the body.
+  const normalizedExcludedSignatures = excludedSignatures
+    ?.map((signature) => normalizeContent(signature, false))
+    .filter(Boolean);
+
+  if (!normalizedExcludedSignatures?.length) {
+    return [normalizedStoredContent, normalizedProviderMessage];
+  }
+
+  return [
+    removeExcludedSignatures(
+      normalizedStoredContent,
+      normalizedExcludedSignatures,
+    ),
+    removeExcludedSignatures(
+      normalizedProviderMessage,
+      normalizedExcludedSignatures,
+    ),
+  ];
+}
+
+function compareNormalizedStrings(normalized1: string, normalized2: string) {
   if (!normalized1 || !normalized2) {
     return normalized1 === normalized2 ? 1.0 : 0.0;
   }
 
-  // Calculate and return similarity score
   return stringSimilarity.compareTwoStrings(normalized1, normalized2);
+}
+
+function removeExcludedSignatures(
+  content: string,
+  excludedSignatures: string[],
+): string {
+  let result = content;
+
+  for (const signature of excludedSignatures) {
+    result = result.replaceAll(signature, "");
+  }
+
+  return result.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function looksLikeHtmlContent(content: string): boolean {
+  if (/<!doctype html/i.test(content)) return true;
+  return HTML_TAG_PATTERN.test(content);
 }

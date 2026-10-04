@@ -62,10 +62,10 @@ export const POST = withError("fastmail/webhook", async (request) => {
 
   if (!parseResult.success) {
     request.logger.error("Invalid webhook payload", {
-      errors: parseResult.error.errors,
+      errors: parseResult.error.issues,
     });
     return NextResponse.json(
-      { error: "Invalid payload", details: parseResult.error.errors },
+      { error: "Invalid payload", details: parseResult.error.issues },
       { status: 400 },
     );
   }

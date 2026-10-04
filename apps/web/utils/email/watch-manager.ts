@@ -1,15 +1,24 @@
 import prisma from "@/utils/prisma";
-import { hasAiAccess, getPremiumUserFilter } from "@/utils/premium";
+import {
+  getPremiumUserFilter,
+  getUserTier,
+  hasAiAccess,
+  premiumEntitlementSelect,
+} from "@/utils/premium";
 import type { Logger } from "@/utils/logger";
 import { createEmailProvider } from "@/utils/email/provider";
-import { captureException } from "@/utils/error";
+import { captureException, isInvalidGrantError } from "@/utils/error";
 import { cleanupInvalidTokens } from "@/utils/auth/cleanup-invalid-tokens";
 import type { EmailProvider } from "@/utils/email/types";
 import { createManagedOutlookSubscription } from "@/utils/outlook/subscription-manager";
 import {
-  isMicrosoftProvider,
   isFastmailProvider,
+  isGoogleProvider,
+  isMicrosoftProvider,
 } from "@/utils/email/provider-types";
+import { logErrorWithDedupe } from "@/utils/log-error-with-dedupe";
+import { clearWatchLapsedErrorIfResolved } from "@/utils/error-messages";
+import { syncGoogleEmailFromProfile } from "@/utils/auth/rename-email";
 
 export type WatchEmailAccountResult =
   | {
@@ -40,30 +49,32 @@ async function getEmailAccountsToWatch(userIds: string[] | null) {
     where: {
       ...(userIds ? { userId: { in: userIds } } : {}),
       ...getPremiumUserFilter(),
+      account: { disconnectedAt: null },
     },
     select: {
       id: true,
       email: true,
       watchEmailsExpirationDate: true,
       watchEmailsSubscriptionId: true,
+      userId: true,
+      accountId: true,
       account: {
         select: {
           provider: true,
+          providerAccountId: true,
           access_token: true,
           refresh_token: true,
           expires_at: true,
+          disconnectedAt: true,
         },
       },
       user: {
         select: {
           id: true,
+          email: true,
           aiApiKey: true,
           premium: {
-            select: {
-              tier: true,
-              lemonSqueezyRenewsAt: true,
-              stripeSubscriptionStatus: true,
-            },
+            select: premiumEntitlementSelect,
           },
         },
       },
@@ -96,13 +107,15 @@ async function watchEmailAccounts(
     } catch (error) {
       if (error instanceof Error) {
         const warn = [
-          "invalid_grant",
           "Mail service not enabled",
           "Insufficient Permission",
           "AADSTS7000215", // Raw Azure AD error for invalid client secret (old tokens after secret rotation)
         ];
 
-        if (warn.some((w) => error.message.includes(w))) {
+        if (
+          isInvalidGrantError(error) ||
+          warn.some((w) => error.message.includes(w))
+        ) {
           logger.warn("Not watching emails for user", {
             email: emailAccount.email,
             error,
@@ -132,8 +145,8 @@ async function watchEmailAccount(
   const { account, user, watchEmailsExpirationDate } = emailAccount;
 
   const userHasAiAccess = hasAiAccess(
-    user.premium?.tier || null,
-    user.aiApiKey,
+    getUserTier(user.premium),
+    !!user.aiApiKey,
   );
 
   if (!userHasAiAccess) {
@@ -180,7 +193,18 @@ async function watchEmailAccount(
   });
 
   if (!result.success) {
-    logger.error("Failed to watch emails for account", { error: result.error });
+    await logErrorWithDedupe({
+      logger,
+      message: "Failed to watch emails for account",
+      error: result.error,
+      dedupeKeyParts: {
+        scope: "watch/all",
+        emailAccountId: emailAccount.id,
+        operation: "watch-email-account",
+      },
+      ttlSeconds: 15 * 60,
+      summaryIntervalSeconds: 5 * 60,
+    });
 
     return {
       emailAccountId: emailAccount.id,
@@ -191,6 +215,42 @@ async function watchEmailAccount(
           ? result.error.message
           : String(result.error),
     };
+  }
+
+  if (
+    isGoogleProvider(account.provider) &&
+    isEmailSyncDue(emailAccount.id, new Date())
+  ) {
+    try {
+      const renamed = await syncGoogleEmailFromProfile({
+        account: {
+          id: emailAccount.accountId,
+          userId: emailAccount.userId,
+          providerId: account.provider,
+          accountId: account.providerAccountId,
+        },
+        mailbox: { id: emailAccount.id, email: emailAccount.email },
+        userEmail: user.email,
+        accessToken: provider.getAccessToken(),
+      });
+      if (renamed) logger.info("Synced renamed Google mailbox address");
+    } catch (error) {
+      logger.warn("Failed to sync Google mailbox address", { error });
+    }
+  }
+
+  const wasLapsed =
+    !watchEmailsExpirationDate ||
+    new Date(watchEmailsExpirationDate) < new Date();
+
+  if (wasLapsed) {
+    // The watch is healthy again, so clear the lapse error. This lets us
+    // notify again if the account lapses in the future.
+    await clearWatchLapsedErrorIfResolved({
+      userId: user.id,
+      emailAccountId: emailAccount.id,
+      logger,
+    });
   }
 
   return {
@@ -211,29 +271,29 @@ async function watchEmails({
 }): Promise<
   { success: true; expirationDate: Date } | { success: false; error: unknown }
 > {
+  if (isFastmailProvider(provider.name)) {
+    const expirationDate = new Date();
+    expirationDate.setFullYear(expirationDate.getFullYear() + 10);
+    return { success: true, expirationDate };
+  }
+
   logger.info("Watching emails");
+  let failedAccessToken: string | undefined;
 
   try {
-    // Fastmail doesn't support webhooks for third-party apps
-    // It uses polling via /api/fastmail/poll cron job instead
-    if (isFastmailProvider(provider.name)) {
-      logger.info(
-        "Fastmail uses polling instead of webhooks - skipping watch setup",
-      );
-      // Return a far-future expiration to prevent watch-manager from treating this as an error
-      // The actual polling is handled by the /api/fastmail/poll cron job
-      const pollingExpiration = new Date();
-      pollingExpiration.setFullYear(pollingExpiration.getFullYear() + 10);
-      return { success: true, expirationDate: pollingExpiration };
+    try {
+      failedAccessToken = provider.getAccessToken();
+    } catch {
+      // The watch request may still refresh a missing cached access token.
     }
-
     if (isMicrosoftProvider(provider.name)) {
       const result = await createManagedOutlookSubscription({
         emailAccountId,
         logger,
       });
 
-      if (result) return { success: true, expirationDate: result };
+      if (result)
+        return { success: true, expirationDate: result.expirationDate };
     } else {
       const result = await provider.watchEmails();
 
@@ -247,15 +307,14 @@ async function watchEmails({
     }
 
     const error = new Error("Provider returned no result for watch setup");
-    logger.error("Error watching inbox", { error });
     return { success: false, error };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
 
-    // Minimal centralized handling of permanent auth failures (exact checks only)
-    const isInsufficientPermissions =
-      errorMessage === "Request had insufficient authentication scopes.";
-    const isInvalidGrant = errorMessage === "invalid_grant";
+    const isInsufficientPermissions = errorMessage.includes(
+      "Request had insufficient authentication scopes.",
+    );
+    const isInvalidGrant = isInvalidGrantError(error);
 
     if (isInsufficientPermissions || isInvalidGrant) {
       logger.warn("Auth failure while watching inbox - cleaning up tokens", {
@@ -264,11 +323,15 @@ async function watchEmails({
       await cleanupInvalidTokens({
         emailAccountId,
         reason: isInvalidGrant ? "invalid_grant" : "insufficient_permissions",
+        failedAccessToken,
         logger,
-      });
+      }).catch((cleanupError) =>
+        logger.warn("Failed to clean up watch authentication failure", {
+          cleanupError,
+        }),
+      );
     } else {
-      logger.error("Error watching inbox", { error });
-      captureException(error);
+      captureException(error, { emailAccountId });
     }
 
     return { success: false, error };
@@ -291,11 +354,11 @@ export async function unwatchEmails({
 
     await provider.unwatchEmails(subscriptionId || undefined);
   } catch (error) {
-    if (error instanceof Error && error.message.includes("invalid_grant")) {
+    if (isInvalidGrantError(error)) {
       logger.warn("Error unwatching emails, invalid grant");
     } else {
       logger.error("Error unwatching emails", { error });
-      captureException(error);
+      captureException(error, { emailAccountId });
     }
   }
 
@@ -307,4 +370,15 @@ export async function unwatchEmails({
       watchEmailsSubscriptionId: null,
     },
   });
+}
+
+// The profile lookup adds a request per account, and the hourly renewal already
+// runs close to its time budget, so each account is checked once a day in a
+// fixed hour slot instead of on every run.
+function isEmailSyncDue(emailAccountId: string, now: Date) {
+  let hash = 0;
+  for (const char of emailAccountId) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return hash % 24 === now.getUTCHours();
 }

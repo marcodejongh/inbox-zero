@@ -8,7 +8,6 @@ import {
 } from "@/__tests__/helpers";
 import { ActionType } from "@/generated/prisma/enums";
 
-vi.mock("server-only", () => ({}));
 vi.mock("@/utils/prisma");
 vi.mock("@/utils/auth", () => ({
   auth: vi.fn(async () => ({ user: { id: "user1", email: "test@test.com" } })),
@@ -188,25 +187,30 @@ describe("copyRulesFromAccountAction", () => {
 
     expect(result?.data).toEqual({ copiedCount: 1, replacedCount: 0 });
     expect(prisma.rule.create).toHaveBeenCalledTimes(1);
-    expect(prisma.rule.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        emailAccountId: targetAccountId,
-        name: "My Rule",
-        instructions: "Test instructions",
-        groupId: null,
-        actions: {
-          createMany: {
-            data: [
-              expect.objectContaining({
-                type: ActionType.LABEL,
-                label: "Important",
-                labelId: null,
-              }),
-            ],
+    expect(prisma.rule.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: { actions: true, group: true },
+        data: expect.objectContaining({
+          emailAccountId: targetAccountId,
+          name: "My Rule",
+          instructions: "Test instructions",
+          actions: {
+            createMany: {
+              data: expect.arrayContaining([
+                expect.objectContaining({
+                  type: ActionType.LABEL,
+                  label: "Important",
+                  labelId: null,
+                }),
+              ]),
+            },
           },
-        },
+        }),
       }),
-    });
+    );
+    expect(
+      prisma.rule.create.mock.calls[0]?.[0].data.actions.createMany.data,
+    ).toHaveLength(1);
   });
 
   it("updates existing rule when matching by name (case-insensitive)", async () => {
@@ -243,17 +247,23 @@ describe("copyRulesFromAccountAction", () => {
 
     expect(result?.data).toEqual({ copiedCount: 0, replacedCount: 1 });
     expect(prisma.rule.update).toHaveBeenCalledTimes(1);
-    expect(prisma.rule.update).toHaveBeenCalledWith({
-      where: { id: "existing-rule-id" },
-      data: expect.objectContaining({
-        instructions: "Updated instructions",
-        groupId: null,
-        actions: {
-          deleteMany: {},
-          createMany: { data: [] },
-        },
+    expect(prisma.rule.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "existing-rule-id",
+          emailAccountId: "target-account-id",
+        }),
+        include: { actions: true, group: true },
+        data: expect.objectContaining({
+          instructions: "Updated instructions",
+          groupId: null,
+          actions: {
+            deleteMany: {},
+            createMany: { data: [] },
+          },
+        }),
       }),
-    });
+    );
     expect(prisma.rule.create).not.toHaveBeenCalled();
   });
 
@@ -295,12 +305,18 @@ describe("copyRulesFromAccountAction", () => {
     });
 
     expect(result?.data).toEqual({ copiedCount: 0, replacedCount: 1 });
-    expect(prisma.rule.update).toHaveBeenCalledWith({
-      where: { id: "target-system-rule" },
-      data: expect.objectContaining({
-        instructions: "System rule instructions",
+    expect(prisma.rule.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "target-system-rule",
+          emailAccountId: "target-account-id",
+        }),
+        include: { actions: true, group: true },
+        data: expect.objectContaining({
+          instructions: "System rule instructions",
+        }),
       }),
-    });
+    );
   });
 
   it("clears labelId and folderId but preserves label and folderName", async () => {
@@ -344,26 +360,32 @@ describe("copyRulesFromAccountAction", () => {
       ruleIds: ["rule1"],
     });
 
-    expect(prisma.rule.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        actions: {
-          createMany: {
-            data: [
-              expect.objectContaining({
-                type: ActionType.LABEL,
-                label: "MyLabel",
-                labelId: null,
-              }),
-              expect.objectContaining({
-                type: ActionType.MOVE_FOLDER,
-                folderName: "MyFolder",
-                folderId: null,
-              }),
-            ],
+    expect(prisma.rule.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: { actions: true, group: true },
+        data: expect.objectContaining({
+          actions: {
+            createMany: {
+              data: expect.arrayContaining([
+                expect.objectContaining({
+                  type: ActionType.LABEL,
+                  label: "MyLabel",
+                  labelId: null,
+                }),
+                expect.objectContaining({
+                  type: ActionType.MOVE_FOLDER,
+                  folderName: "MyFolder",
+                  folderId: null,
+                }),
+              ]),
+            },
           },
-        },
+        }),
       }),
-    });
+    );
+    expect(
+      prisma.rule.create.mock.calls[0]?.[0].data.actions.createMany.data,
+    ).toHaveLength(2);
   });
 
   it("handles mixed copy and replace scenarios", async () => {

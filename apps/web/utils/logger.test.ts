@@ -1,5 +1,32 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { log } from "next-axiom";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createScopedLogger } from "./logger";
+
+const { mockedEnv } = vi.hoisted(() => ({
+  mockedEnv: (() => {
+    let axiomToken: string | undefined;
+    let throwOnAxiomTokenAccess = false;
+
+    return {
+      NODE_ENV: "test",
+      get AXIOM_TOKEN() {
+        if (throwOnAxiomTokenAccess) {
+          throw new Error("Attempted to read server token in client context");
+        }
+        return axiomToken;
+      },
+      set AXIOM_TOKEN(value: string | undefined) {
+        axiomToken = value;
+      },
+      setThrowOnAxiomTokenAccess(value: boolean) {
+        throwOnAxiomTokenAccess = value;
+      },
+      NEXT_PUBLIC_AXIOM_TOKEN: undefined,
+      NEXT_PUBLIC_LOG_SCOPES: undefined,
+      ENABLE_DEBUG_LOGS: false,
+    };
+  })(),
+}));
 
 vi.mock("next-axiom", () => ({
   log: {
@@ -12,20 +39,202 @@ vi.mock("next-axiom", () => ({
 }));
 
 vi.mock("@/env", () => ({
-  env: {
-    NODE_ENV: "test",
-    NEXT_PUBLIC_AXIOM_TOKEN: undefined,
-    NEXT_PUBLIC_LOG_SCOPES: undefined,
-    ENABLE_DEBUG_LOGS: false,
-  },
+  env: mockedEnv,
 }));
 
 describe("Logger", () => {
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    mockedEnv.NODE_ENV = "test";
+    mockedEnv.AXIOM_TOKEN = undefined;
+    mockedEnv.setThrowOnAxiomTokenAccess(false);
+    mockedEnv.NEXT_PUBLIC_AXIOM_TOKEN = undefined;
+    mockedEnv.NEXT_PUBLIC_LOG_SCOPES = undefined;
+    mockedEnv.ENABLE_DEBUG_LOGS = false;
+    vi.unstubAllGlobals();
     vi.clearAllMocks();
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("redacts encoded MIME in provider errors even when debug logging is enabled", () => {
+    mockedEnv.NODE_ENV = "production";
+    mockedEnv.AXIOM_TOKEN = "server-token";
+    mockedEnv.ENABLE_DEBUG_LOGS = true;
+    const raw = Buffer.from(
+      "To: recipient@example.com\r\n\r\nPrivate message",
+    ).toString("base64url");
+    createScopedLogger("test").error("Send failed", {
+      error: { message: "Bad Gateway", status: 502, config: { data: { raw } } },
+    });
+    expect(JSON.stringify(vi.mocked(log.error).mock.calls)).not.toContain(raw);
+    expect(log.error).toHaveBeenCalledWith(
+      "Send failed",
+      expect.objectContaining({
+        error: expect.objectContaining({
+          status: 502,
+          config: { data: { raw: true } },
+        }),
+      }),
+    );
+  });
+
+  it("uses Axiom logging when the server token is configured", () => {
+    mockedEnv.AXIOM_TOKEN = "server-token";
+
+    const logger = createScopedLogger("test");
+
+    logger.info("Server log", { foo: "bar" });
+
+    expect(log.info).toHaveBeenCalledWith(
+      "Server log",
+      expect.objectContaining({ scope: "test", foo: "bar" }),
+    );
+    expect(consoleLogSpy).not.toHaveBeenCalled();
+  });
+
+  it("logs one serialized production error to Axiom without errorFull", () => {
+    mockedEnv.NODE_ENV = "production";
+    mockedEnv.AXIOM_TOKEN = "server-token";
+
+    const logger = createScopedLogger("test");
+    const error = {
+      name: "ProviderError",
+      message: "Provider request failed",
+      code: "rate_limit_exceeded",
+      statusCode: 429,
+      requestId: "req_123",
+      retriesLeft: 2,
+      retryDelay: 500,
+      config: {
+        url: "https://api.example.test/v1/messages",
+        method: "POST",
+        retryConfig: {
+          currentRetryAttempt: 1,
+          statusCodesToRetry: [429, 500],
+          totalTimeout: 60_000,
+        },
+      },
+      responseHeaders: {
+        "x-request-id": "header_req_123",
+        "content-type": "application/json",
+        server: "provider",
+        "set-cookie": "provider-session=secret",
+      },
+      cause: {
+        code: "ECONNRESET",
+        message: "socket hang up",
+        socket: {
+          bytesRead: 10,
+          remoteAddress: "127.0.0.1",
+        },
+      },
+    };
+
+    logger.error("Provider error", { error, operation: "send" });
+
+    expect(log.error).toHaveBeenCalledWith("Provider error", {
+      scope: "test",
+      operation: "send",
+      errorMessage: "Provider request failed",
+      error: expect.objectContaining({
+        name: "ProviderError",
+        message: "Provider request failed",
+        code: "rate_limit_exceeded",
+        statusCode: 429,
+        requestId: "req_123",
+        config: expect.objectContaining({
+          url: "https://api.example.test/v1/messages",
+          method: "POST",
+          retryConfig: expect.objectContaining({
+            currentRetryAttempt: 1,
+          }),
+        }),
+        cause: expect.objectContaining({
+          code: "ECONNRESET",
+          message: "socket hang up",
+        }),
+        responseHeaders: expect.objectContaining({
+          "set-cookie": true,
+        }),
+      }),
+    });
+    expect(log.error).not.toHaveBeenCalledWith(
+      "Provider error",
+      expect.objectContaining({ errorFull: expect.anything() }),
+    );
+  });
+
+  it("uses the serialized production error format for Axiom warnings", () => {
+    mockedEnv.NODE_ENV = "production";
+    mockedEnv.AXIOM_TOKEN = "server-token";
+
+    const logger = createScopedLogger("test");
+
+    logger.warn("Retrying provider request", {
+      error: {
+        headers: {
+          "x-request-id": "header_req_456",
+          server: "provider",
+        },
+        response: {
+          data: {
+            error: {
+              message: "Rate limited",
+              status: 429,
+              code: "RESOURCE_EXHAUSTED",
+            },
+          },
+        },
+        config: {
+          retryConfig: {
+            statusCodesToRetry: [429, 500],
+          },
+        },
+      },
+    });
+
+    expect(log.warn).toHaveBeenCalledWith("Retrying provider request", {
+      scope: "test",
+      errorMessage: "Rate limited",
+      error: expect.objectContaining({
+        response: expect.objectContaining({
+          data: {
+            error: {
+              message: "Rate limited",
+              status: 429,
+              code: "RESOURCE_EXHAUSTED",
+            },
+          },
+        }),
+      }),
+    });
+  });
+
+  it("does not use Axiom logging when only the public token is configured", () => {
+    mockedEnv.NEXT_PUBLIC_AXIOM_TOKEN = "public-token";
+
+    const logger = createScopedLogger("test");
+
+    logger.info("Server log");
+
+    expect(log.info).not.toHaveBeenCalled();
+    expect(consoleLogSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not read the server token when used on the client", () => {
+    vi.stubGlobal("window", {});
+    mockedEnv.setThrowOnAxiomTokenAccess(true);
+
+    expect(() => {
+      const logger = createScopedLogger("test");
+      logger.info("Client log");
+    }).not.toThrow();
+
+    expect(log.info).not.toHaveBeenCalled();
+    expect(consoleLogSpy).toHaveBeenCalledTimes(1);
   });
 
   it("should serialize simple Error objects", () => {
@@ -142,6 +351,17 @@ describe("Logger", () => {
     expect(loggedMessage).toContain("Unauthorized");
     expect(loggedMessage).toContain("Invalid token");
     expect(loggedMessage).toContain("/api/endpoint");
+  });
+
+  it("always redacts received OAuth state values", () => {
+    const logger = createScopedLogger("test");
+    const receivedState = "signed-oauth-state-secret";
+
+    logger.error("Invalid OAuth state", { receivedState });
+
+    const loggedMessage = consoleErrorSpy.mock.calls[0][0];
+    expect(loggedMessage).toContain('"receivedState": true');
+    expect(loggedMessage).not.toContain(receivedState);
   });
 
   it("should handle complex nested error objects without [object Object]", () => {

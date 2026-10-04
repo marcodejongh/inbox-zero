@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { withEmailProvider } from "@/utils/middleware";
 import { messageQuerySchema } from "@/app/api/messages/validation";
-import { isAssistantEmail } from "@/utils/assistant/is-assistant-email";
 import { GmailLabel } from "@/utils/gmail/label";
 import type { EmailProvider } from "@/utils/email/types";
 import { isGoogleProvider } from "@/utils/email/provider-types";
@@ -11,7 +10,7 @@ export type MessagesResponse = Awaited<ReturnType<typeof getMessages>>;
 
 export const GET = withEmailProvider("messages", async (request) => {
   const { emailProvider } = request;
-  const { emailAccountId, email } = request.auth;
+  const { emailAccountId } = request.auth;
 
   const { searchParams } = new URL(request.url);
   const query = searchParams.get("q");
@@ -23,7 +22,6 @@ export const GET = withEmailProvider("messages", async (request) => {
     query: r.q,
     pageToken: r.pageToken,
     emailProvider,
-    email,
     logger: request.logger,
   });
 
@@ -35,14 +33,12 @@ async function getMessages({
   pageToken,
   emailAccountId,
   emailProvider,
-  email,
   logger,
 }: {
   query?: string | null;
   pageToken?: string | null;
   emailAccountId: string;
   emailProvider: EmailProvider;
-  email: string;
   logger: Logger;
 }) {
   try {
@@ -55,23 +51,6 @@ async function getMessages({
 
     // Filter messages based on provider-specific logic
     const incomingMessages = messages.filter((message) => {
-      const fromEmail = message.headers.from;
-      const toEmail = message.headers.to;
-
-      // Don't include messages from/to the assistant
-      if (
-        isAssistantEmail({
-          userEmail: email,
-          emailToCheck: fromEmail,
-        }) ||
-        isAssistantEmail({
-          userEmail: email,
-          emailToCheck: toEmail,
-        })
-      ) {
-        return false;
-      }
-
       // Provider-specific filtering
       if (isGoogleProvider(emailProvider.name)) {
         const isSent = message.labelIds?.includes(GmailLabel.SENT);

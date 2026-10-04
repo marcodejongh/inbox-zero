@@ -1,17 +1,22 @@
 import prisma from "@/utils/prisma";
-import { hasAiAccess, getPremiumUserFilter } from "@/utils/premium";
+import {
+  hasAiAccess,
+  getPremiumUserFilter,
+  getUserTier,
+  premiumEntitlementSelect,
+} from "@/utils/premium";
 import { createEmailProvider } from "@/utils/email/provider";
 import { processHistoryItem } from "@/utils/webhook/process-history-item";
 import type { FastmailProvider } from "@/utils/email/fastmail";
 import type { Logger } from "@/utils/logger";
 
 export interface PollSyncResult {
-  emailAccountId: string;
   email: string;
-  status: "success" | "error" | "skipped" | "no_changes";
-  processedCount?: number;
-  newState?: string;
+  emailAccountId: string;
   error?: string;
+  newState?: string;
+  processedCount?: number;
+  status: "success" | "error" | "skipped" | "no_changes";
 }
 
 /**
@@ -35,6 +40,11 @@ async function getFastmailAccountsToPoll() {
       multiRuleSelectionEnabled: true,
       timezone: true,
       calendarBookingLink: true,
+      sensitiveDataPolicy: true,
+      draftReplyConfidence: true,
+      filingEnabled: true,
+      filingPrompt: true,
+      filingConfirmationSendEmail: true,
       account: {
         select: {
           provider: true,
@@ -55,9 +65,7 @@ async function getFastmailAccountsToPoll() {
           aiApiKey: true,
           premium: {
             select: {
-              tier: true,
-              lemonSqueezyRenewsAt: true,
-              stripeSubscriptionStatus: true,
+              ...premiumEntitlementSelect,
             },
           },
         },
@@ -96,6 +104,11 @@ export async function pollFastmailAccount({
         multiRuleSelectionEnabled: true,
         timezone: true,
         calendarBookingLink: true,
+        sensitiveDataPolicy: true,
+        draftReplyConfidence: true,
+        filingEnabled: true,
+        filingPrompt: true,
+        filingConfirmationSendEmail: true,
         account: {
           select: {
             provider: true,
@@ -116,9 +129,7 @@ export async function pollFastmailAccount({
             aiApiKey: true,
             premium: {
               select: {
-                tier: true,
-                lemonSqueezyRenewsAt: true,
-                stripeSubscriptionStatus: true,
+                ...premiumEntitlementSelect,
               },
             },
           },
@@ -163,8 +174,8 @@ export async function pollFastmailAccount({
 
     // Check if user has AI access
     const userHasAiAccess = hasAiAccess(
-      account.user.premium?.tier || null,
-      account.user.aiApiKey,
+      getUserTier(account.user.premium),
+      !!account.user.aiApiKey,
     );
 
     if (!userHasAiAccess) {

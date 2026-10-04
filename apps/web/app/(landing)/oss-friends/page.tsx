@@ -10,9 +10,10 @@ import {
 } from "@/components/new-landing/common/Typography";
 import { Button } from "@/components/new-landing/common/Button";
 import { BlogHeader } from "@/components/layouts/BlogLayout";
+import { getBrandTitle } from "@/utils/branding";
 
 export const metadata: Metadata = {
-  title: "Open Source Friends | Inbox Zero",
+  title: getBrandTitle("Open Source Friends"),
   description: "Some other great Open Source projects to follow",
   alternates: { canonical: "/oss-friends" },
 };
@@ -40,25 +41,23 @@ export default async function OSSFriendsPage() {
             </Paragraph>
           </div>
           <div className="mt-20 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {data.data?.map((friend) => {
-              return (
-                <CardBasic key={friend.name}>
-                  <TypographyH3>
-                    <Link href={friend.href}>{friend.name}</Link>
-                  </TypographyH3>
-                  <SectionDescription className="mt-4">
-                    {friend.description}
-                  </SectionDescription>
-                  <div className="mt-4">
-                    <Button asChild>
-                      <Link href={friend.href} target="_blank">
-                        Learn more
-                      </Link>
-                    </Button>
-                  </div>
-                </CardBasic>
-              );
-            })}
+            {data.data?.map((friend) => (
+              <CardBasic key={friend.name}>
+                <TypographyH3>
+                  <Link href={friend.href}>{friend.name}</Link>
+                </TypographyH3>
+                <SectionDescription className="mt-4">
+                  {friend.description}
+                </SectionDescription>
+                <div className="mt-4">
+                  <Button asChild>
+                    <Link href={friend.href} target="_blank">
+                      Learn more
+                    </Link>
+                  </Button>
+                </div>
+              </CardBasic>
+            ))}
           </div>
         </div>
 

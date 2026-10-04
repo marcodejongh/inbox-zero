@@ -1,0 +1,2226 @@
+import { afterAll, describe, expect, test } from "vitest";
+import {
+  aiDraftReplyWithConfidence,
+  buildDraftReplyModelEvidence,
+  type DraftReplyInput,
+} from "@/utils/ai/reply/draft-reply";
+import { getEmail } from "@/__tests__/helpers";
+import { judgeMultiple } from "@/__tests__/eval/judge";
+import {
+  describeEvalMatrix,
+  shouldRunEvalTests,
+} from "@/__tests__/eval/models";
+import { getEvalJudgeUserAi } from "@/__tests__/eval/judge-provider";
+import { createEvalReporter } from "@/__tests__/eval/reporter";
+import {
+  formatSemanticJudgeActual,
+  judgeEvalOutput,
+} from "@/__tests__/eval/semantic-judge";
+
+// pnpm test-ai eval/draft-reply
+
+const shouldRunEval = shouldRunEvalTests();
+const TIMEOUT = 90_000;
+
+describe.runIf(shouldRunEval)("draft-reply eval", () => {
+  const evalReporter = createEvalReporter({ evalName: "draft-reply" });
+
+  describeEvalMatrix("draft quality", (model, emailAccount) => {
+    const bookingLink = "https://cal.example.com/founder";
+    const emailAccountWithBookingLink = {
+      ...emailAccount,
+      calendarBookingLink: bookingLink,
+    };
+
+    describe("scheduling aggressiveness (should not offer times)", () => {
+      test(
+        "marketing email with booking CTA — should not offer specific times",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Lisa from MindfulPath <lisa@product.mindfulpath.com>",
+                to: emailAccountWithBookingLink.email,
+                subject: "Earn a $30 gift card by sharing your thoughts",
+                content: `Hey there,
+
+I'm Lisa, the Research Lead here at MindfulPath. I'm reaching out on behalf of our User Experience team.
+
+We'd love to hear about your experience with our app so far.
+
+Our sessions are quick — no more than 20 minutes over video call — and as a thank you, we'll send you a $30 gift card.
+
+You can pick a time that works for you here: https://cal.mindfulpath.com/research
+
+Thank you!
+Lisa & the MindfulPath Team`,
+              }),
+              date: new Date("2026-03-10T13:06:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount: emailAccountWithBookingLink,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "marketing email with booking CTA";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A short reply that stays grounded in the email and does not propose specific meeting dates, times, time ranges, or the user's booking link.",
+            criterion: {
+              name: "No invented meeting times",
+              description:
+                "The draft should not suggest specific meeting slots, time ranges, or the user's booking link when the incoming email already provides a booking link and does not ask for manual scheduling.",
+            },
+          });
+          const pass =
+            judgeResult.pass && !hasExactUrl(result.reply, bookingLink);
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "no specific times or user booking link",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should not add the user's booking link.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "email with existing booking link — should reference link, not invent times",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Sam from DataBridge <sam@databridge.io>",
+                to: emailAccountWithBookingLink.email,
+                subject: "Would love to learn about your integration needs",
+                content: `Hi there,
+
+I noticed you signed up for DataBridge recently. I'd love to learn more about your use case and see if we can help.
+
+Feel free to grab a time on my calendar: https://cal.databridge.io/sam/30min
+
+Looking forward to connecting!
+
+Sam
+Solutions Engineer, DataBridge`,
+              }),
+              date: new Date("2026-03-10T10:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount: emailAccountWithBookingLink,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "booking link email";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A reply that acknowledges the outreach without inventing specific meeting dates or times or adding the user's booking link, since the sender already provided a booking link.",
+            criterion: {
+              name: "Booking link respected",
+              description:
+                "The draft should avoid proposing specific meeting slots or adding the user's booking link when the email already contains a booking link and no calendar availability was provided.",
+            },
+          });
+          const pass =
+            judgeResult.pass && !hasExactUrl(result.reply, bookingLink);
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "no specific times or user booking link",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should not add the user's booking link.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+    });
+
+    describe("genuine scheduling (may suggest times with calendar data)", () => {
+      test(
+        "booking-link-first scheduling request with availability",
+        async () => {
+          const schedulingEmailAccount = {
+            ...emailAccountWithBookingLink,
+            timezone: "Asia/Jerusalem",
+          };
+          const messages = [
+            {
+              ...getEmail({
+                from: "Alex Rivera <alex@example.com>",
+                to: schedulingEmailAccount.email,
+                subject: "Re: Intro",
+                content: `Hi,
+
+Thanks for the details. A quick call could be helpful.
+
+Feel free to send over the easiest way to book.
+
+Best,
+Alex`,
+              }),
+              date: new Date("2026-05-12T08:30:00Z"),
+            },
+          ];
+          const calendarAvailability = {
+            suggestedTimes: [
+              { start: "2026-05-13 10:00", end: "2026-05-13 10:30" },
+              { start: "2026-05-13 14:00", end: "2026-05-13 14:30" },
+              { start: "2026-05-14 16:00", end: "2026-05-14 16:30" },
+            ],
+          };
+
+          const result = await draftForEval({
+            messages,
+            emailAccount: schedulingEmailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+            currentDate: new Date("2026-05-12T09:30:00Z"),
+          });
+
+          const testName = "booking-link-first scheduling request";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A concise scheduling reply that shares the user's booking link as the easiest way to book, without listing specific calendar slots or IANA timezone names.",
+            criterion: {
+              name: "Booking link preferred over time slots",
+              description:
+                "When the sender asks for the easiest way to book and the user has a booking link, the draft should share the booking link instead of listing specific calendar slots. It should not include IANA timezone identifiers such as Asia/Jerusalem.",
+            },
+          });
+          const pass =
+            judgeResult.pass &&
+            hasExactUrl(result.reply, bookingLink) &&
+            !mentionsAnySpecificSlot(result.reply, calendarAvailability) &&
+            !result.reply.includes("Asia/Jerusalem");
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "booking link included; no specific slots or IANA timezone",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should prefer the booking link and avoid listing slots.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "explicit options request returns requested times with human-friendly timezone",
+        async () => {
+          const schedulingEmailAccount = {
+            ...emailAccount,
+            timezone: "Asia/Jerusalem",
+          };
+          const messages = [
+            {
+              ...getEmail({
+                from: "Morgan Lee <morgan@example.com>",
+                to: schedulingEmailAccount.email,
+                subject: "Call next week",
+                content: `Hi,
+
+Could you send over two or three times that work for a 30-minute call next week?
+
+Thanks,
+Morgan`,
+              }),
+              date: new Date("2026-05-12T09:00:00Z"),
+            },
+          ];
+          const calendarAvailability = {
+            timezone: "Asia/Jerusalem",
+            suggestedTimes: [
+              { start: "2026-05-18 10:00", end: "2026-05-18 10:30" },
+              { start: "2026-05-19 14:00", end: "2026-05-19 14:30" },
+            ],
+          };
+
+          const result = await draftForEval({
+            messages,
+            emailAccount: schedulingEmailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+            currentDate: new Date("2026-05-12T09:30:00Z"),
+          });
+
+          const testName = "explicitly requested scheduling options";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A concrete scheduling reply that offers both provided times because the sender explicitly requested two or three options. If a timezone is mentioned, it should use a human-friendly abbreviation or label rather than an IANA timezone identifier.",
+            criterion: {
+              name: "Requested options with human-friendly timezone",
+              description:
+                "When the sender explicitly asks for two or three times and two available slots are provided, the draft should offer both slots. It should not write raw IANA timezone identifiers such as Asia/Jerusalem, and should use a normal user-facing timezone abbreviation or label if timezone context is needed.",
+            },
+          });
+          const pass =
+            judgeResult.pass && !result.reply.includes("Asia/Jerusalem");
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "both requested options without IANA timezone wording",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should provide the requested options without raw IANA timezone wording.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "personal scheduling request proposes one concrete time",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Priya Sharma <priya@launchpad.dev>",
+                to: emailAccount.email,
+                subject: "Quick sync this week?",
+                content: `Hey,
+
+Are you free for a quick 30-minute call this week? I want to discuss the partnership proposal.
+
+Let me know what works!
+
+Priya`,
+              }),
+              date: new Date("2027-03-10T14:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: {
+              suggestedTimes: [
+                { start: "2027-03-12 10:00", end: "2027-03-12 10:30" },
+                { start: "2027-03-12 14:00", end: "2027-03-12 14:30" },
+              ],
+            },
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "genuine scheduling request";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A concise scheduling reply that proposes exactly one of the provided available times. It should not present a list or menu of multiple options because the sender did not ask for options.",
+            criterion: {
+              name: "One concrete meeting proposal",
+              description:
+                "When the sender asks broadly what time works and does not request options, the draft should propose exactly one specific time from the provided future availability. It must not list or offer multiple available times.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "exactly one concrete available time",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            judgeResult.pass,
+            `Draft should propose exactly one available time.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "explicit support preference may include booking link",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Jordan Blake <jordan@example.com>",
+                to: emailAccountWithBookingLink.email,
+                subject: "Setup issue",
+                content: `Hey,
+
+I'm stuck getting the archive rules to work with my Outlook account. It keeps leaving some threads in the inbox even after the rule runs.
+
+Can you help me figure out what's going on?
+
+Thanks,
+Jordan`,
+              }),
+              date: new Date("2026-04-29T12:15:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount: emailAccountWithBookingLink,
+            knowledgeBaseContent:
+              "For troubleshooting where a screen share would help, the user prefers to include their booking link.",
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle:
+              "Reply preference: when a support issue would be easier to debug on a call, include my booking link.",
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const pass = hasExactUrl(result.reply, bookingLink);
+          const testName = "support preference includes booking link";
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "booking link included because user preference asks for it",
+            actual: `reply=${JSON.stringify(result.reply)}`,
+          });
+
+          expect(
+            pass,
+            `Draft should include the user's booking link when an explicit preference asks for it.\n\nReply:\n${result.reply}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+    });
+
+    describe("non-scheduling email (should not mention times)", () => {
+      test(
+        "question about a feature — should answer, not offer times",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Carlos Reyes <carlos@clientcorp.com>",
+                to: emailAccountWithBookingLink.email,
+                subject: "Quick question about API limits",
+                content: `Hey,
+
+I was looking at the docs and couldn't find info on rate limits for the bulk import endpoint. What's the max number of records per request?
+
+Thanks,
+Carlos`,
+              }),
+              date: new Date("2026-03-10T09:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount: emailAccountWithBookingLink,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "non-scheduling question";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A grounded reply that addresses the question without offering specific meeting dates, times, or the user's booking link.",
+            criterion: {
+              name: "No scheduling drift",
+              description:
+                "For a non-scheduling question, the draft should not drift into proposing calendar times, meeting slots, or the user's booking link.",
+            },
+          });
+          const pass =
+            judgeResult.pass && !hasExactUrl(result.reply, bookingLink);
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "no specific times or user booking link",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should not add the user's booking link.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "product setup question — should not append a setup call",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Nina Patel <nina@example.com>",
+                to: emailAccountWithBookingLink.email,
+                subject: "Question about routing and language support",
+                content: `Hi,
+
+Can Inbox Zero move emails into specific folders or tabs automatically?
+
+Also, does the AI work for non-English emails, or only English?
+
+Thanks,
+Nina`,
+              }),
+              date: new Date("2026-04-29T16:20:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount: emailAccountWithBookingLink,
+            knowledgeBaseContent: [
+              "Inbox Zero can create automated rules to route emails to labels, folders, or tabs.",
+              "The AI can draft and classify emails in the language of the latest message.",
+            ].join("\n"),
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "product setup question";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A direct product answer about routing and language support that does not append a setup call, meeting invitation, or the user's booking link.",
+            criterion: {
+              name: "No appended setup call",
+              description:
+                "For product capability questions that can be answered from the provided knowledge, the draft should answer directly and avoid adding a call CTA or the user's booking link.",
+            },
+          });
+          const pass =
+            judgeResult.pass && !hasExactUrl(result.reply, bookingLink);
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "direct answer without booking link",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should not append a setup call or booking link.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+    });
+
+    describe("grounded product replies", () => {
+      test(
+        "customer feedback reply uses supplied knowledge base facts",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: emailAccount.email,
+                to: "customer@example.com",
+                subject: "Getting started feedback",
+                content: `Hey,
+
+Thanks again for trying the product.
+
+I'd love to hear what felt easy, what felt confusing, and anything you wish existed.
+
+Best,
+Founder`,
+              }),
+              date: new Date("2026-03-11T19:54:00Z"),
+            },
+            {
+              ...getEmail({
+                from: "customer@example.com",
+                to: emailAccount.email,
+                subject: "Re: Getting started feedback",
+                content: `Hi,
+
+The setup process felt pretty smooth overall.
+
+It might help to mention earlier that the assistant works better when the inbox is already in decent shape.
+
+It would also be useful to show a few sample rule instructions so it is clearer how to phrase them.
+
+Also, what model or provider does the assistant use by default?`,
+              }),
+              date: new Date("2026-03-14T03:47:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: [
+              "Reply guidance for product-feedback questions:",
+              "- If someone asks about setup quality, mention that a cleaner inbox usually leads to better results during setup.",
+              "- If someone asks for rule examples, give concrete examples such as 'Archive newsletters you never read' and 'Label billing emails as Finance'.",
+              "- If someone asks what powers the assistant by default, say that Inbox Zero manages the model stack by default.",
+              "- You may also mention that users can bring their own API key if they prefer.",
+              "- Do not name a specific provider or model unless it is explicitly stated here.",
+            ].join("\n"),
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "grounded product feedback reply";
+          console.log(`\n[${model.label}] ${testName}\n${result.reply}\n`);
+
+          const judgeResult = await maybeJudgeGroundedReply({
+            modelEvidence: result.modelEvidence,
+            reply: result.reply,
+          });
+
+          const pass = judgeResult.allPassed;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "grounded, concise reply with no invented provider details",
+            actual: formatDraftEvalActual(result.reply, judgeResult.results),
+            criteria: judgeResult.results,
+          });
+
+          expect(
+            pass,
+            `Draft drifted from grounded product reply expectations.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult.results,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+    });
+
+    describe("confidence calibration", () => {
+      test(
+        "missing business context is not high confidence",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Dana Lee <dana@clientcorp.com>",
+                to: emailAccount.email,
+                subject: "Security questionnaire",
+                content: `Hi,
+
+Could you send the final security questionnaire answers today and confirm whether the DPA redlines are approved?
+
+Thanks,
+Dana`,
+              }),
+              date: new Date("2026-03-15T12:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const pass = result.confidence !== "HIGH_CONFIDENCE";
+          const testName = "missing business context confidence";
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "STANDARD or ALL_EMAILS because the draft lacks facts needed to answer",
+            actual: `confidence=${result.confidence} | reply=${JSON.stringify(result.reply)}`,
+          });
+
+          expect(
+            pass,
+            `Draft should not be marked high confidence without questionnaire or DPA facts.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+    });
+
+    describe("sender-specific reply examples", () => {
+      const contactSpecificWritingStyle = [
+        "Keep replies concise and direct.",
+        "For close contacts, use a casual plainspoken tone.",
+        "Avoid asking clarification questions unless the incoming message is genuinely ambiguous.",
+      ].join("\n");
+
+      test(
+        "monthly payment status question stays concise and does not ask needless clarification",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Taylor Morgan <taylor@example.com>",
+                to: emailAccount.email,
+                subject: "Payment",
+                content: `Hi,
+
+Did you send the April/May payment?
+
+thanks,`,
+              }),
+              date: new Date("2026-05-11T07:20:00Z"),
+            },
+          ];
+
+          const sharedDraftOptions = {
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: contactSpecificWritingStyle,
+            mcpContext: null,
+            meetingContext: null,
+          };
+
+          const [baselineResult, result] = await Promise.all([
+            draftForEval(sharedDraftOptions),
+            draftForEval({
+              ...sharedDraftOptions,
+              senderReplyExamples: getStatusReplyExamples(emailAccount.email),
+            }),
+          ]);
+
+          const input = result.modelEvidence;
+          const paymentReplyCriterion = {
+            name: "Concise contact-specific payment reply",
+            description:
+              "The draft should be one or two short sentences plus an optional compact greeting/sign-off. It should not ask an unnecessary clarification question or create a multi-paragraph process update. It may either say the user is checking, commit to handling it, or answer directly in the same concise style the user uses with this sender. A direct answer with a short placeholder for whether the payment was sent is acceptable.",
+          };
+          const expectedPaymentReply =
+            "A short, direct reply suitable for a close/contact-specific relationship. It should avoid unnecessary clarification and processy filler. A useful action-oriented reply is acceptable because the user can complete the action before sending.";
+          const judgeResult = await judgeEvalOutput({
+            input: [
+              input,
+              "",
+              "## Same-sender reply examples",
+              "The user usually answers this sender in very short direct replies such as 'Not yet, will do it today', 'Done now', or 'Checking and will update you.'",
+            ].join("\n"),
+            output: result.reply,
+            expected: expectedPaymentReply,
+            criterion: paymentReplyCriterion,
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName: "monthly payment status with same-sender examples",
+            model: model.label,
+            pass,
+            expected:
+              "concise same-sender reply without needless clarification",
+            actual: `${formatSemanticJudgeActual(result.reply, judgeResult)} | baseline=${JSON.stringify(baselineResult.reply)}`,
+          });
+
+          expect(
+            pass,
+            `Draft should stay concise and avoid needless clarification.\n\nBaseline:\n${baselineResult.reply}\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "current thread facts override conflicting same-sender examples",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: emailAccount.email,
+                to: "taylor@example.com",
+                subject: "Re: Payment",
+                content: "I sent the April/May payment this morning.",
+              }),
+              date: new Date("2026-05-11T06:30:00Z"),
+            },
+            {
+              ...getEmail({
+                from: "Taylor Morgan <taylor@example.com>",
+                to: emailAccount.email,
+                subject: "Re: Payment",
+                content: `Hi,
+
+Did you send the April/May payment?
+
+thanks,`,
+              }),
+              date: new Date("2026-05-11T07:20:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            senderReplyExamples: getStatusReplyExamples(emailAccount.email),
+            calendarAvailability: null,
+            writingStyle: contactSpecificWritingStyle,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A concise reply that uses the current thread fact that the payment was sent this morning. It should not ignore that fact or copy a conflicting status from the same-sender examples.",
+            criterion: {
+              name: "Current thread facts override examples",
+              description:
+                "The draft should base factual status on the current thread. Same-sender examples may influence brevity and tone, but must not override or contradict facts stated in the current conversation.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName: "current thread facts override same-sender examples",
+            model: model.label,
+            pass,
+            expected: "current-thread fact used; examples style-only",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should use current-thread facts over examples.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "unresolved document status stays concise with same-sender examples",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Taylor Morgan <taylor@example.com>",
+                to: emailAccount.email,
+                subject: "Form",
+                content: `Hi,
+
+Did the signed form go out?
+
+thanks,`,
+              }),
+              date: new Date("2026-05-12T08:15:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            senderReplyExamples: getStatusReplyExamples(emailAccount.email),
+            calendarAvailability: null,
+            writingStyle: contactSpecificWritingStyle,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A concise reply in the user's same-sender style. It may say the user is checking, will handle it, or has handled it, but should not ask an unnecessary clarification question or create a multi-paragraph process update.",
+            criterion: {
+              name: "Unresolved non-payment status remains concise",
+              description:
+                "For an unresolved status question outside the payment fixture, the draft should preserve the same-sender brevity and avoid needless clarification or processy filler. It may draft an action-oriented reply because the user can take the action before sending.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName: "unresolved document status with same-sender examples",
+            model: model.label,
+            pass,
+            expected: "concise reply without needless clarification",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should stay concise and useful.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+    });
+
+    describe("grounding and uncertainty", () => {
+      test(
+        "addresses each item in a multi-part discrepancy report",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Morgan Lee <morgan@customer.example>",
+                to: emailAccount.email,
+                subject: "April usage discrepancies",
+                content: `Hi,
+
+Could you check two discrepancies in our April usage report?
+
+- API usage shows 128,000 requests, while our logs show 102,000.
+- Storage shows 4.2 TB, while the billing dashboard shows 3.7 TB.
+
+Have both figures been verified, and will either be corrected?
+
+Thanks,
+Morgan`,
+              }),
+              date: new Date("2026-05-05T10:00:00Z"),
+            },
+          ];
+          const knowledgeBaseContent =
+            "Usage reports are generated from provider data and can differ from customer dashboards because aggregation timing varies.";
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "multi-part discrepancy completeness";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A useful reply that keeps both reported discrepancies in scope. It may answer them collectively when it is clear the answer or next step applies to both, but it must not ignore one, use general policy as a substitute for checking them, or claim that either was verified or corrected without supporting context. It must not be high confidence because their current status is unknown.",
+            criterion: {
+              name: "Complete and grounded multi-part response",
+              description:
+                "The draft should make clear that its answer or next step covers both reported discrepancies. A concise collective response is acceptable. General background must not replace the case-specific response, and neither item may be presented as verified or corrected without support.",
+            },
+          });
+          const pass =
+            result.confidence !== "HIGH_CONFIDENCE" && judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "both discrepancies addressed without unsupported verification or correction claims; not high confidence",
+            actual: `confidence=${result.confidence} | ${formatSemanticJudgeActual(
+              result.reply,
+              judgeResult,
+            )}`,
+          });
+
+          expect(
+            pass,
+            `Draft should cover both unresolved discrepancies without inventing their status.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "does not repeat a resolution contradicted by the sender",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: emailAccount.email,
+                to: "riley@customer.example",
+                subject: "Re: Account issues",
+                content:
+                  "We've corrected the duplicate invoice and reactivated export access. Both should work now.",
+              }),
+              date: new Date("2026-05-04T09:00:00Z"),
+            },
+            {
+              ...getEmail({
+                from: "Riley Stone <riley@customer.example>",
+                to: emailAccount.email,
+                subject: "Re: Account issues",
+                content: `Hi,
+
+The duplicate invoice is still on our account, and export access is still disabled.
+
+Please confirm once both have actually been fixed.
+
+Thanks,
+Riley`,
+              }),
+              date: new Date("2026-05-05T09:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "contradicted resolution remains unresolved";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A concise reply that treats both the duplicate invoice and disabled export access as unresolved because the sender directly contradicted the earlier resolution. It may promise to investigate or confirm later, but must not say either issue is already fixed without newer supporting context. It must not be high confidence because no newer resolution is available.",
+            criterion: {
+              name: "Sender contradiction overrides stale resolution",
+              description:
+                "The draft should recognize that both issues remain unresolved after the sender reported the previous fix did not work. It must not repeat or imply the earlier resolved status as current without new evidence.",
+            },
+          });
+          const pass =
+            result.confidence !== "HIGH_CONFIDENCE" && judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "both issues treated as unresolved; no unsupported fixed status; not high confidence",
+            actual: `confidence=${result.confidence} | ${formatSemanticJudgeActual(
+              result.reply,
+              judgeResult,
+            )}`,
+          });
+
+          expect(
+            pass,
+            `Draft should not repeat a contradicted resolution.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "does not invent pricing terms without pricing context",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Maya Chen <maya@customer.example>",
+                to: emailAccount.email,
+                subject: "Pricing confirmation",
+                content: `Hi,
+
+Can you confirm the annual price and whether the discount we discussed still applies?
+
+Thanks,
+Maya`,
+              }),
+              date: new Date("2026-05-03T11:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "missing pricing context";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A useful editable draft that does not invent concrete pricing details such as an annual price, discount amount, signing deadline, or extra payment terms because no pricing context was provided. It must not be high confidence.",
+            criterion: {
+              name: "No unsupported concrete pricing details",
+              description:
+                "The draft must not invent concrete pricing values, discount amounts, deadlines, or extra payment terms that are not present in the input. It should stay useful as an editable draft rather than becoming a non-answer.",
+            },
+          });
+          const pass =
+            result.confidence !== "HIGH_CONFIDENCE" && judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "no invented concrete pricing details, not high confidence",
+            actual: `confidence=${result.confidence} | ${formatSemanticJudgeActual(
+              result.reply,
+              judgeResult,
+            )}`,
+          });
+
+          expect(
+            pass,
+            `Draft should not invent pricing or mark high confidence without pricing context.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test.each([
+        {
+          language: "English",
+          content: `Hi,
+
+We've been using the product across our team for a month. Two things would make it work for us: sharing one integration connection across the whole team, and setting permissions per action instead of per integration.
+
+Is either of these planned?
+
+Thanks,
+Sam`,
+        },
+        {
+          language: "German",
+          content: `Hallo,
+
+wir nutzen das Produkt seit einem Monat im ganzen Team. Zwei Dinge würden uns sehr helfen: eine gemeinsame Integrationsverbindung für das ganze Team und Berechtigungen pro Aktion statt pro Integration.
+
+Ist eines davon geplant?
+
+Viele Grüße
+Sam`,
+        },
+      ])(
+        "does not stall with a promise to check when only the user knows the answer ($language)",
+        async ({ language, content }) => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Sam Rivera <sam@teamco.example>",
+                to: emailAccount.email,
+                subject: "Team features",
+                content,
+              }),
+              date: new Date("2026-05-08T10:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = `missing roadmap context (${language})`;
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A draft written as the user, in the sender's language, that answers whether the features are planned. Saying nothing is planned or confirmed yet is a valid answer.",
+            criterion: {
+              name: "No stalling or drafter uncertainty",
+              description:
+                "The draft fails if it promises to check, confirm, or get back to the sender later instead of answering; if it refers to its own inputs, such as not seeing something in the thread, not having it in front of the writer, or not wanting to guess; or if it invents specific plans or dates. A direct answer passes. Saying the features are not decided, or that the writer can't yet say whether or when they will happen, is a direct answer.",
+            },
+          });
+          const pass =
+            result.confidence !== "HIGH_CONFIDENCE" && judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "answers without a check-back or drafter leak, not high confidence",
+            actual: `confidence=${result.confidence} | ${formatSemanticJudgeActual(
+              result.reply,
+              judgeResult,
+            )}`,
+          });
+
+          expect(
+            pass,
+            `Draft should not stall or voice drafter uncertainty.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "answers a plans question from the knowledge base instead of a placeholder",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Sam Rivera <sam@teamco.example>",
+                to: emailAccount.email,
+                subject: "Team features",
+                content: `Hi,
+
+Is a shared team connection for integrations planned? We'd rather not have everyone connect their own account.
+
+Thanks,
+Sam`,
+              }),
+              date: new Date("2026-05-08T10:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent:
+              "Shared team connections for integrations are in beta. Team admins can turn them on under Settings > Integrations.",
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "plans question answered by knowledge base";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A reply that answers from the knowledge base: shared team connections are in beta and admins can enable them in the integration settings.",
+            criterion: {
+              name: "Knowledge base answer, no placeholder",
+              description:
+                "The draft should answer the question with the supplied knowledge base facts. It fails if it leaves a bracketed placeholder for the answer, defers with a promise to check, or contradicts the knowledge base.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "answers from knowledge base without a placeholder",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should answer from the knowledge base.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "commits to investigating a reported bug without a placeholder",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Jordan Blake <jordan@example.com>",
+                to: emailAccount.email,
+                subject: "CSV export broken",
+                content: `Hi,
+
+Since yesterday, every CSV export I start stops at 50% and then shows "Export failed". I've tried two browsers.
+
+Can you take a look?
+
+Jordan`,
+              }),
+              date: new Date("2026-05-11T16:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "reported bug needs investigation";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A short reply that acknowledges the failing exports and commits to looking into it, without claiming a cause or fix.",
+            criterion: {
+              name: "Investigation commitment",
+              description:
+                "A reported bug needs investigation, so committing to look into it is correct. The draft fails if it uses a bracketed placeholder in place of that commitment, invents a cause, fix, or timeline, or narrates that the writer lacks information.",
+            },
+          });
+          const pass =
+            result.confidence !== "HIGH_CONFIDENCE" && judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "commits to investigate, no placeholder, not high confidence",
+            actual: `confidence=${result.confidence} | ${formatSemanticJudgeActual(
+              result.reply,
+              judgeResult,
+            )}`,
+          });
+
+          expect(
+            pass,
+            `Draft should commit to investigating.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "uses supplied pricing terms before the signing deadline",
+        async () => {
+          const currentDate = new Date("2026-05-15T12:00:00Z");
+          const messages = [
+            {
+              ...getEmail({
+                from: "Maya Chen <maya@customer.example>",
+                to: emailAccount.email,
+                subject: "Pricing confirmation",
+                content: `Hi,
+
+Can you confirm the annual price and whether the discount we discussed still applies?
+
+Thanks,
+Maya`,
+              }),
+              date: new Date("2026-05-03T11:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent:
+              "For this customer, the approved annual price is $4,800. A 15% renewal discount applies if they sign by May 31.",
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+            currentDate,
+          });
+
+          const testName = "provided pricing context before deadline";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A reply that uses the supplied pricing context to answer the sender with the approved annual price, renewal discount, and signing deadline. Since today is before May 31, the draft may state that the discount still applies if they sign by the deadline.",
+            criterion: {
+              name: "Pre-deadline pricing context used",
+              description:
+                "The draft should communicate the supplied annual price, discount, and deadline. Since today is before May 31, it may say the discount still applies if they sign by May 31. It should avoid unsupported additional pricing details.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "$4,800, 15% discount, May 31",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should use the supplied pre-deadline pricing terms.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "uses supplied pricing terms after the signing deadline",
+        async () => {
+          const currentDate = new Date("2026-06-15T12:00:00Z");
+          const messages = [
+            {
+              ...getEmail({
+                from: "Maya Chen <maya@customer.example>",
+                to: emailAccount.email,
+                subject: "Pricing confirmation",
+                content: `Hi,
+
+Can you confirm the annual price and whether the discount we discussed still applies?
+
+Thanks,
+Maya`,
+              }),
+              date: new Date("2026-05-03T11:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent:
+              "For this customer, the approved annual price is $4,800. A 15% renewal discount applies if they sign by May 31.",
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+            currentDate,
+          });
+
+          const testName = "provided pricing context after deadline";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A reply that uses the supplied pricing context to answer the sender with the approved annual price and explains that the May 31 signing deadline has passed, so the discount is no longer currently available unless separately re-approved.",
+            criterion: {
+              name: "Post-deadline pricing context used",
+              description:
+                "The draft should communicate the supplied annual price and correctly account for today's date being after the May 31 signing deadline. It should not offer the 15% discount as still available, and it should avoid unsupported additional pricing details.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected:
+              "$4,800; May 31 deadline has passed; no unsupported pricing terms",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should use the supplied post-deadline pricing terms.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "lowers confidence when attachment context is missing",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Dana Lee <dana@clientcorp.com>",
+                to: emailAccount.email,
+                subject: "Signed order form",
+                content: `Hi,
+
+Can you send over the signed order form for our records?
+
+Thanks,
+Dana`,
+              }),
+              date: new Date("2026-05-04T09:30:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const pass = result.confidence !== "HIGH_CONFIDENCE";
+          const testName = "missing attachment context";
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "not high confidence without selected attachment context",
+            actual: `confidence=${result.confidence} | reply=${JSON.stringify(result.reply)}`,
+          });
+
+          expect(
+            pass,
+            `Draft should not be marked high confidence without selected attachment context.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "does not claim inline screenshots are unavailable",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Jordan Blake <jordan@customer.example>",
+                to: emailAccount.email,
+                subject: "Setup error",
+                content: `Hi,
+
+I tried again but I get this error message:
+
+[image: setup error screenshot]
+
+What should I do next?
+
+Thanks,
+Jordan`,
+              }),
+              date: new Date("2026-05-04T10:15:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "inline screenshot placeholder";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A natural support-style reply that treats the inline screenshot as present in the email and does not claim the image, screenshot, or attachment is missing, inaccessible, invisible, or unreadable. It may ask for the exact error text or a relevant detail if needed.",
+            criterion: {
+              name: "Inline image treated as present",
+              description:
+                "The draft should not tell the sender that the image cannot be seen, read, opened, accessed, or found. The sender included the screenshot; only the drafting model lacks visual details. The reply should proceed naturally from the surrounding text and optional image label.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "no claim that inline screenshot is unavailable",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should treat the inline screenshot as present.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "mentions selected attachment when attachment context is provided",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Dana Lee <dana@clientcorp.com>",
+                to: emailAccount.email,
+                subject: "Signed order form",
+                content: `Hi,
+
+Can you send over the signed order form for our records?
+
+Thanks,
+Dana`,
+              }),
+              date: new Date("2026-05-04T09:30:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+            attachmentContext:
+              'Signed Order Form.pdf — selected because the sender asked for "the signed order form".',
+          });
+
+          const testName = "provided attachment context";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A reply that uses the selected attachment context to tell the sender the requested signed order form is included or available with the draft, without inventing unrelated attachments.",
+            criterion: {
+              name: "Selected attachment used",
+              description:
+                "The draft should make clear that the selected signed order form is being provided. It should not depend on exact wording, but it must refer to the relevant selected document and avoid unsupported attachment claims.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "mentions attached order form",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should mention the selected attachment.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "lowers confidence when refund authority context is missing",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Riley Stone <riley@customer.example>",
+                to: emailAccount.email,
+                subject: "Refund approval",
+                content: `Hi,
+
+Can you approve the refund for the duplicate charge?
+
+Thanks,
+Riley`,
+              }),
+              date: new Date("2026-05-05T13:20:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const pass = result.confidence !== "HIGH_CONFIDENCE";
+          const testName = "missing refund authority context";
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "not high confidence without refund authority context",
+            actual: `confidence=${result.confidence} | reply=${JSON.stringify(result.reply)}`,
+          });
+
+          expect(
+            pass,
+            `Draft should not be marked high confidence without refund authority context.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "uses supplied refund approval context",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Riley Stone <riley@customer.example>",
+                to: emailAccount.email,
+                subject: "Refund approval",
+                content: `Hi,
+
+Can you approve the refund for the duplicate charge?
+
+Thanks,
+Riley`,
+              }),
+              date: new Date("2026-05-05T13:20:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent:
+              "The duplicate charge refund for this customer is approved. Finance will process it by Friday.",
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "provided refund authority context";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A reply that uses the supplied context to tell the sender the refund is approved and finance will process it by Friday, without inventing extra refund timing or payment details.",
+            criterion: {
+              name: "Refund context used",
+              description:
+                "The draft should communicate the approved refund and Friday processing timeline from the supplied context. It should not depend on exact wording, but it must preserve those two facts and avoid unsupported additional details.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "refund approved and processed by Friday",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should use the supplied refund approval context.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "lowers confidence when meeting context is missing",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Priya Sharma <priya@launchpad.dev>",
+                to: emailAccount.email,
+                subject: "Tomorrow",
+                content: `Hey,
+
+Are we still on for tomorrow?
+
+Priya`,
+              }),
+              date: new Date("2026-05-06T15:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            currentDate: new Date("2026-05-06T16:00:00Z"),
+            meetingContext: null,
+          });
+
+          const pass = result.confidence !== "HIGH_CONFIDENCE";
+          const testName = "missing meeting context";
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "not high confidence without meeting context",
+            actual: `confidence=${result.confidence} | reply=${JSON.stringify(result.reply)}`,
+          });
+
+          expect(
+            pass,
+            `Draft should not be marked high confidence without meeting context.\n\nConfidence: ${result.confidence}\nReply:\n${result.reply}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+
+      test(
+        "uses supplied meeting context to confirm a meeting",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "Priya Sharma <priya@launchpad.dev>",
+                to: emailAccount.email,
+                subject: "Tomorrow",
+                content: `Hey,
+
+Are we still on for tomorrow?
+
+Priya`,
+              }),
+              date: new Date("2026-05-06T15:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            currentDate: new Date("2026-05-06T16:00:00Z"),
+            meetingContext:
+              "Upcoming calendar context: a meeting with Priya Sharma is scheduled for tomorrow at 3:00 PM.",
+          });
+
+          const testName = "provided meeting context";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A reply that uses the supplied meeting context to confirm the meeting and preserve the scheduled time of tomorrow at 3:00 PM, without inventing a different time or unsupported meeting details.",
+            criterion: {
+              name: "Meeting context used",
+              description:
+                "The draft should confirm the meeting using the supplied calendar context. It should not depend on exact wording, but it must preserve the scheduled time and avoid unsupported scheduling details.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "confirms tomorrow at 3:00 PM",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(
+            pass,
+            `Draft should use the supplied meeting context.\n\nReply:\n${result.reply}\n\nJudge: ${JSON.stringify(
+              judgeResult,
+              null,
+              2,
+            )}`,
+          ).toBe(true);
+        },
+        TIMEOUT,
+      );
+    });
+
+    describe("punctuation defaults", () => {
+      test(
+        "does not use em dash when writing style does not ask for it",
+        async () => {
+          const messages = [
+            {
+              ...getEmail({
+                from: "sender@example.com",
+                to: emailAccount.email,
+                subject: "Quick question",
+                content: `Hi,
+
+Thanks for the help so far.
+
+Could you send over a couple of examples for how to write rules?`,
+              }),
+              date: new Date("2026-03-14T10:00:00Z"),
+            },
+          ];
+
+          const result = await draftForEval({
+            messages,
+            emailAccount,
+            knowledgeBaseContent: null,
+            emailHistorySummary: null,
+            emailHistoryContext: null,
+            calendarAvailability: null,
+            writingStyle: null,
+            mcpContext: null,
+            meetingContext: null,
+          });
+
+          const testName = "no em dash by default";
+          const judgeResult = await judgeEvalOutput({
+            input: result.modelEvidence,
+            output: result.reply,
+            expected:
+              "A concise reply that does not use an em dash unless explicitly asked for by the provided context or writing style.",
+            criterion: {
+              name: "No default em dash",
+              description:
+                "The reply should avoid em dashes by default when the writing style does not call for them.",
+            },
+          });
+          const pass = judgeResult.pass;
+
+          evalReporter.record({
+            testName,
+            model: model.label,
+            pass,
+            expected: "reply without em dash",
+            actual: formatSemanticJudgeActual(result.reply, judgeResult),
+          });
+
+          expect(judgeResult.pass).toBe(true);
+        },
+        TIMEOUT,
+      );
+    });
+  });
+
+  afterAll(() => {
+    evalReporter.printReport();
+  });
+});
+
+function getKnowledgeBaseReplyCriteria() {
+  return [
+    {
+      name: "Knowledge base use",
+      description:
+        "The reply uses the provided knowledge base facts for setup guidance, rule examples, and the model-stack answer instead of inventing different product details.",
+    },
+    {
+      name: "Voice match",
+      description:
+        "The reply matches a terse, plainspoken founder voice. It should feel concise and avoid flashy punctuation such as em dashes.",
+    },
+    {
+      name: "Restraint",
+      description:
+        "The reply answers the sender's questions without adding unsupported internal plans, roadmap hints, speculative promises, or unrelated suggestions.",
+    },
+  ];
+}
+
+function formatDraftEvalActual(
+  reply: string,
+  judgeResults: Awaited<ReturnType<typeof judgeMultiple>>["results"],
+) {
+  const failedCriteria = judgeResults
+    .filter((result) => !result.pass)
+    .map((result) => result.criterion);
+
+  const parts = [];
+
+  if (failedCriteria.length) {
+    parts.push(`judge=${failedCriteria.join(",")}`);
+  }
+
+  if (!parts.length) parts.push("clean");
+
+  parts.push(`reply=${JSON.stringify(reply)}`);
+
+  return parts.join(" | ");
+}
+
+async function maybeJudgeGroundedReply({
+  modelEvidence,
+  reply,
+}: {
+  modelEvidence: string;
+  reply: string;
+}) {
+  return judgeMultiple({
+    input: modelEvidence,
+    output: reply,
+    expected: [
+      "Reply briefly and helpfully.",
+      "Acknowledge that a cleaner inbox tends to improve setup results.",
+      "Give one or two concrete rule examples.",
+      "Say that Inbox Zero manages the model stack by default.",
+      "Optional: mention that users can bring their own API key.",
+      "Do not introduce a specific provider or model that was not present in the provided context.",
+    ].join("\n"),
+    criteria: getKnowledgeBaseReplyCriteria(),
+    judgeUserAi: getEvalJudgeUserAi(),
+  });
+}
+
+function hasExactUrl(text: string, expectedUrl: string): boolean {
+  const normalizedExpected = normalizeUrlForComparison(expectedUrl);
+
+  return extractUrls(text).some(
+    (url) => normalizeUrlForComparison(url) === normalizedExpected,
+  );
+}
+
+function mentionsAnySpecificSlot(
+  text: string,
+  calendarAvailability: { suggestedTimes: { start: string; end: string }[] },
+): boolean {
+  return calendarAvailability.suggestedTimes.some(({ start, end }) => {
+    const startTime = start.slice(11);
+    const endTime = end.slice(11);
+
+    return text.includes(startTime) || text.includes(endTime);
+  });
+}
+
+async function draftForEval(input: DraftReplyInput) {
+  const resolvedInput = {
+    ...input,
+    currentDate: input.currentDate ?? new Date("2026-05-12T09:30:00Z"),
+  };
+  const result = await aiDraftReplyWithConfidence(resolvedInput);
+  const evidence = buildDraftReplyModelEvidence(resolvedInput);
+  return {
+    ...result,
+    modelEvidence: [
+      evidence.thread,
+      evidence.context,
+      evidence.temporalAndIdentityContext,
+    ].join("\n\n"),
+  };
+}
+
+function getStatusReplyExamples(userEmail: string): string {
+  return [
+    `<reply_example>
+<from>${userEmail}</from>
+<to>taylor@example.com</to>
+<subject>Re: quick check</subject>
+<body>Not yet, will do it today.</body>
+</reply_example>`,
+    `<reply_example>
+<from>${userEmail}</from>
+<to>taylor@example.com</to>
+<subject>Re: payment</subject>
+<body>Done now.</body>
+</reply_example>`,
+    `<reply_example>
+<from>${userEmail}</from>
+<to>taylor@example.com</to>
+<subject>Re: forms</subject>
+<body>Checking and will update you.</body>
+</reply_example>`,
+  ].join("\n\n");
+}
+
+function extractUrls(text: string): string[] {
+  const markdownLinkUrls = [
+    ...text.matchAll(/\[[^\]]*]\((https?:\/\/[^)\s]+)\)/g),
+  ].map((match) => match[1]);
+  const plainUrls = text.match(/https?:\/\/[^\s<>"')\]]+/g) ?? [];
+
+  return [...new Set([...markdownLinkUrls, ...plainUrls])].map((url) =>
+    url.replace(/[,.?!;:]+$/g, ""),
+  );
+}
+
+function normalizeUrlForComparison(value: string): string {
+  try {
+    const url = new URL(value);
+    const path = url.pathname.replace(/\/$/, "");
+
+    return `${url.protocol}//${url.host}${path}${url.search}`;
+  } catch {
+    return value;
+  }
+}

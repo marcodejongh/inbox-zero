@@ -20,8 +20,8 @@ import {
 } from "@/utils/actions/fastmail-app-token.validation";
 
 interface FastmailAppTokenModalProps {
-  open: boolean;
   onOpenChange: (open: boolean) => void;
+  open: boolean;
 }
 
 export function FastmailAppTokenModal({

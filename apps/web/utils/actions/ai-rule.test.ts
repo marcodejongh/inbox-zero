@@ -1,0 +1,362 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import prisma from "@/utils/__mocks__/prisma";
+
+const {
+  checkHasAccessMock,
+  createEmailProviderMock,
+  flushLoggerSafelyMock,
+  getEmailAccountForRuleExecutionMock,
+  runRulesMock,
+} = vi.hoisted(() => ({
+  checkHasAccessMock: vi.fn(),
+  createEmailProviderMock: vi.fn(),
+  flushLoggerSafelyMock: vi.fn(),
+  getEmailAccountForRuleExecutionMock: vi.fn(),
+  runRulesMock: vi.fn(),
+}));
+
+vi.mock("@/utils/prisma");
+vi.mock("@/utils/auth", () => ({
+  auth: vi.fn(async () => ({
+    user: { id: "user-1", email: "user@example.com" },
+  })),
+}));
+vi.mock("@/utils/email/provider", () => ({
+  createEmailProvider: createEmailProviderMock,
+}));
+vi.mock("@/utils/logger-flush", () => ({
+  flushLoggerSafely: flushLoggerSafelyMock,
+}));
+vi.mock("@/utils/user/get", () => ({
+  getEmailAccountForRuleExecution: getEmailAccountForRuleExecutionMock,
+}));
+vi.mock("@/utils/ai/choose-rule/run-rules", () => ({
+  runRules: runRulesMock,
+}));
+vi.mock("@/utils/premium/server", () => ({
+  checkHasAccess: checkHasAccessMock,
+}));
+
+import {
+  runRulesAction,
+  testAiCustomContentAction,
+} from "@/utils/actions/ai-rule";
+import {
+  RERUN_MINIMUM_TIER,
+  RERUN_UPGRADE_MESSAGE,
+} from "@/utils/premium/rerun";
+
+describe("runRulesAction", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    prisma.emailAccount.findUnique.mockResolvedValue({
+      email: "user@example.com",
+      account: {
+        userId: "user-1",
+        provider: "google",
+      },
+    } as any);
+
+    prisma.executedRule.findMany.mockResolvedValue([] as any);
+    prisma.rule.findMany.mockResolvedValue([] as any);
+
+    getEmailAccountForRuleExecutionMock.mockResolvedValue({
+      id: "account-1",
+      email: "user@example.com",
+      user: {},
+      account: { provider: "google" },
+    });
+
+    createEmailProviderMock.mockResolvedValue({
+      getMessage: vi.fn(async () => ({
+        id: "message-1",
+        threadId: "thread-1",
+      })),
+    });
+
+    runRulesMock.mockResolvedValue([
+      {
+        rule: null,
+        reason: "No rules matched",
+        status: "SKIPPED",
+        createdAt: new Date("2026-03-27T00:00:00.000Z"),
+      },
+    ]);
+
+    flushLoggerSafelyMock.mockResolvedValue(undefined);
+    checkHasAccessMock.mockResolvedValue(true);
+  });
+
+  it("waits for logger flush before resolving test-mode runs", async () => {
+    const pendingResolves: Array<() => void> = [];
+    flushLoggerSafelyMock.mockImplementation(
+      async (_logger, extra?: { flushReason?: string }) => {
+        if (extra?.flushReason !== "test-mode") return;
+
+        await new Promise<void>((resolve) => {
+          pendingResolves.push(resolve);
+        });
+      },
+    );
+
+    let settled = false;
+    const actionPromise = runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: true,
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(runRulesMock).toHaveBeenCalledTimes(1);
+    expect(flushLoggerSafelyMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "runRules",
+        flushReason: "test-mode",
+      }),
+    );
+    expect(settled).toBe(false);
+
+    for (const resolve of pendingResolves) resolve();
+
+    const result = await actionPromise;
+
+    expect(result?.data).toHaveLength(1);
+    expect(settled).toBe(true);
+  });
+
+  it.each([
+    undefined,
+    false,
+    true,
+  ])("passes the draft preference through validation (%s)", async (skipDraftReplies) => {
+    const result = await runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: false,
+      skipDraftReplies,
+    });
+    expect(result?.serverError).toBeUndefined();
+    expect(runRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ skipDraftReplies }),
+    );
+  });
+
+  it("does not flush logger for non-test runs", async () => {
+    const result = await runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: false,
+    });
+
+    expect(result?.data).toHaveLength(1);
+    expect(flushLoggerSafelyMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "runRules",
+        flushReason: "test-mode",
+      }),
+    );
+  });
+
+  it("passes the request-scoped logger into rule execution", async () => {
+    const result = await runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: true,
+    });
+
+    expect(result?.data).toHaveLength(1);
+    expect(runRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        logger: expect.objectContaining({
+          info: expect.any(Function),
+          warn: expect.any(Function),
+          error: expect.any(Function),
+          trace: expect.any(Function),
+          with: expect.any(Function),
+          flush: expect.any(Function),
+        }),
+      }),
+    );
+
+    expect(flushLoggerSafelyMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "runRules",
+        flushReason: "test-mode",
+      }),
+    );
+  });
+
+  it("flushes logs when a test-mode run fails before returning", async () => {
+    createEmailProviderMock.mockRejectedValueOnce(
+      new Error("provider unavailable"),
+    );
+
+    const result = await runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: true,
+    });
+
+    expect(result?.serverError).toBe("An unknown error occurred.");
+    expect(flushLoggerSafelyMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "runRules",
+        flushReason: "test-mode-error",
+        stage: "create-email-provider",
+      }),
+    );
+  });
+
+  it("blocks a rerun when the user is not on the required tier", async () => {
+    checkHasAccessMock.mockResolvedValue(false);
+
+    const result = await runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: false,
+      rerun: true,
+    });
+
+    expect(result?.serverError).toBe(RERUN_UPGRADE_MESSAGE);
+    expect(checkHasAccessMock).toHaveBeenCalledWith({
+      userId: "user-1",
+      minimumTier: RERUN_MINIMUM_TIER,
+    });
+    expect(runRulesMock).not.toHaveBeenCalled();
+  });
+
+  it("runs rules again and ignores the existing result when the user has access", async () => {
+    prisma.executedRule.findMany.mockResolvedValue([
+      { id: "existing-executed-rule" },
+    ] as any);
+
+    const result = await runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: false,
+      rerun: true,
+    });
+
+    expect(result?.data).toHaveLength(1);
+    expect(prisma.executedRule.findMany).not.toHaveBeenCalled();
+    expect(runRulesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not check tier access for a normal run", async () => {
+    await runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: false,
+    });
+
+    expect(checkHasAccessMock).not.toHaveBeenCalled();
+    expect(runRulesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not gate reruns in test mode", async () => {
+    checkHasAccessMock.mockResolvedValue(false);
+
+    const result = await runRulesAction("account-1", {
+      messageId: "message-1",
+      threadId: "thread-1",
+      isTest: true,
+      rerun: true,
+    });
+
+    expect(result?.data).toHaveLength(1);
+    expect(checkHasAccessMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("testAiCustomContentAction", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    prisma.emailAccount.findUnique.mockResolvedValue({
+      email: "user@example.com",
+      account: {
+        userId: "user-1",
+        provider: "google",
+      },
+    } as any);
+
+    prisma.rule.findMany.mockResolvedValue([] as any);
+
+    getEmailAccountForRuleExecutionMock.mockResolvedValue({
+      id: "account-1",
+      email: "user@example.com",
+      user: {},
+      account: { provider: "google" },
+    });
+
+    createEmailProviderMock.mockResolvedValue({});
+
+    runRulesMock.mockResolvedValue([
+      {
+        rule: null,
+        reason: "No rules matched",
+        status: "SKIPPED",
+        createdAt: new Date("2026-03-27T00:00:00.000Z"),
+      },
+    ]);
+
+    flushLoggerSafelyMock.mockResolvedValue(undefined);
+  });
+
+  it("passes a synthetic message whose id matches threadId so Gmail reply detection treats it as thread root", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+
+    await testAiCustomContentAction("account-1", { content: "custom body" });
+
+    expect(runRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isTest: true,
+        message: expect.objectContaining({
+          id: "testMessageId-1700000000000",
+          threadId: "testMessageId-1700000000000",
+          textPlain: "custom body",
+        }),
+      }),
+    );
+
+    nowSpy.mockRestore();
+  });
+
+  it("flushes logs after a custom content test run", async () => {
+    await testAiCustomContentAction("account-1", { content: "x" });
+
+    expect(flushLoggerSafelyMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "testAiCustomContent",
+        flushReason: "test-mode",
+      }),
+    );
+  });
+
+  it("flushes logs when a custom content test run fails", async () => {
+    runRulesMock.mockRejectedValueOnce(new Error("rule execution failed"));
+
+    const result = await testAiCustomContentAction("account-1", {
+      content: "x",
+    });
+
+    expect(result?.serverError).toBe("An unknown error occurred.");
+    expect(flushLoggerSafelyMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "testAiCustomContent",
+        flushReason: "test-mode-error",
+      }),
+    );
+  });
+});

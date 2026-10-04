@@ -14,6 +14,7 @@ import { Loading } from "@/components/Loading";
 import { useUser } from "@/hooks/useUser";
 import { handleInvitationAction } from "@/utils/actions/organization";
 import { setInvitationCookie, clearInvitationCookie } from "@/utils/cookies";
+import { WELCOME_PATH } from "@/utils/config";
 
 export default function AcceptInvitationPage() {
   const params = useParams();
@@ -82,7 +83,7 @@ export default function AcceptInvitationPage() {
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <Card className="w-full max-w-md">
           <CardHeader>
-            <CardTitle>Invalid Invitation</CardTitle>
+            <CardTitle>Invalid invitation</CardTitle>
             <CardDescription>
               The invitation link is invalid or missing.
             </CardDescription>
@@ -109,7 +110,7 @@ export default function AcceptInvitationPage() {
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <Card className="w-full max-w-md">
           <CardHeader>
-            <CardTitle>Invitation Error</CardTitle>
+            <CardTitle>Invitation error</CardTitle>
             <CardDescription>{error}</CardDescription>
           </CardHeader>
         </Card>
@@ -128,7 +129,10 @@ export default function AcceptInvitationPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Button onClick={() => router.push("/welcome")} className="w-full">
+            <Button
+              onClick={() => router.push(WELCOME_PATH)}
+              className="w-full"
+            >
               Continue
             </Button>
           </CardContent>

@@ -2,16 +2,17 @@ import { NextResponse } from "next/server";
 import { env } from "@/env";
 import prisma from "@/utils/prisma";
 import type { Logger } from "@/utils/logger";
+import { createAccountLinkingRedirect } from "@/utils/oauth/account-linking-redirect";
 import { cleanupOrphanedAccount } from "@/utils/user/orphaned-account";
 
 interface AccountLinkingParams {
   existingAccountId: string | null;
-  hasEmailAccount: boolean;
   existingUserId: string | null;
-  targetUserId: string;
+  hasEmailAccount: boolean;
+  logger: Logger;
   provider: "google" | "microsoft" | "fastmail";
   providerEmail: string;
-  logger: Logger;
+  targetUserId: string;
 }
 
 export async function handleAccountLinking({
@@ -26,9 +27,22 @@ export async function handleAccountLinking({
   | { type: "continue_create" }
   | { type: "redirect"; response: NextResponse }
   | { type: "merge"; sourceAccountId: string; sourceUserId: string }
+  | { type: "update_existing_account"; existingAccountId: string }
   | { type: "update_tokens"; existingAccountId: string }
 > {
-  const redirectUrl = new URL("/accounts", env.NEXT_PUBLIC_BASE_URL);
+  const hasActiveTargetUser = await hasActiveAccountLinkingUser({
+    targetUserId,
+    logger,
+  });
+
+  if (!hasActiveTargetUser) {
+    return {
+      type: "redirect",
+      response: NextResponse.redirect(
+        new URL("/logout", env.NEXT_PUBLIC_BASE_URL),
+      ),
+    };
+  }
 
   if (existingAccountId && !hasEmailAccount) {
     logger.warn("Found orphaned Account, cleaning up", {
@@ -45,32 +59,75 @@ export async function handleAccountLinking({
   if (!existingAccountId || !hasEmailAccount) {
     const existingEmailAccount = await prisma.emailAccount.findUnique({
       where: { email: providerEmail.trim().toLowerCase() },
-      select: { userId: true, email: true },
+      select: {
+        accountId: true,
+        userId: true,
+        account: { select: { provider: true } },
+      },
     });
 
-    if (existingEmailAccount && existingEmailAccount.userId !== targetUserId) {
+    if (!existingEmailAccount) return { type: "continue_create" };
+
+    if (existingEmailAccount.userId !== targetUserId) {
       logger.warn(
-        `Create Failed: ${provider} account with this email already exists for a different user.`,
+        "Create failed: account with this email already exists for a different user",
         {
+          provider,
           email: providerEmail,
+          existingProvider: existingEmailAccount.account.provider,
           existingUserId: existingEmailAccount.userId,
           targetUserId,
         },
       );
-      redirectUrl.searchParams.set("error", "account_already_exists_use_merge");
+
       return {
         type: "redirect",
-        response: NextResponse.redirect(redirectUrl),
+        response: createAccountLinkingRedirect({
+          query: { error: "account_already_exists" },
+        }),
       };
     }
 
-    return { type: "continue_create" };
+    if (existingEmailAccount.account.provider !== provider) {
+      logger.warn(
+        "Create failed: account with this email already exists for a different provider",
+        {
+          provider,
+          email: providerEmail,
+          existingProvider: existingEmailAccount.account.provider,
+          targetUserId,
+        },
+      );
+
+      return {
+        type: "redirect",
+        response: createAccountLinkingRedirect({
+          query: { error: "account_already_exists" },
+        }),
+      };
+    }
+
+    logger.info(
+      "providerAccountId changed but EmailAccount exists for same user. Updating existing account.",
+      {
+        provider,
+        email: providerEmail,
+        targetUserId,
+        accountId: existingEmailAccount.accountId,
+      },
+    );
+
+    return {
+      type: "update_existing_account",
+      existingAccountId: existingEmailAccount.accountId,
+    };
   }
 
   if (existingUserId === targetUserId) {
     logger.info(
-      `${provider} account is already linked to the correct user. Updating tokens.`,
+      "Account is already linked to the correct user. Updating tokens.",
       {
+        provider,
         email: providerEmail,
         targetUserId,
         existingAccountId,
@@ -97,4 +154,68 @@ export async function handleAccountLinking({
     sourceAccountId: existingAccountId,
     sourceUserId: existingUserId,
   };
+}
+
+// A linked Account row is also the credential Better Auth accepts for provider
+// sign-in, and disabling email codes only clears their sessions. Linking from an
+// email-code session would therefore leave behind access that outlives the code,
+// so both the authorize and callback halves of every provider flow refuse it.
+const EMAIL_CODE_SESSION_BLOCKED_LOG =
+  "Blocked mailbox linking from an email code session";
+
+export function getMailboxLinkingBlockedResponse(request: {
+  auth: { emailOtp?: boolean };
+  logger: Logger;
+}) {
+  if (!request.auth.emailOtp) return null;
+
+  request.logger.warn(EMAIL_CODE_SESSION_BLOCKED_LOG);
+
+  return NextResponse.json(
+    {
+      error: "Sign in with your connected provider to connect a mailbox.",
+      isKnownError: true,
+    },
+    { status: 403 },
+  );
+}
+
+export function getMailboxLinkingBlockedRedirect({
+  session,
+  logger,
+  stateCookieName,
+}: {
+  session: { session: { emailOtp?: boolean } } | null;
+  logger: Logger;
+  stateCookieName: string;
+}) {
+  if (!session?.session.emailOtp) return null;
+
+  logger.warn(EMAIL_CODE_SESSION_BLOCKED_LOG);
+
+  return createAccountLinkingRedirect({
+    query: { error: "provider_sign_in_required" },
+    stateCookieName,
+  });
+}
+
+export async function hasActiveAccountLinkingUser({
+  targetUserId,
+  logger,
+}: {
+  targetUserId: string;
+  logger: Logger;
+}) {
+  const user = await prisma.user.findUnique({
+    where: { id: targetUserId },
+    select: { id: true },
+  });
+
+  if (user) return true;
+
+  logger.warn("Account linking attempted with deleted user in session", {
+    targetUserId,
+  });
+
+  return false;
 }

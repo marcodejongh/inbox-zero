@@ -1,0 +1,231 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Inbox Zero Documentation",
+  "colors": {
+    "primary": "#2563eb",
+    "light": "#60a5fa",
+    "dark": "#2563eb"
+  },
+  "favicon": "/favicon.png",
+  "navigation": {
+    "anchors": [
+      {
+        "anchor": "Documentation",
+        "icon": "book-open",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "essentials/getting-started"
+            ]
+          },
+          {
+            "group": "Assistant & Automation",
+            "pages": [
+              "essentials/ai-chat",
+              "essentials/email-ai-personal-assistant",
+              "essentials/assistant-settings",
+              "essentials/email-digest",
+              "essentials/delayed-actions",
+              "essentials/call-webhook"
+            ]
+          },
+          {
+            "group": "Cleanup",
+            "pages": [
+              "essentials/bulk-email-unsubscriber",
+              "essentials/bulk-archiver",
+              "essentials/email-analytics"
+            ]
+          },
+          {
+            "group": "Calendar & Meetings",
+            "pages": [
+              "essentials/calendar-integration",
+              "essentials/booking-links",
+              "essentials/meeting-briefs"
+            ]
+          },
+          {
+            "group": "Channels & Integrations",
+            "pages": [
+              "essentials/channels",
+              "essentials/slack-integration",
+              "essentials/telegram-integration",
+              "essentials/mcp"
+            ]
+          },
+          {
+            "group": "Inbox Features",
+            "pages": [
+              "essentials/auto-file-attachments",
+              "essentials/cold-email-blocker"
+            ]
+          },
+          {
+            "group": "Apps",
+            "pages": [
+              "essentials/mobile-apps",
+              "essentials/inbox-zero-tabs-extension"
+            ]
+          },
+          {
+            "group": "Teams & Account",
+            "pages": [
+              "essentials/organizations",
+              "essentials/api-keys"
+            ]
+          },
+          {
+            "group": "Safety & Help",
+            "pages": [
+              "essentials/security-and-data",
+              "essentials/outlook-guide",
+              "essentials/troubleshooting",
+              "essentials/faq"
+            ]
+          },
+          {
+            "group": "Early Access",
+            "pages": [
+              "essentials/meeting-recorder",
+              "essentials/deep-clean",
+              "essentials/reply-zero",
+              "essentials/context-integrations"
+            ]
+          }
+        ]
+      },
+      {
+        "anchor": "Developers",
+        "icon": "code",
+        "groups": [
+          {
+            "group": "Quick Start",
+            "pages": [
+              "hosting/quick-start",
+              "hosting/setup-cli-reference"
+            ]
+          },
+          {
+            "group": "Setup Guides",
+            "pages": [
+              "hosting/setup-guides",
+              "hosting/google-oauth",
+              "hosting/google-pubsub",
+              "hosting/microsoft-oauth",
+              "hosting/sso",
+              "hosting/llm-setup"
+            ]
+          },
+          {
+            "group": "Self-Hosting",
+            "pages": [
+              "hosting/self-hosting",
+              "hosting/environment-variables",
+              "hosting/production-operations",
+              "hosting/security-hardening",
+              "hosting/vercel",
+              "hosting/kubernetes",
+              "hosting/troubleshooting",
+              "hosting/image-proxy"
+            ]
+          },
+          {
+            "group": "AWS Deployment",
+            "pages": [
+              "hosting/aws",
+              "hosting/ec2-deployment",
+              "hosting/terraform",
+              "hosting/aws-copilot"
+            ]
+          },
+          {
+            "group": "GCP Deployment",
+            "pages": [
+              "hosting/gcp-cloudflare-tunnel"
+            ]
+          },
+          {
+            "group": "Contributing",
+            "pages": [
+              "contributing"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "slack/setup",
+              "teams/setup",
+              "telegram/setup"
+            ]
+          },
+          {
+            "group": "API",
+            "pages": [
+              "api-reference/introduction",
+              "api-reference/cli",
+              "api-reference/mcp",
+              "api-reference/endpoint/get-statsby-period",
+              "api-reference/endpoint/get-statsresponse-time",
+              "api-reference/endpoint/get-rules",
+              "api-reference/endpoint/post-rules",
+              "api-reference/endpoint/get-rules-id",
+              "api-reference/endpoint/put-rules-id",
+              "api-reference/endpoint/delete-rules-id",
+              "api-reference/endpoint/post-senders-unsubscribe"
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "Changelog",
+          "href": "/changelog",
+          "icon": "clock-rotate-left"
+        },
+        {
+          "anchor": "Community",
+          "href": "https://getinboxzero.com/discord",
+          "icon": "discord"
+        },
+        {
+          "anchor": "Blog",
+          "href": "https://www.getinboxzero.com/blog",
+          "icon": "newspaper"
+        }
+      ]
+    }
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "api": {
+    "openapi": "openapi.json"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Support",
+        "href": "mailto:support@getinboxzero.com"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Dashboard",
+      "href": "https://www.getinboxzero.com/welcome"
+    }
+  },
+  "footer": {
+    "socials": {
+      "twitter": "https://www.getinboxzero.com/twitter",
+      "github": "https://www.getinboxzero.com/github",
+      "linkedin": "https://www.getinboxzero.com/linkedin"
+    }
+  }
+}

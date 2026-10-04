@@ -8,17 +8,44 @@ import { createEmailProvider } from "@/utils/email/provider";
 import { getEmailAccountWithAiAndTokens } from "@/utils/user/get";
 import { SafeError } from "@/utils/error";
 import { getEmailForLLM } from "@/utils/get-email-from-message";
-import { z } from "zod";
 import { updateContactRole } from "@inboxzero/loops";
+import {
+  updateHiddenAiDraftLinksBody,
+  updateReferralSignatureBody,
+  updateSentWithSignatureBody,
+  updateSentMessageOpenTrackingBody,
+} from "@/utils/actions/email-account.validation";
+import { z } from "zod";
 
 export const updateEmailAccountRoleAction = actionClient
   .metadata({ name: "updateEmailAccountRole" })
-  .inputSchema(z.object({ role: z.string() }))
+  .inputSchema(
+    z.object({
+      role: z.string(),
+      writeOnboardingAnswers: z.boolean().optional().default(true),
+    }),
+  )
   .action(
     async ({
-      ctx: { emailAccountId, userEmail, logger },
-      parsedInput: { role },
+      ctx: { emailAccountId, userEmail, userId, logger },
+      parsedInput: { role, writeOnboardingAnswers },
     }) => {
+      await prisma.$transaction([
+        prisma.emailAccount.update({
+          where: { id: emailAccountId },
+          data: { role },
+        }),
+        prisma.user.update({
+          where: { id: userId },
+          data: {
+            ...(writeOnboardingAnswers
+              ? { onboardingAnswers: { answers: { role } } }
+              : {}),
+            surveyRole: role,
+          },
+        }),
+      ]);
+
       after(async () => {
         await updateContactRole({
           email: userEmail,
@@ -26,11 +53,6 @@ export const updateEmailAccountRoleAction = actionClient
         }).catch((error) => {
           logger.error("Loops: Error updating role", { error });
         });
-      });
-
-      await prisma.emailAccount.update({
-        where: { id: emailAccountId },
-        data: { role },
       });
     },
   );
@@ -89,11 +111,9 @@ export const analyzePersonaAction = actionClient
     return personaAnalysis;
   });
 
-const updateReferralSignatureSchema = z.object({ enabled: z.boolean() });
-
 export const updateReferralSignatureAction = actionClient
   .metadata({ name: "updateReferralSignature" })
-  .inputSchema(updateReferralSignatureSchema)
+  .inputSchema(updateReferralSignatureBody)
   .action(
     async ({ ctx: { emailAccountId, logger }, parsedInput: { enabled } }) => {
       logger.info("Updating referral signature", { enabled });
@@ -101,6 +121,48 @@ export const updateReferralSignatureAction = actionClient
       await prisma.emailAccount.update({
         where: { id: emailAccountId },
         data: { includeReferralSignature: enabled },
+      });
+    },
+  );
+
+export const updateSentWithSignatureAction = actionClient
+  .metadata({ name: "updateSentWithSignature" })
+  .inputSchema(updateSentWithSignatureBody)
+  .action(
+    async ({ ctx: { emailAccountId, logger }, parsedInput: { enabled } }) => {
+      logger.info("Updating sent with signature", { enabled });
+
+      await prisma.emailAccount.update({
+        where: { id: emailAccountId },
+        data: { includeSentWithSignature: enabled },
+      });
+    },
+  );
+
+export const updateHiddenAiDraftLinksAction = actionClient
+  .metadata({ name: "updateHiddenAiDraftLinks" })
+  .inputSchema(updateHiddenAiDraftLinksBody)
+  .action(
+    async ({ ctx: { emailAccountId, logger }, parsedInput: { enabled } }) => {
+      logger.info("Updating hidden AI draft links", { enabled });
+
+      await prisma.emailAccount.update({
+        where: { id: emailAccountId },
+        data: { allowHiddenAiDraftLinks: enabled },
+      });
+    },
+  );
+
+export const updateSentMessageOpenTrackingAction = actionClient
+  .metadata({ name: "updateSentMessageOpenTracking" })
+  .inputSchema(updateSentMessageOpenTrackingBody)
+  .action(
+    async ({ ctx: { emailAccountId, logger }, parsedInput: { enabled } }) => {
+      logger.info("Updating sent message open tracking", { enabled });
+
+      await prisma.emailAccount.update({
+        where: { id: emailAccountId },
+        data: { sentMessageOpenTrackingEnabled: enabled },
       });
     },
   );

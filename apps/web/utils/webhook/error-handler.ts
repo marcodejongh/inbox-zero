@@ -1,6 +1,7 @@
-import { checkCommonErrors } from "@/utils/error";
+import { checkCommonErrors, isInvalidGrantError } from "@/utils/error";
 import { trackError } from "@/utils/posthog";
 import type { Logger } from "@/utils/logger";
+import { recordRateLimitFromApiError } from "@/utils/email/rate-limit";
 
 /**
  * Handles errors from async webhook processing in the same way as withError middleware
@@ -17,8 +18,24 @@ export async function handleWebhookError(
 ) {
   const { email, emailAccountId, url, logger } = options;
 
+  if (isInvalidGrantError(error)) {
+    logger.warn("Invalid grant while processing webhook", { emailAccountId });
+
+    // Provider clients handle credential cleanup using the tokens that failed.
+    // This outer handler has no credential snapshot and must not clear newer tokens.
+    return;
+  }
+
   const apiError = checkCommonErrors(error, url, logger);
   if (apiError) {
+    await recordRateLimitFromApiError({
+      apiErrorType: apiError.type,
+      error,
+      emailAccountId,
+      logger,
+      source: url,
+    });
+
     await trackError({
       email,
       emailAccountId,

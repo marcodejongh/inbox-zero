@@ -1,0 +1,153 @@
+{
+  "buildCommand": "cd ../.. && unset PRIVATE_BUILD_TOKEN && if [ \"$VERCEL_ENV\" = preview ] && [ \"$IS_OAUTH_PROXY_SERVER\" != true ]; then NEXT_PUBLIC_BASE_URL=https://$VERCEL_URL turbo run build --force --filter={apps/web}...; else turbo run build --filter={apps/web}...; fi",
+  "installCommand": "cd ../.. && node scripts/install-private-build.mjs && unset PRIVATE_BUILD_TOKEN && bash clone-marketing.sh && corepack pnpm install --filter '!@inboxzero/desktop' --no-frozen-lockfile",
+  "ignoreCommand": "bash scripts/vercel-ignore-build.sh",
+  "functions": {
+    "app/api/follow-up-reminders/account/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "follow-up-reminders-account",
+          "retryAfterSeconds": 60
+        }
+      ]
+    },
+    "app/api/ai/digest/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "ai-digest",
+          "retryAfterSeconds": 60
+        }
+      ]
+    },
+    "app/api/automation-jobs/execute/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "automation-jobs-execute",
+          "retryAfterSeconds": 60
+        }
+      ]
+    },
+    "app/api/meeting-recorder/transcript/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "meeting-recorder-transcript",
+          "retryAfterSeconds": 60
+        }
+      ]
+    },
+    "app/api/meeting-recorder/process/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "meeting-recorder-process",
+          "retryAfterSeconds": 60
+        }
+      ]
+    },
+    "app/api/resend/digest/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "resend-digest",
+          "retryAfterSeconds": 60
+        }
+      ]
+    },
+    "app/api/resend/summary/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "resend-summary",
+          "retryAfterSeconds": 60,
+          "maxDeliveries": 5
+        }
+      ]
+    },
+    "app/api/stripe/invoice-email/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "stripe-invoice-email",
+          "retryAfterSeconds": 60
+        }
+      ]
+    },
+    "app/api/resend/inbox-health/queue/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "resend-inbox-health",
+          "retryAfterSeconds": 60
+        }
+      ]
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/tools",
+      "destination": "https://mini-apps-cyan.vercel.app/tools"
+    },
+    {
+      "source": "/tools/:path+",
+      "destination": "https://mini-apps-cyan.vercel.app/tools/:path+"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/scheduled-actions",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/watch/all",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/resend/digest/all",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/resend/inbox-health/all",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/resend/summary/all",
+      "schedule": "0 9 * * 1"
+    },
+    {
+      "path": "/api/meeting-briefs",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/meeting-recorder/schedule",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/follow-up-reminders",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/automation-jobs",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/reasoning-retention",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/mobile-push-retention",
+      "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/cron/email-send-operation-retention",
+      "schedule": "45 3 * * *"
+    },
+    {
+      "path": "/api/cron/draft-cleanup",
+      "schedule": "0 4 * * *"
+    }
+  ]
+}

@@ -14,6 +14,7 @@ import { LayoutGroup, motion } from "motion/react";
 import Link from "next/link";
 import { type Dispatch, type SetStateAction, useId } from "react";
 import { ArrowUpRight } from "lucide-react";
+import { useProductAnalytics } from "@/hooks/useProductAnalytics";
 
 const tabSelectButtonVariants = cva("p-4 transition-colors duration-75", {
   variants: {
@@ -54,23 +55,27 @@ export function TabSelect<T extends string>({
   className?: string;
 }) {
   const layoutGroupId = useId();
+  const analytics = useProductAnalytics();
 
   return (
     <div className={cn("flex text-sm", className)}>
       <LayoutGroup id={layoutGroupId}>
         {options.map(({ id, label, href, target }) => {
           const isSelected = id === selected;
-          const As = href ? Link : "div";
-          return (
-            <As
-              key={id}
-              className="relative"
-              href={href ?? "#"}
-              target={target ?? undefined}
-            >
+          const content = (
+            <>
               <button
                 type="button"
-                {...(onSelect && !href && { onClick: () => onSelect(id) })}
+                onClick={() => {
+                  if (onSelect && !href) onSelect(id);
+                  setTimeout(() => {
+                    analytics.captureAction("tab_selected", {
+                      tab: id,
+                      tab_label: label,
+                      has_href: Boolean(href),
+                    });
+                  }, 0);
+                }}
                 className={cn(
                   tabSelectButtonVariants({ variant }),
                   target === "_blank" && "group flex items-center gap-1.5",
@@ -94,7 +99,26 @@ export function TabSelect<T extends string>({
                   <div className="h-0.5 rounded-t-full bg-current" />
                 </motion.div>
               )}
-            </As>
+            </>
+          );
+
+          if (href) {
+            return (
+              <Link
+                key={id}
+                className="relative"
+                href={href}
+                target={target ?? undefined}
+              >
+                {content}
+              </Link>
+            );
+          }
+
+          return (
+            <div key={id} className="relative">
+              {content}
+            </div>
           );
         })}
       </LayoutGroup>

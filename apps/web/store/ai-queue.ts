@@ -4,9 +4,7 @@ import { useMemo } from "react";
 
 const aiQueueAtom = atom<Set<string>>(new Set([]));
 
-export const useAiQueueState = () => {
-  return useAtomValue(aiQueueAtom);
-};
+export const useAiQueueState = () => useAtomValue(aiQueueAtom);
 
 export const pushToAiQueueAtom = (pushIds: string[]) => {
   jotaiStore.set(aiQueueAtom, (prev) => {
@@ -24,6 +22,10 @@ export const removeFromAiQueueAtom = (removeId: string) => {
     remainingIds.delete(removeId);
     return remainingIds;
   });
+};
+
+export const clearAiQueueAtom = () => {
+  jotaiStore.set(aiQueueAtom, new Set([]));
 };
 
 const isInAiQueueAtom = atom((get) => {
