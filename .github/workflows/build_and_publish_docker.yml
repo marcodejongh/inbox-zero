@@ -9,24 +9,29 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
-  packages: write
+env:
+  # arm64 is built under emulation and takes about an hour for the web image,
+  # so only release tags pay for it. Pushes to main build amd64 alone.
+  PLATFORMS: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
 jobs:
-  build:
+  # web and daemon are separate jobs rather than a matrix so that each can
+  # hand its own digest to dispatch-homelab.
+  web:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: inbox-zero
-            dockerfile: docker/Dockerfile.prod
-          - image: inbox-zero-fastmail-daemon
-            dockerfile: apps/fastmail-eventsource-daemon/Dockerfile
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Normalize registry owner
         run: echo "REGISTRY_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@v3
+        if: startsWith(github.ref, 'refs/tags/v')
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -36,18 +41,132 @@ jobs:
       - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: meta
         with:
-          images: ghcr.io/${{ env.REGISTRY_OWNER }}/${{ matrix.image }}
+          images: ghcr.io/${{ env.REGISTRY_OWNER }}/inbox-zero
           tags: |
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
+          file: docker/Dockerfile.prod
+          platforms: ${{ env.PLATFORMS }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-from: type=gha,scope=inbox-zero
+          cache-to: type=gha,mode=max,scope=inbox-zero
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ env.REGISTRY_OWNER }}/inbox-zero
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  daemon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Normalize registry owner
+        run: echo "REGISTRY_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
+        if: startsWith(github.ref, 'refs/tags/v')
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        id: meta
+        with:
+          images: ghcr.io/${{ env.REGISTRY_OWNER }}/inbox-zero-fastmail-daemon
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          file: apps/fastmail-eventsource-daemon/Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=inbox-zero-fastmail-daemon
+          cache-to: type=gha,mode=max,scope=inbox-zero-fastmail-daemon
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ env.REGISTRY_OWNER }}/inbox-zero-fastmail-daemon
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # Tells marcodejongh/blackheathdc-ansible that a new pair of images exists,
+  # so its own self-hosted runner can verify, pin and deploy them. This job
+  # never runs on a self-hosted runner and holds no homelab secrets beyond the
+  # token that sends the event. Kill switch: set the repository variable
+  # HOMELAB_DEPLOY_ENABLED to anything but "true".
+  dispatch-homelab:
+    needs: [web, daemon]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HOMELAB_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Validate digests and dispatch homelab deploy
+        shell: bash
+        env:
+          HOMELAB_DISPATCH_TOKEN: ${{ secrets.HOMELAB_DISPATCH_TOKEN }}
+          WEB_DIGEST: ${{ needs.web.outputs.digest }}
+          DAEMON_DIGEST: ${{ needs.daemon.outputs.digest }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          for digest in "$WEB_DIGEST" "$DAEMON_DIGEST"; do
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::an image digest is not a valid sha256 digest: '$digest'"
+              exit 1
+            fi
+          done
+          if [ -z "$HOMELAB_DISPATCH_TOKEN" ]; then
+            echo "::error::HOMELAB_DEPLOY_ENABLED is true but the HOMELAB_DISPATCH_TOKEN secret is not set"
+            exit 1
+          fi
+
+          payload="$(jq -n \
+            --arg web_digest "$WEB_DIGEST" \
+            --arg daemon_digest "$DAEMON_DIGEST" \
+            --arg sha "$COMMIT_SHA" \
+            --arg run_url "$RUN_URL" \
+            '{event_type: "inboxzero-image", client_payload: {web_digest: $web_digest, daemon_digest: $daemon_digest, sha: $sha, run_url: $run_url}}')"
+
+          # The token must never appear in argv (visible to any other process
+          # on the runner via `ps` or /proc/<pid>/cmdline). curl --config -
+          # reads options, including the Authorization header, from stdin.
+          printf 'header = "Authorization: Bearer %s"\n' "$HOMELAB_DISPATCH_TOKEN" | curl --fail-with-body --silent --show-error \
+            --config - \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d "$payload" \
+            "https://api.github.com/repos/marcodejongh/blackheathdc-ansible/dispatches"
+
+          {
+            echo "### Homelab deploy dispatched"
+            echo ""
+            echo "- web: \`${WEB_DIGEST}\`"
+            echo "- daemon: \`${DAEMON_DIGEST}\`"
+            echo "- sha: \`${COMMIT_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
