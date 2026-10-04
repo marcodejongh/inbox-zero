@@ -1869,6 +1869,9 @@ model DocumentFiling {
   paperlessTaskId             String?
   paperlessUploadStartedAt    DateTime?
   paperlessNotifyOnCompletion Boolean   @default(false)
+  paperlessNotifiedChannelIds  String[]  @default([])
+  paperlessReconcileLeaseId    String?
+  paperlessReconcileLeaseUntil DateTime?
   webUrl                      String?
   errorMessage                String?
 

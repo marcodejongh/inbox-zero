@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import prisma from "@/utils/prisma";
 import { withEmailProvider } from "@/utils/middleware";
 import { SafeError } from "@/utils/error";
+import { isPaperlessAttachment } from "@/utils/paperless/attachments";
 import { getFilableAttachments } from "@/utils/drive/filing-engine";
 import { extractNameFromEmail, extractEmailAddress } from "@/utils/email";
 import type { ParsedMessage } from "@/utils/types";
@@ -94,7 +95,11 @@ async function getAttachmentsData({
     maxResults: MAX_MESSAGES_TO_FETCH,
   });
 
-  const attachments = extractAttachmentPreviews(messages, MAX_ATTACHMENTS);
+  const attachments = extractAttachmentPreviews(
+    messages,
+    MAX_ATTACHMENTS,
+    emailAccount.filingDestination === "paperless",
+  );
 
   logger.info("Attachments preview ready", { count: attachments.length });
 
@@ -107,12 +112,14 @@ async function getAttachmentsData({
 function extractAttachmentPreviews(
   messages: ParsedMessage[],
   limit: number,
+  paperless: boolean,
 ): AttachmentPreviewItem[] {
   const result: AttachmentPreviewItem[] = [];
 
   for (const message of messages) {
     const extractable = getFilableAttachments(message);
     for (const attachment of extractable) {
+      if (paperless && !isPaperlessAttachment(attachment)) continue;
       result.push({
         messageId: message.id,
         threadId: message.threadId,

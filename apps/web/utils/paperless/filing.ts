@@ -70,7 +70,6 @@ export async function processPaperlessAttachment({
     };
     const existing = await findAttachmentFiling(lookup);
     if (
-      manual &&
       existing &&
       existing.driveConnection.provider !== "paperless" &&
       (existing.fileId || ["FILED", "PROCESSING"].includes(existing.status))

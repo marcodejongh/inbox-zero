@@ -16,6 +16,13 @@ import {
   getMockParsedMessage,
 } from "@/__tests__/mocks/email-provider.mock";
 
+import { createEmailProvider } from "@/utils/email/provider";
+import { sendFilingMessagingNotifications } from "@/utils/drive/filing-messaging-notifications";
+
+vi.mock("@/utils/email/provider", () => ({ createEmailProvider: vi.fn() }));
+vi.mock("@/utils/drive/filing-messaging-notifications", () => ({
+  sendFilingMessagingNotifications: vi.fn(),
+}));
 vi.mock("@/utils/paperless/analyze");
 vi.mock("@/utils/drive/document-extraction");
 
@@ -55,6 +62,140 @@ describe.skipIf(!process.env.RUN_DB_TESTS)(
       await prisma.user.deleteMany({ where: { email } });
     });
 
+    it("persists messaging receipts while retrying email, without repeating successful channels", async () => {
+      await prisma.emailAccount.update({
+        where: { id: emailAccountId },
+        data: { filingConfirmationSendEmail: true },
+      });
+      const filing = await prisma.documentFiling.create({
+        data: {
+          emailAccountId,
+          driveConnectionId: connectionId,
+          messageId: "message-1",
+          attachmentId: "attachment-1",
+          filename: "invoice.pdf",
+          folderPath: "Paperless",
+          status: "FILED",
+          fileId: "42",
+          paperlessNotifyOnCompletion: true,
+          updatedAt: new Date(0),
+        },
+      });
+      expect(filing.paperlessNotifiedChannelIds).toEqual([]);
+      vi.mocked(createEmailProvider).mockRejectedValue(
+        new Error("Expired auth"),
+      );
+      vi.mocked(sendFilingMessagingNotifications).mockResolvedValueOnce({
+        successfulChannelIds: ["slack-1"],
+        failedChannelIds: ["teams-1"],
+      });
+      await reconcilePaperlessFilings(createTestLogger());
+      const first = await prisma.documentFiling.findUniqueOrThrow({
+        where: { id: filing.id },
+      });
+      expect(first.paperlessNotifyOnCompletion).toBe(true);
+      expect(first.paperlessNotifiedChannelIds).toEqual(["slack-1"]);
+      await prisma.documentFiling.update({
+        where: { id: filing.id },
+        data: { updatedAt: new Date(0) },
+      });
+      vi.mocked(sendFilingMessagingNotifications).mockResolvedValueOnce({
+        successfulChannelIds: ["teams-1"],
+        failedChannelIds: [],
+      });
+      await reconcilePaperlessFilings(createTestLogger());
+      expect(sendFilingMessagingNotifications).toHaveBeenLastCalledWith(
+        expect.objectContaining({ skipChannelIds: ["slack-1"] }),
+      );
+      const second = await prisma.documentFiling.findUniqueOrThrow({
+        where: { id: filing.id },
+      });
+      expect(second.paperlessNotifiedChannelIds).toEqual([
+        "slack-1",
+        "teams-1",
+      ]);
+      expect(second.paperlessNotifyOnCompletion).toBe(true);
+      await prisma.emailAccount.update({
+        where: { id: emailAccountId },
+        data: { filingConfirmationSendEmail: false },
+      });
+      await prisma.documentFiling.update({
+        where: { id: filing.id },
+        data: { updatedAt: new Date(0) },
+      });
+      vi.mocked(sendFilingMessagingNotifications).mockResolvedValueOnce({
+        successfulChannelIds: [],
+        failedChannelIds: [],
+      });
+      await reconcilePaperlessFilings(createTestLogger());
+      expect(sendFilingMessagingNotifications).toHaveBeenLastCalledWith(
+        expect.objectContaining({ skipChannelIds: ["slack-1", "teams-1"] }),
+      );
+      expect(
+        (
+          await prisma.documentFiling.findUniqueOrThrow({
+            where: { id: filing.id },
+          })
+        ).paperlessNotifyOnCompletion,
+      ).toBe(false);
+    });
+
+    it("keeps a slow notification owned across overlapping minute sweeps", async () => {
+      const filing = await prisma.documentFiling.create({
+        data: {
+          emailAccountId,
+          driveConnectionId: connectionId,
+          messageId: "slow-message",
+          attachmentId: "attachment-1",
+          filename: "invoice.pdf",
+          folderPath: "Paperless",
+          status: "FILED",
+          fileId: "42",
+          paperlessNotifyOnCompletion: true,
+          updatedAt: new Date(0),
+        },
+      });
+      await prisma.emailAccount.update({
+        where: { id: emailAccountId },
+        data: { filingConfirmationSendEmail: false },
+      });
+      let finish!: () => void;
+      let started!: () => void;
+      const notificationStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      vi.mocked(sendFilingMessagingNotifications).mockClear();
+      vi.mocked(sendFilingMessagingNotifications).mockImplementationOnce(
+        async () => {
+          started();
+          await blocked;
+          return { successfulChannelIds: ["slack-1"], failedChannelIds: [] };
+        },
+      );
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const first = reconcilePaperlessFilings(createTestLogger());
+      try {
+        await notificationStarted;
+        vi.setSystemTime(Date.now() + 61_000);
+        expect(
+          (await reconcilePaperlessFilings(createTestLogger())).checked,
+        ).toBe(0);
+        expect(sendFilingMessagingNotifications).toHaveBeenCalledTimes(1);
+      } finally {
+        finish();
+        await first;
+        vi.useRealTimers();
+      }
+      const saved = await prisma.documentFiling.findUniqueOrThrow({
+        where: { id: filing.id },
+      });
+      expect(saved.paperlessNotifyOnCompletion).toBe(false);
+      expect(saved.paperlessReconcileLeaseId).toBeNull();
+      expect(saved.paperlessReconcileLeaseUntil).toBeNull();
+    });
     it("defaults mailboxes to cloud and encrypts the Paperless token at rest", async () => {
       expect(
         (

@@ -167,7 +167,10 @@ describe("Paperless filing", () => {
     ).toBe(false);
     expect(upload).not.toHaveBeenCalled();
   });
-  it("preserves an existing cloud file even when its filing status is an error", async () => {
+  it.each([
+    true,
+    false,
+  ])("preserves an existing cloud file in ERROR when manual=%s", async (manual) => {
     prisma.documentFiling.findFirst.mockResolvedValue({
       id: "existing",
       status: "ERROR",
@@ -175,10 +178,10 @@ describe("Paperless filing", () => {
       driveConnection: { provider: "google" },
     } as any);
     expect(
-      (await processPaperlessAttachment({ ...options(), manual: true }))
-        .success,
+      (await processPaperlessAttachment({ ...options(), manual })).success,
     ).toBe(false);
     expect(upload).not.toHaveBeenCalled();
+    expect(prisma.documentFiling.updateMany).not.toHaveBeenCalled();
   });
   it("preserves completion notifications when retrying an automatic filing manually", async () => {
     prisma.documentFiling.findFirst.mockResolvedValue({

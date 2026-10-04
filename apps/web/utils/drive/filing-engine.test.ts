@@ -80,7 +80,10 @@ describe("processAttachment", () => {
     } as any);
     vi.mocked(sendFiledNotification).mockResolvedValue(undefined);
     vi.mocked(sendAskNotification).mockResolvedValue(undefined);
-    vi.mocked(sendFilingMessagingNotifications).mockResolvedValue(undefined);
+    vi.mocked(sendFilingMessagingNotifications).mockResolvedValue({
+      successfulChannelIds: [],
+      failedChannelIds: [],
+    });
   });
 
   it("sends filed confirmation emails by default", async () => {
