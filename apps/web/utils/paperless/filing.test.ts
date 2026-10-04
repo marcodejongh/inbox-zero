@@ -124,6 +124,54 @@ describe("Paperless filing", () => {
     expect(analyzePaperlessAttachment).not.toHaveBeenCalled();
     expect(upload).toHaveBeenCalledOnce();
   });
+  it.each([
+    "PREVIEW",
+    "PENDING",
+    "REJECTED",
+    "ERROR",
+  ])("allows a manual Paperless save after a cloud %s without an uploaded file", async (status) => {
+    prisma.documentFiling.findFirst.mockResolvedValue({
+      id: "existing",
+      status,
+      updatedAt: new Date(),
+      fileId: null,
+      driveConnection: { provider: "google" },
+    } as any);
+    const result = await processPaperlessAttachment({
+      ...options(),
+      manual: true,
+    });
+    expect(result.filing?.status).toBe("PROCESSING");
+    expect(upload).toHaveBeenCalledOnce();
+  });
+  it.each([
+    "FILED",
+    "PROCESSING",
+  ])("refuses a manual Paperless save while a cloud filing is %s", async (status) => {
+    prisma.documentFiling.findFirst.mockResolvedValue({
+      id: "existing",
+      status,
+      driveConnection: { provider: "google" },
+    } as any);
+    expect(
+      (await processPaperlessAttachment({ ...options(), manual: true }))
+        .success,
+    ).toBe(false);
+    expect(upload).not.toHaveBeenCalled();
+  });
+  it("preserves an existing cloud file even when its filing status is an error", async () => {
+    prisma.documentFiling.findFirst.mockResolvedValue({
+      id: "existing",
+      status: "ERROR",
+      fileId: "cloud-file",
+      driveConnection: { provider: "google" },
+    } as any);
+    expect(
+      (await processPaperlessAttachment({ ...options(), manual: true }))
+        .success,
+    ).toBe(false);
+    expect(upload).not.toHaveBeenCalled();
+  });
   it("keeps a confirmation pending when its email cannot be delivered", async () => {
     vi.mocked(analyzePaperlessAttachment).mockResolvedValue({
       action: "save",

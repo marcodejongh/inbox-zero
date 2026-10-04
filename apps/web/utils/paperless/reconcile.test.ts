@@ -74,7 +74,10 @@ describe("Paperless reconciliation", () => {
     );
     expect(prisma.documentFiling.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ status: "ERROR" }),
+        data: expect.objectContaining({
+          status: "ERROR",
+          paperlessUploadStartedAt: null,
+        }),
       }),
     );
   });

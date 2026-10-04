@@ -71,17 +71,20 @@ export async function processPaperlessAttachment({
     if (
       manual &&
       existing &&
-      existing.driveConnection.provider !== "paperless"
+      existing.driveConnection.provider !== "paperless" &&
+      (existing.fileId || ["FILED", "PROCESSING"].includes(existing.status))
     ) {
       return {
         success: false,
-        error: "This attachment was already filed to a cloud drive.",
+        error: "This attachment is saved or being saved to a cloud drive.",
       };
     }
     if (
       manual &&
       existing &&
-      ["PENDING", "PREVIEW", "REJECTED"].includes(existing.status)
+      (["PENDING", "PREVIEW", "REJECTED"].includes(existing.status) ||
+        (existing.status === "ERROR" &&
+          existing.driveConnection.provider !== "paperless"))
     ) {
       const claim = await prisma.documentFiling.updateMany({
         where: {
@@ -90,9 +93,15 @@ export async function processPaperlessAttachment({
           updatedAt: existing.updatedAt,
           paperlessUploadStartedAt: null,
           paperlessTaskId: null,
-          driveConnection: { provider: "paperless" },
+          fileId: null,
+          driveConnection: { provider: existing.driveConnection.provider },
         },
-        data: { status: "PROCESSING", wasAsked: false, errorMessage: null },
+        data: {
+          status: "PROCESSING",
+          driveConnectionId: connection.id,
+          wasAsked: false,
+          errorMessage: null,
+        },
       });
       if (!claim.count) return getExistingFilingResult(existing);
       filingId = existing.id;
