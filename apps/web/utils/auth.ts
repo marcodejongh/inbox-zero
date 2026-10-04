@@ -179,7 +179,8 @@ const appleSocialProvider = appleLoginEnabled
     }
   : null;
 const genericOauthConfig: GenericOAuthConfig[] = [
-  ...(env.AUTHELIA_CLIENT_ID &&
+  ...(enabledLoginProviders.has("authelia") &&
+  env.AUTHELIA_CLIENT_ID &&
   env.AUTHELIA_CLIENT_SECRET &&
   env.AUTHELIA_ISSUER_URL
     ? [
@@ -189,7 +190,7 @@ const genericOauthConfig: GenericOAuthConfig[] = [
           clientSecret: env.AUTHELIA_CLIENT_SECRET,
           discoveryUrl: `${env.AUTHELIA_ISSUER_URL}/.well-known/openid-configuration`,
           scopes: ["openid", "profile", "email"],
-          pkce: false,
+          pkce: true,
         },
       ]
     : []),

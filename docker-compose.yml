@@ -58,7 +58,7 @@ services:
       - all
 
   web:
-    image: ghcr.io/elie222/inbox-zero:latest
+    image: ${INBOX_ZERO_IMAGE:-ghcr.io/marcodejongh/inbox-zero:latest}
     pull_policy: always
     env_file:
       - path: ${INBOX_ZERO_ENV_FILE:-./apps/web/.env}
@@ -83,10 +83,12 @@ services:
       DIRECT_URL: ${DIRECT_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-inboxzero}?schema=public}
       REDIS_HTTP_URL: ${REDIS_HTTP_URL:-${UPSTASH_REDIS_URL:-http://serverless-redis-http:80}}
       INTERNAL_API_URL: ${INTERNAL_API_URL:-http://web:3000}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      QUEUE_BACKEND: bullmq
     restart: always
 
   worker:
-    image: ghcr.io/elie222/inbox-zero:latest
+    image: ${INBOX_ZERO_IMAGE:-ghcr.io/marcodejongh/inbox-zero:latest}
     pull_policy: always
     command: ["/app/docker/scripts/start-worker.sh"]
     env_file:
@@ -102,9 +104,27 @@ services:
       - inbox-zero-network
     environment:
       INTERNAL_API_URL: ${INTERNAL_API_URL:-http://web:3000}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      QUEUE_BACKEND: bullmq
+    restart: always
+
+  fastmail-daemon:
+    image: ${FASTMAIL_DAEMON_IMAGE:-ghcr.io/marcodejongh/inbox-zero-fastmail-daemon:latest}
+    build:
+      context: .
+      dockerfile: apps/fastmail-eventsource-daemon/Dockerfile
+    environment:
+      MAIN_APP_URL: http://web:3000
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      FASTMAIL_WEBHOOK_SECRET: ${FASTMAIL_WEBHOOK_SECRET}
+    depends_on:
+      - web
+    networks:
+      - inbox-zero-network
     restart: always
     profiles:
-      - queue-worker
+      - fastmail
+      - all
 
   cron:
     image: alpine:latest
@@ -158,6 +178,12 @@ services:
             echo \"[cron] Renewing email watches...\"
             curl -s -X GET 'http://web:3000/api/watch/all' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: watch request failed\"
             sleep 21600
+          done
+        ) &
+        (
+          while true; do
+            curl -fsS --max-time 60 'http://web:3000/api/fastmail/poll' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Fastmail recovery request failed\"
+            sleep 300
           done
         ) &
         wait

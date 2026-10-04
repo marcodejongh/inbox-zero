@@ -39,7 +39,6 @@ COPY packages/tsconfig/package.json packages/tsconfig/package.json
 
 # Copy Prisma schema file needed for postinstall script
 COPY apps/web/prisma/schema.prisma apps/web/prisma/schema.prisma
-COPY apps/fastmail-eventsource-daemon/prisma/schema.prisma apps/fastmail-eventsource-daemon/prisma/schema.prisma
 # Copy postinstall script
 COPY clone-marketing.sh clone-marketing.sh
 COPY scripts/pnpm-install-without-desktop.sh scripts/pnpm-install-without-desktop.sh
@@ -56,6 +55,8 @@ COPY . .
 
  # Build app (Next.js standalone)
 ENV NODE_ENV=production
+# Preserve the filtered, hoisted install instead of pnpm reinstalling every workspace before execution.
+ENV pnpm_config_verify_deps_before_run=false
 # Increase V8 heap for the production build.
 ENV NODE_OPTIONS=--max_old_space_size=8192
 # Typechecking is covered by the Build Check workflow. Skipping it here
@@ -85,6 +86,11 @@ ARG NEXT_PUBLIC_EXTERNAL_API_ENABLED="NEXT_PUBLIC_EXTERNAL_API_ENABLED_PLACEHOLD
 ENV NEXT_PUBLIC_EXTERNAL_API_ENABLED=${NEXT_PUBLIC_EXTERNAL_API_ENABLED}
 ARG NEXT_PUBLIC_AI_MODEL_SETTINGS_DISABLED="NEXT_PUBLIC_AI_MODEL_SETTINGS_DISABLED_PLACEHOLDER"
 ENV NEXT_PUBLIC_AI_MODEL_SETTINGS_DISABLED=${NEXT_PUBLIC_AI_MODEL_SETTINGS_DISABLED}
+
+ARG NEXT_PUBLIC_FASTMAIL_ENABLED="NEXT_PUBLIC_FASTMAIL_ENABLED_PLACEHOLDER"
+ENV NEXT_PUBLIC_FASTMAIL_ENABLED=${NEXT_PUBLIC_FASTMAIL_ENABLED}
+ARG NEXT_PUBLIC_AUTHELIA_ENABLED="NEXT_PUBLIC_AUTHELIA_ENABLED_PLACEHOLDER"
+ENV NEXT_PUBLIC_AUTHELIA_ENABLED=${NEXT_PUBLIC_AUTHELIA_ENABLED}
 
 # Provide safe dummy envs so Next build can complete at image build time
 ENV DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy?schema=public"

@@ -6,12 +6,18 @@ import { createMockEmailProvider } from "@/__tests__/mocks/email-provider.mock";
 const logger = createScopedLogger("assess-test");
 
 describe("assessUser", () => {
-  it("rejects unfinished Fastmail assessment instead of returning invalid counts", async () => {
-    const client = createMockEmailProvider({ name: "fastmail" });
-
-    await expect(assessUser({ client, logger })).rejects.toThrow(
-      "Fastmail mailbox assessment is not supported yet.",
-    );
+  it("assesses Fastmail custom folders and leaves unavailable forwarding counts unknown", async () => {
+    const client = createMockEmailProvider({
+      name: "fastmail",
+      getLabels: vi.fn().mockResolvedValue([
+        { id: "a", type: "system" },
+        { id: "b", type: "user" },
+      ]),
+      getSentMessages: vi.fn().mockResolvedValue([]),
+    });
+    const result = await assessUser({ client, logger });
+    expect(result.labelCount).toBe(1);
+    expect(result.forwardingAddressesCount).toBeNull();
   });
 
   it.each([

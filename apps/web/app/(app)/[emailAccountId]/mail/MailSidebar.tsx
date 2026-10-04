@@ -80,7 +80,7 @@ export type MailSidebarProps = {
   onCreateLabel: (name: string) => void;
   onEditMailboxItem: (edit: MailboxItemEdit) => Promise<boolean>;
   onDeleteMailboxItem: (item: MailboxItem) => Promise<boolean>;
-  labelEditMode: "color" | "name-and-color";
+  labelEditMode: "name" | "color" | "name-and-color";
   labelColorOptions: readonly MailboxItemColorOption[];
   /** Gmail lets a label be hidden from the label and message lists. */
   supportsLabelVisibility?: boolean;

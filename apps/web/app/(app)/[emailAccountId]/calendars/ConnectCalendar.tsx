@@ -1,5 +1,7 @@
 "use client";
 
+import useSWR from "swr";
+import { FastmailCalendarForm } from "./FastmailCalendarForm";
 import { useState } from "react";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
@@ -21,6 +23,11 @@ export function ConnectCalendar({
   onboardingReturnPath?: string;
 }) {
   const { emailAccountId } = useAccount();
+  const { data: providers } = useSWR<{
+    google: boolean;
+    microsoft: boolean;
+    fastmail: boolean;
+  }>("/api/user/mail-providers");
   const analytics = useProductAnalytics(analyticsPage);
   const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
   const [isConnectingMicrosoft, setIsConnectingMicrosoft] = useState(false);
@@ -103,37 +110,42 @@ export function ConnectCalendar({
 
   return (
     <div className="flex gap-2 flex-wrap md:flex-nowrap">
-      <Button
-        onClick={handleConnectGoogle}
-        disabled={isConnectingGoogle || isConnectingMicrosoft}
-        variant="outline"
-        className="flex items-center gap-2 w-full md:w-auto"
-      >
-        <Image
-          src="/images/google.svg"
-          alt="Google"
-          width={16}
-          height={16}
-          unoptimized
-        />
-        {isConnectingGoogle ? "Connecting..." : "Add Google Calendar"}
-      </Button>
+      {providers?.fastmail && <FastmailCalendarForm />}
+      {providers?.google && (
+        <Button
+          onClick={handleConnectGoogle}
+          disabled={isConnectingGoogle || isConnectingMicrosoft}
+          variant="outline"
+          className="flex items-center gap-2 w-full md:w-auto"
+        >
+          <Image
+            src="/images/google.svg"
+            alt="Google"
+            width={16}
+            height={16}
+            unoptimized
+          />
+          {isConnectingGoogle ? "Connecting..." : "Add Google Calendar"}
+        </Button>
+      )}
 
-      <Button
-        onClick={handleConnectMicrosoft}
-        disabled={isConnectingGoogle || isConnectingMicrosoft}
-        variant="outline"
-        className="flex items-center gap-2 w-full md:w-auto"
-      >
-        <Image
-          src="/images/microsoft.svg"
-          alt="Microsoft"
-          width={16}
-          height={16}
-          unoptimized
-        />
-        {isConnectingMicrosoft ? "Connecting..." : "Add Outlook Calendar"}
-      </Button>
+      {providers?.microsoft && (
+        <Button
+          onClick={handleConnectMicrosoft}
+          disabled={isConnectingGoogle || isConnectingMicrosoft}
+          variant="outline"
+          className="flex items-center gap-2 w-full md:w-auto"
+        >
+          <Image
+            src="/images/microsoft.svg"
+            alt="Microsoft"
+            width={16}
+            height={16}
+            unoptimized
+          />
+          {isConnectingMicrosoft ? "Connecting..." : "Add Outlook Calendar"}
+        </Button>
+      )}
     </div>
   );
 }

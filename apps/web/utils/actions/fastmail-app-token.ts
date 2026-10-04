@@ -1,5 +1,8 @@
 "use server";
 
+import { env } from "@/env";
+import { FastmailProvider } from "@/utils/email/fastmail";
+
 import { revalidatePath } from "next/cache";
 import { actionClientUser } from "@/utils/actions/safe-action";
 import { linkFastmailAppTokenBody } from "@/utils/actions/fastmail-app-token.validation";
@@ -17,7 +20,12 @@ export const linkFastmailAppTokenAction = actionClientUser
   .metadata({ name: "linkFastmailAppToken" })
   .schema(linkFastmailAppTokenBody)
   .action(
-    async ({ ctx: { userId, logger, session }, parsedInput: { appToken } }) => {
+    async ({
+      ctx: { userId, logger, session },
+      parsedInput: { appToken, reconnectEmailAccountId },
+    }) => {
+      if (!env.NEXT_PUBLIC_FASTMAIL_ENABLED)
+        throw new SafeError("Fastmail is disabled.");
       if (session.session.emailOtp) {
         throw new SafeError(
           "Sign in with your connected provider to connect a mailbox.",
@@ -35,6 +43,20 @@ export const linkFastmailAppTokenAction = actionClientUser
       }
 
       // Step 2: Extract email and account ID from JMAP session
+      const mailAccount = client.session.accounts[client.accountId];
+      if (
+        mailAccount?.isReadOnly ||
+        !mailAccount?.accountCapabilities["urn:ietf:params:jmap:submission"]
+      ) {
+        throw new SafeError(
+          "Allow mail read/write and sending permissions on your Fastmail API token.",
+        );
+      }
+      const baseline = await new FastmailProvider(
+        client,
+        logger,
+      ).getEmailChanges(null);
+      const syncStartedAt = new Date();
       const email = client.session.username;
       const providerAccountId = client.accountId;
 
@@ -64,6 +86,20 @@ export const linkFastmailAppTokenAction = actionClientUser
         },
       });
 
+      if (reconnectEmailAccountId) {
+        const reconnect = await prisma.emailAccount.findFirst({
+          where: {
+            id: reconnectEmailAccountId,
+            userId,
+            account: { provider: "fastmail", providerAccountId },
+          },
+          select: { id: true },
+        });
+        if (!reconnect)
+          throw new SafeError(
+            "Use an API token for the Fastmail account you are reconnecting.",
+          );
+      }
       // Step 4: Handle account linking logic
       const linkingResult = await handleAccountLinking({
         existingAccountId: existingAccount?.id || null,
@@ -108,6 +144,8 @@ export const linkFastmailAppTokenAction = actionClientUser
               emailAccount: {
                 create: {
                   email: email.toLowerCase(),
+                  lastSyncedHistoryId: baseline.newState,
+                  fastmailSyncStartedAt: syncStartedAt,
                   userId,
                   name: null,
                   image: null,

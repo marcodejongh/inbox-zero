@@ -20,6 +20,7 @@ import {
 } from "@/utils/actions/fastmail-app-token.validation";
 
 interface FastmailAppTokenModalProps {
+  emailAccountId?: string;
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }
@@ -27,6 +28,7 @@ interface FastmailAppTokenModalProps {
 export function FastmailAppTokenModal({
   open,
   onOpenChange,
+  emailAccountId,
 }: FastmailAppTokenModalProps) {
   const { execute, isExecuting } = useAction(linkFastmailAppTokenAction, {
     onSuccess: () => {
@@ -49,17 +51,17 @@ export function FastmailAppTokenModal({
     formState: { errors },
   } = useForm<LinkFastmailAppTokenBody>({
     resolver: zodResolver(linkFastmailAppTokenBody),
-    defaultValues: { appToken: "" },
+    defaultValues: { appToken: "", reconnectEmailAccountId: emailAccountId },
   });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Connect Fastmail with App Token</DialogTitle>
+          <DialogTitle>Connect Fastmail with API Token</DialogTitle>
           <DialogDescription>
-            Enter your Fastmail app token to connect your account. You can
-            generate an app token in your Fastmail settings under{" "}
+            Enter your Fastmail API token to connect your account. You can
+            generate an API token in your Fastmail settings under{" "}
             <span className="font-medium">
               Settings &gt; Privacy & Security &gt; Integrations &gt; API tokens
             </span>
@@ -71,7 +73,7 @@ export function FastmailAppTokenModal({
           <Input
             type="password"
             name="appToken"
-            label="App Token"
+            label="API Token"
             placeholder="fmu1-xxxxxxxx-xxxxxxxxxxxxxxxxxxxx"
             registerProps={register("appToken")}
             error={errors.appToken}

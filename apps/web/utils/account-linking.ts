@@ -1,6 +1,5 @@
 import type { GetAuthLinkUrlResponse } from "@/app/api/google/linking/auth-url/route";
 import type { GetOutlookAuthLinkUrlResponse } from "@/app/api/outlook/linking/auth-url/route";
-import type { GetAuthLinkUrlResponse as GetFastmailAuthLinkUrlResponse } from "@/app/api/fastmail/linking/auth-url/route";
 
 type Provider = "google" | "microsoft" | "fastmail";
 const PROVIDER_DISPLAY_NAMES: Record<Provider, string> = {
@@ -24,6 +23,7 @@ export async function getAccountLinkingUrl(
   provider: Provider,
   options?: { reconnectEmailAccountId?: string },
 ): Promise<string> {
+  if (provider === "fastmail") return "/accounts";
   const apiProvider = provider === "microsoft" ? "outlook" : provider;
   const query = options?.reconnectEmailAccountId
     ? `?emailAccountId=${encodeURIComponent(options.reconnectEmailAccountId)}`
@@ -54,10 +54,8 @@ export async function getAccountLinkingUrl(
     );
   }
 
-  const data:
-    | GetAuthLinkUrlResponse
-    | GetOutlookAuthLinkUrlResponse
-    | GetFastmailAuthLinkUrlResponse = await response.json();
+  const data: GetAuthLinkUrlResponse | GetOutlookAuthLinkUrlResponse =
+    await response.json();
 
   return data.url;
 }

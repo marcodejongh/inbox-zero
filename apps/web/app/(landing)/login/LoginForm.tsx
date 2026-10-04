@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
 import { useState } from "react";
-import { env } from "@/env";
 import { Button } from "@/components/Button";
 import { Button as UIButton } from "@/components/ui/button";
 import { signIn, signInWithSocialRedirect } from "@/utils/auth-client";
@@ -111,7 +110,7 @@ export function LoginForm({
 
   return (
     <div className="flex flex-col justify-center gap-2 px-4">
-      {env.NEXT_PUBLIC_AUTHELIA_ENABLED && (
+      {enabledProviders.includes("authelia") && (
         <Button
           size="2xl"
           loading={loadingAuthelia}

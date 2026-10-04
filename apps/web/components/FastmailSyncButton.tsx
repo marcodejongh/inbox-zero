@@ -25,13 +25,10 @@ export function FastmailSyncButton() {
           description: result.serverError,
         });
       } else if (result?.data) {
-        if (result.data.status === "no_changes") {
-          toastSuccess({ description: "No new emails" });
-        } else {
-          toastSuccess({
-            description: `Synced ${result.data.processedCount} new emails`,
-          });
-        }
+        toastSuccess({
+          description:
+            "Mail sync queued. Pending messages will be retried automatically.",
+        });
       }
     } catch (error) {
       toastError({

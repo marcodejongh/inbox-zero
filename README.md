@@ -1,3 +1,5 @@
+For this fork’s Fastmail and Authelia deployment, see [Fastmail self-hosting](docs/FASTMAIL_SELF_HOSTING.md).
+
 [![](apps/web/app/opengraph-image.jpg)](https://www.getinboxzero.com)
 
 <p align="center">

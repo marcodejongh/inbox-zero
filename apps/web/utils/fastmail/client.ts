@@ -1,7 +1,4 @@
-import { saveTokens } from "@/utils/auth/save-tokens";
-import { env } from "@/env";
 import { createScopedLogger } from "@/utils/logger";
-import { SCOPES } from "@/utils/fastmail/scopes";
 import { SafeError } from "@/utils/error";
 
 const logger = createScopedLogger("fastmail/client");
@@ -32,7 +29,10 @@ async function fetchWithRetry(
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const response = await fetch(url, options);
+      const response = await fetch(url, {
+        ...options,
+        signal: options.signal ?? AbortSignal.timeout(30_000),
+      });
 
       // If success or non-transient error, return immediately
       if (response.ok || !isTransientError(response.status)) {
@@ -64,7 +64,9 @@ async function fetchWithRetry(
           maxRetries: retries,
           delayMs: delay,
         });
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(delay, 30_000)),
+        );
       }
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -77,7 +79,9 @@ async function fetchWithRetry(
           maxRetries: retries,
           delayMs: delay,
         });
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(delay, 30_000)),
+        );
       }
     }
   }
@@ -97,18 +101,6 @@ async function fetchWithRetry(
 /** JMAP session endpoint for initializing API access */
 export const FASTMAIL_JMAP_SESSION_URL =
   "https://api.fastmail.com/jmap/session";
-
-/** OAuth authorization endpoint for user consent */
-export const FASTMAIL_OAUTH_AUTHORIZE_URL =
-  "https://www.fastmail.com/dev/oidc/authorize";
-
-/** OAuth token exchange endpoint */
-export const FASTMAIL_OAUTH_TOKEN_URL =
-  "https://www.fastmail.com/dev/oidc/token";
-
-/** OpenID Connect userinfo endpoint */
-export const FASTMAIL_OAUTH_USERINFO_URL =
-  "https://www.fastmail.com/dev/oidc/userinfo";
 
 /**
  * JMAP Session response containing API URLs and account information
@@ -196,9 +188,26 @@ export function checkJMAPErrors(response: JMAPResponse): void {
   for (const methodResponse of response.methodResponses) {
     if (isJMAPError(methodResponse)) {
       const error = getJMAPError(methodResponse);
-      throw new SafeError(
-        `JMAP error: ${error?.type || "unknown"} - ${error?.description || "No description"}`,
+      throw Object.assign(
+        new SafeError(
+          `JMAP error: ${error?.type || "unknown"} - ${error?.description || "No description"}`,
+        ),
+        { jmapMethod: "error", jmapCallId: methodResponse[2] },
       );
+    }
+    for (const key of ["notCreated", "notUpdated", "notDestroyed"]) {
+      const failures = methodResponse[1][key] as
+        | Record<string, JMAPError>
+        | undefined;
+      const failure = failures && Object.values(failures)[0];
+      if (failure) {
+        throw Object.assign(
+          new SafeError(
+            `JMAP error: ${failure.type} - ${failure.description || "Operation rejected"}`,
+          ),
+          { jmapMethod: methodResponse[0] },
+        );
+      }
     }
   }
 }
@@ -219,21 +228,6 @@ export interface FastmailClient {
   session: JMAPSession;
 }
 
-/**
- * Returns OAuth2 configuration for Fastmail account linking
- * @returns OAuth2 config with client credentials and redirect URI
- */
-export function getLinkingOAuth2Config() {
-  return {
-    clientId: env.FASTMAIL_CLIENT_ID || "",
-    clientSecret: env.FASTMAIL_CLIENT_SECRET || "",
-    redirectUri: `${env.NEXT_PUBLIC_BASE_URL}/api/fastmail/linking/callback`,
-    authorizeUrl: FASTMAIL_OAUTH_AUTHORIZE_URL,
-    tokenUrl: FASTMAIL_OAUTH_TOKEN_URL,
-    scopes: SCOPES,
-  };
-}
-
 async function getJMAPSession(accessToken: string): Promise<JMAPSession> {
   const response = await fetchWithRetry(FASTMAIL_JMAP_SESSION_URL, {
     headers: {
@@ -247,7 +241,13 @@ async function getJMAPSession(accessToken: string): Promise<JMAPSession> {
       status: response.status,
       error: errorText,
     });
-    throw new SafeError(`Failed to get JMAP session: ${response.status}`);
+    throw Object.assign(
+      new SafeError(`Failed to get JMAP session: ${response.status}`),
+      {
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+      },
+    );
   }
 
   return response.json();
@@ -262,19 +262,37 @@ async function makeJMAPRequest(
     using: [
       "urn:ietf:params:jmap:core",
       "urn:ietf:params:jmap:mail",
-      "urn:ietf:params:jmap:submission",
+      ...(methodCalls.some(
+        ([name]) =>
+          name.startsWith("EmailSubmission/") || name.startsWith("Identity/"),
+      )
+        ? ["urn:ietf:params:jmap:submission"]
+        : []),
+      ...(methodCalls.some(([name]) => name.startsWith("ContactCard/"))
+        ? ["urn:ietf:params:jmap:contacts"]
+        : []),
     ],
     methodCalls,
   };
 
-  const response = await fetchWithRetry(apiUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
+  // A lost response to a mutation may already have committed (or sent mail).
+  const retries = methodCalls.every(([name]) =>
+    /\/(get|query|changes|queryChanges)$/.test(name),
+  )
+    ? MAX_RETRIES
+    : 0;
+  const response = await fetchWithRetry(
+    apiUrl,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
     },
-    body: JSON.stringify(request),
-  });
+    retries,
+  );
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -282,7 +300,13 @@ async function makeJMAPRequest(
       status: response.status,
       error: errorText,
     });
-    throw new SafeError(`JMAP request failed: ${response.status}`);
+    throw Object.assign(
+      new SafeError(`JMAP request failed: ${response.status}`),
+      {
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+      },
+    );
   }
 
   const jmapResponse: JMAPResponse = await response.json();
@@ -332,127 +356,27 @@ export async function createFastmailClient(
   };
 }
 
-/**
- * Gets a Fastmail client, automatically refreshing the access token if expired
- * @param options - Token and account information
- * @param options.accessToken - Current access token (may be expired for OAuth, never expires for app tokens)
- * @param options.refreshToken - OAuth refresh token for getting new access token (null for app token accounts)
- * @param options.expiresAt - Expiration timestamp of current access token (null for app tokens)
- * @param options.emailAccountId - Email account ID for saving refreshed tokens
- * @returns Initialized FastmailClient with valid access token
- * @throws SafeError if no access token or refresh fails
- */
 export async function getFastmailClientWithRefresh({
   accessToken,
   refreshToken,
-  expiresAt,
-  emailAccountId,
 }: {
   accessToken?: string | null;
   refreshToken: string | null;
   expiresAt: number | null;
   emailAccountId: string;
 }): Promise<FastmailClient> {
-  // App token accounts: no refresh token but access token exists
-  // App tokens don't expire, so we can use them directly
-  if (!refreshToken && accessToken) {
-    return createFastmailClient(accessToken);
-  }
-
-  if (!refreshToken) {
-    logger.error("No refresh token and no access token", { emailAccountId });
-    throw new SafeError("No refresh token");
-  }
-
-  // Check if token is still valid
-  // expiresAt can be stored as either:
-  // - Unix timestamp in seconds (legacy from auth.ts)
-  // - Date timestamp in milliseconds (from callback route)
-  // Handle both by checking if value is reasonable (< year 3000 in seconds = ~32503680000)
-  const expiresAtMs =
-    expiresAt && expiresAt < 32_503_680_000
-      ? expiresAt * 1000 // Unix timestamp in seconds
-      : expiresAt; // Already milliseconds or Date timestamp
-
-  if (accessToken && expiresAtMs && expiresAtMs > Date.now()) {
-    return createFastmailClient(accessToken);
-  }
-
-  // Refresh the token
-  const config = getLinkingOAuth2Config();
-  const response = await fetch(FASTMAIL_OAUTH_TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    logger.error("Failed to refresh Fastmail token", {
-      status: response.status,
-      error: errorText,
-      emailAccountId,
-    });
-    throw new SafeError("Failed to refresh Fastmail token");
-  }
-
-  const tokens = await response.json();
-  const newAccessToken = tokens.access_token;
-  const newRefreshToken = tokens.refresh_token;
-
-  // Always save tokens after successful refresh to handle:
-  // 1. New access token
-  // 2. Rotated refresh token (some OAuth servers rotate refresh tokens)
-  // 3. Updated expiration time
-  await saveTokens({
-    tokens: {
-      access_token: newAccessToken,
-      refresh_token: newRefreshToken || refreshToken, // Keep old if not rotated
-      // saveTokens expects expires_at as Unix timestamp in seconds
-      expires_at: tokens.expires_in
-        ? Math.floor(Date.now() / 1000) + tokens.expires_in
-        : undefined,
-    },
-    accountRefreshToken: refreshToken,
-    emailAccountId,
-    provider: "fastmail",
-  });
-
-  return createFastmailClient(newAccessToken);
+  if (refreshToken || !accessToken)
+    throw new SafeError("Reconnect Fastmail using a mail API token.");
+  return createFastmailClient(accessToken);
 }
 
-/**
- * Fetches user information from Fastmail's OpenID Connect userinfo endpoint
- * @param accessToken - Valid OAuth access token with openid scope
- * @returns User info including sub (subject ID), email, and optional name
- * @throws SafeError if the request fails
- */
-export async function getUserInfo(
-  accessToken: string,
-): Promise<{ sub: string; email: string; name?: string }> {
-  const response = await fetch(FASTMAIL_OAUTH_USERINFO_URL, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    logger.error("Failed to get user info", {
-      status: response.status,
-      error: errorText,
-    });
-    throw new SafeError(`Failed to get user info: ${response.status}`);
-  }
-
-  return response.json();
+export async function getUserInfo(accessToken: string) {
+  const client = await createFastmailClient(accessToken);
+  return {
+    sub: client.accountId,
+    email: client.session.username,
+    name: client.session.accounts[client.accountId]?.name,
+  };
 }
 
 /**

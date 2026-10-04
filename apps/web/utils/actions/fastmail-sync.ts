@@ -1,13 +1,13 @@
 "use server";
 
 import { actionClient } from "@/utils/actions/safe-action";
-import { pollFastmailAccount } from "@/utils/fastmail/poll-sync";
+import { enqueueFastmailSync } from "@/utils/fastmail/queue";
 import { isFastmailProvider } from "@/utils/email/provider-types";
 import prisma from "@/utils/prisma";
 
 export const syncFastmailAction = actionClient
   .metadata({ name: "syncFastmail" })
-  .action(async ({ ctx: { emailAccountId, logger } }) => {
+  .action(async ({ ctx: { emailAccountId } }) => {
     const account = await prisma.emailAccount.findUnique({
       where: { id: emailAccountId },
       select: {
@@ -27,23 +27,6 @@ export const syncFastmailAction = actionClient
       );
     }
 
-    const result = await pollFastmailAccount({
-      emailAccountId,
-      logger: logger.with({ emailAccountId, email: account.email }),
-      forceSync: true, // User-triggered sync should bypass rate limiting
-    });
-
-    if (result.status === "error") {
-      throw new Error(result.error || "Unknown error during sync");
-    }
-
-    return {
-      success: true,
-      status: result.status,
-      processedCount: result.processedCount || 0,
-      message:
-        result.status === "no_changes"
-          ? "No new emails found"
-          : `Processed ${result.processedCount} new emails`,
-    };
+    await enqueueFastmailSync(emailAccountId);
+    return { success: true, status: "queued" };
   });

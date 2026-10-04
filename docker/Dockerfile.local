@@ -49,7 +49,6 @@ COPY packages/tsconfig/package.json packages/tsconfig/package.json
 
 # Copy Prisma schema file needed for postinstall script
 COPY apps/web/prisma/schema.prisma apps/web/prisma/schema.prisma
-COPY apps/fastmail-eventsource-daemon/prisma/schema.prisma apps/fastmail-eventsource-daemon/prisma/schema.prisma
 # Copy postinstall script
 COPY clone-marketing.sh clone-marketing.sh
 COPY scripts/pnpm-install-without-desktop.sh scripts/pnpm-install-without-desktop.sh

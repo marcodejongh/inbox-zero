@@ -1,5 +1,4 @@
 import uniq from "lodash/uniq";
-import { SafeError } from "@/utils/error";
 import countBy from "lodash/countBy";
 import type { EmailProvider } from "@/utils/email/types";
 import { getEmailClient } from "@/utils/mail";
@@ -66,10 +65,9 @@ async function getLabelThreadCount(client: EmailProvider, labelId: string) {
 }
 
 async function getLabelCount(client: EmailProvider) {
-  if (client.name === "fastmail") {
-    throw new SafeError("Fastmail mailbox assessment is not supported yet.");
-  }
   const labels = await client.getLabels();
+  if (client.name === "fastmail")
+    return labels.filter((label) => label.type === "user").length;
   return labels.length - DEFAULT_LABEL_COUNT[client.name];
 }
 
@@ -87,6 +85,7 @@ async function getForwardingAddressesCount(
   client: EmailProvider,
   logger: Logger,
 ) {
+  if (client.name === "fastmail") return null;
   try {
     const forwardingAddresses = await client.getForwardingAddresses();
     return forwardingAddresses.length;

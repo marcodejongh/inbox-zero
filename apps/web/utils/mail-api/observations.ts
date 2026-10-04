@@ -4,7 +4,6 @@ import {
   type MessageMetadata,
 } from "@inboxzero/mail-core/messages";
 import type { Provider } from "@inboxzero/mail-core/identities";
-import { SafeError } from "@/utils/error";
 import {
   type BodyObservation,
   MAX_BODY_ATTACHMENTS,
@@ -64,12 +63,9 @@ export function parsedMessageMetadata(message: ParsedMessage): MessageMetadata {
 
 export function parsedMessagePatch(
   accountId: string,
-  provider: Provider | "fastmail",
+  provider: Provider,
   message: ParsedMessage,
 ): ProviderChange {
-  if (provider === "fastmail") {
-    throw new SafeError("Fastmail mail sync is not supported yet.");
-  }
   return {
     kind: "message_patch",
     key: { accountId, messageId: message.id },
