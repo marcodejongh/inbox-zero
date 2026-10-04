@@ -3,6 +3,7 @@ import { pollAllFastmailAccounts, pollFastmailAccount } from "./poll-sync";
 import prisma from "@/utils/__mocks__/prisma";
 import { createScopedLogger } from "@/utils/logger";
 import { getMockMessage, getEmailAccount } from "@/__tests__/helpers";
+import { InvalidMailboxSyncCursorError } from "@/utils/email/mailbox-sync";
 
 const mocks = vi.hoisted(() => ({
   provider: {
@@ -182,7 +183,7 @@ describe("durable Fastmail synchronization", () => {
         hasMoreChanges: false,
       });
     mocks.provider.getMessagesWithPagination
-      .mockRejectedValueOnce(new Error("JMAP error: anchorNotFound"))
+      .mockRejectedValueOnce(new InvalidMailboxSyncCursorError())
       .mockResolvedValue({ messages: [] });
     expect((await pollFastmailAccount({ emailAccountId, logger })).status).toBe(
       "no_changes",

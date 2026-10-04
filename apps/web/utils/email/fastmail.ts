@@ -13,6 +13,7 @@ import { z } from "zod";
 import { normalizeContactCandidates } from "@/utils/email/contact";
 import { toLocalMailMessage } from "@/utils/email/local-mail-sync";
 import { SafeError } from "@/utils/error";
+import { InvalidMailboxSyncCursorError } from "@/utils/email/mailbox-sync";
 import type { SendEmailBody } from "@/utils/types/mail";
 import type { ParsedMessage } from "@/utils/types";
 import type {
@@ -518,31 +519,37 @@ export class FastmailProvider implements EmailProvider {
       1,
       Math.min(options.maxResults ?? 50, this.batchLimit("maxObjectsInGet")),
     );
-    const response = await this.client.request([
-      [
-        "Email/query",
-        {
-          accountId: this.client.accountId,
-          filter,
-          ...(anchor ? { anchor, anchorOffset: 1 } : { position }),
-          limit,
-          collapseThreads,
-          sort: [{ property: "receivedAt", isAscending: false }],
-          calculateTotal: true,
-        },
-        "0",
-      ],
-      [
-        "Email/get",
-        {
-          accountId: this.client.accountId,
-          "#ids": { resultOf: "0", name: "Email/query", path: "/ids" },
-          properties: [...EMAIL_PROPERTIES],
-          fetchAllBodyValues: true,
-        },
-        "1",
-      ],
-    ]);
+    const response = await this.client
+      .request([
+        [
+          "Email/query",
+          {
+            accountId: this.client.accountId,
+            filter,
+            ...(anchor ? { anchor, anchorOffset: 1 } : { position }),
+            limit,
+            collapseThreads,
+            sort: [{ property: "receivedAt", isAscending: false }],
+            calculateTotal: true,
+          },
+          "0",
+        ],
+        [
+          "Email/get",
+          {
+            accountId: this.client.accountId,
+            "#ids": { resultOf: "0", name: "Email/query", path: "/ids" },
+            properties: [...EMAIL_PROPERTIES],
+            fetchAllBodyValues: true,
+          },
+          "1",
+        ],
+      ])
+      .catch((error: unknown) => {
+        if (anchor && isJMAPErrorType(error, "anchorNotFound"))
+          throw new InvalidMailboxSyncCursorError();
+        throw error;
+      });
     const query = getResponseData<JMAPQueryResponse>(
       response.methodResponses[0],
     );
@@ -1860,20 +1867,23 @@ export class FastmailProvider implements EmailProvider {
   async sendEmailWithHtml(
     body: SendEmailBody,
   ): Promise<{ messageId: string; threadId: string }> {
-    if (body.providerDraftId) {
-      await this.updateDraft(body.providerDraftId, body);
-      return this.sendDraft(body.providerDraftId);
-    }
     const forwarded = body.replyToEmail?.forwardedMessageId
       ? await this.getMessage(body.replyToEmail.forwardedMessageId)
       : undefined;
-    const draft = await this.createJmapDraft({
+    const sendBody = {
       ...body,
-      attachments:
-        forwarded && !body.attachments
-          ? await this.downloadAttachments(forwarded)
-          : body.attachments,
-    });
+      attachments: forwarded
+        ? [
+            ...(await this.downloadAttachments(forwarded)),
+            ...(body.attachments ?? []),
+          ]
+        : body.attachments,
+    };
+    if (body.providerDraftId) {
+      await this.updateDraft(body.providerDraftId, sendBody);
+      return this.sendDraft(body.providerDraftId);
+    }
+    const draft = await this.createJmapDraft(sendBody);
     await this.submitMessage(draft.id, body.from);
     const threadId =
       draft.threadId ?? (await this.getMessage(draft.id)).threadId;

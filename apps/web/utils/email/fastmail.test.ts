@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FastmailProvider } from "@/utils/email/fastmail";
 import type { FastmailClient, JMAPMethodCall } from "@/utils/fastmail/client";
 import { createScopedLogger } from "@/utils/logger";
 import { SafeError } from "@/utils/error";
 import prisma from "@/utils/__mocks__/prisma";
+import { createEmailProviderMailboxSource } from "@/utils/mail-api/source";
 
 vi.mock("@/utils/prisma");
 vi.mock("@/utils/fastmail/client", () => ({
@@ -11,8 +12,132 @@ vi.mock("@/utils/fastmail/client", () => ({
 }));
 
 beforeEach(() => vi.clearAllMocks());
+afterEach(() => vi.unstubAllGlobals());
 
 describe("Fastmail mail operations", () => {
+  it.each([
+    { savedDraft: false, attachmentMode: "absent" },
+    { savedDraft: false, attachmentMode: "empty" },
+    { savedDraft: false, attachmentMode: "added" },
+    { savedDraft: true, attachmentMode: "absent" },
+    { savedDraft: true, attachmentMode: "empty" },
+    { savedDraft: true, attachmentMode: "added" },
+  ])("preserves forwarded files and inline images ($savedDraft, $attachmentMode)", async ({
+    savedDraft,
+    attachmentMode,
+  }) => {
+    const { provider, calls } = createProvider({
+      forwardedAttachments: true,
+      draft: savedDraft,
+      emailAccountId: "owner",
+    });
+    const uploaded: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          const bytes = init.body as Uint8Array;
+          uploaded.push(Buffer.from(bytes).toString());
+          return Response.json({
+            blobId: `uploaded-${uploaded.length}`,
+            size: bytes.length,
+          });
+        }
+        return new Response(
+          url.includes("original-file") ? "original report" : "inline image",
+        );
+      }),
+    );
+    prisma.fastmailDraft.upsert.mockResolvedValue({
+      id: "stable",
+      emailAccountId: "owner",
+      messageId: "draft",
+      version: 1,
+    } as never);
+    prisma.fastmailDraft.updateMany.mockResolvedValue({ count: 1 });
+    prisma.fastmailDraft.findUnique.mockResolvedValue({
+      messageId: "created",
+    } as never);
+    const addedAttachments =
+      attachmentMode === "added"
+        ? [
+            {
+              filename: "extra.txt",
+              contentType: "text/plain",
+              content: Buffer.from("new file").toString("base64"),
+            },
+          ]
+        : [];
+    await provider.sendEmailWithHtml({
+      to: "recipient@example.com",
+      subject: "Fwd: Report",
+      messageHtml: '<p>Forwarded report</p><img src="cid:chart">',
+      replyToEmail: { threadId: "thread", forwardedMessageId: "original" },
+      providerDraftId: savedDraft ? "stable" : undefined,
+      attachments: attachmentMode === "absent" ? undefined : addedAttachments,
+    });
+    const created = calls.find(
+      ([name, args]) => name === "Email/set" && args.create,
+    )?.[1].create as Record<string, { attachments: unknown[] }>;
+    expect(created.email.attachments).toEqual([
+      expect.objectContaining({
+        name: "report.pdf",
+        type: "application/pdf",
+        disposition: "attachment",
+      }),
+      expect.objectContaining({
+        name: "chart.png",
+        type: "image/png",
+        disposition: "inline",
+        cid: "chart",
+      }),
+      ...(attachmentMode === "added"
+        ? [expect.objectContaining({ name: "extra.txt" })]
+        : []),
+    ]);
+    expect(uploaded).toEqual([
+      "original report",
+      "inline image",
+      ...(attachmentMode === "added" ? ["new file"] : []),
+    ]);
+    expect(
+      calls.filter(([name]) => name === "EmailSubmission/set"),
+    ).toHaveLength(1);
+  });
+
+  it("resets browser enumeration when its Fastmail anchor was deleted", async () => {
+    const { provider, request } = createProvider();
+    const source = createEmailProviderMailboxSource({
+      provider,
+      accountId: "owner",
+    });
+    const input = {
+      session: { accountId: "owner", generation: "g1" },
+      requestId: "bootstrap",
+      signal: new AbortController().signal,
+      bootstrapId: "mailbox",
+      page: "{}",
+      pageSize: 1,
+    };
+    const first = await source.enumerate(input);
+    if (first.status !== "ok" || !first.value.nextPage)
+      throw new Error("Missing first page");
+    request.mockRejectedValueOnce(
+      new SafeError("JMAP error: anchorNotFound - Message deleted"),
+    );
+    await expect(
+      source.enumerate({ ...input, page: first.value.nextPage }),
+    ).resolves.toEqual({ status: "reset_required", scopeId: "primary" });
+    await expect(source.enumerate(input)).resolves.toMatchObject({
+      status: "ok",
+      value: { changes: [{ key: { messageId: "message" } }] },
+    });
+    request.mockRejectedValueOnce(new Error("JMAP request failed: 503"));
+    await expect(
+      source.enumerate({ ...input, page: first.value.nextPage }),
+    ).resolves.toMatchObject({ status: "paused" });
+  });
+
   it("only reports a send after submission succeeds", async () => {
     const { provider, calls } = createProvider();
     await expect(
@@ -242,6 +367,7 @@ function createProvider(
     submissionError?: Error;
     draft?: boolean;
     emailAccountId?: string;
+    forwardedAttachments?: boolean;
   } = {},
 ) {
   const calls: JMAPMethodCall[] = [];
@@ -286,6 +412,24 @@ function createProvider(
                   from: [{ email: "owner@example.com" }],
                   to: [{ email: "to@example.com" }],
                   subject: "Hello",
+                  attachments:
+                    options.forwardedAttachments && messageId === "original"
+                      ? [
+                          {
+                            blobId: "original-file",
+                            name: "report.pdf",
+                            type: "application/pdf",
+                            size: 15,
+                          },
+                          {
+                            blobId: "original-inline",
+                            name: "chart.png",
+                            type: "image/png",
+                            size: 12,
+                            cid: "chart",
+                          },
+                        ]
+                      : [],
                 }),
               ),
             };
@@ -328,6 +472,9 @@ function createProvider(
     accountId: "account",
     request,
     session: {
+      uploadUrl: "https://api.fastmail.com/upload/{accountId}",
+      downloadUrl:
+        "https://api.fastmail.com/download/{accountId}/{blobId}/{name}?type={type}",
       capabilities: { "urn:ietf:params:jmap:core": { maxObjectsInSet: 2 } },
     },
   } as unknown as FastmailClient;
