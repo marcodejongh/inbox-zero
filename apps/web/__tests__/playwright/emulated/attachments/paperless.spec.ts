@@ -147,6 +147,14 @@ async function connectPaperless(page: Page) {
   await expect(page.getByLabel("Filing destination")).toHaveText(
     "Cloud drives",
   );
+  await expect(page.getByText("Google Drive", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Add folder" }).click();
+  const folderDialog = page.getByRole("dialog", { name: "Create folder" });
+  const folderName = `Cloud folder with Paperless connected ${Date.now()}`;
+  await folderDialog.getByLabel("Folder name").fill(folderName);
+  await folderDialog.getByRole("button", { name: "Create folder" }).click();
+  await expect(folderDialog).toBeHidden({ timeout: 60_000 });
+  await expect(page.getByText(folderName, { exact: true })).toBeVisible();
   await page.getByLabel("Filing destination").click();
   await page.getByRole("option", { name: "Paperless", exact: true }).click();
   await expect(

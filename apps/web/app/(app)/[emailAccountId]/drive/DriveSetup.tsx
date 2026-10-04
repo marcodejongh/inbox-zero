@@ -88,7 +88,13 @@ export function DriveSetup() {
   } = useDriveFolders(emailAccountId);
   const { data: emailAccount, mutate: mutateEmail } = useEmailAccountFull();
 
-  const connections = connectionsData?.connections || [];
+  const connections =
+    connectionsData?.connections.filter(
+      (connection) =>
+        connection.isConnected &&
+        (connection.provider === "google" ||
+          connection.provider === "microsoft"),
+    ) || [];
   const connection = connections[0];
   const providerInfo = connection ? getProviderInfo(connection.provider) : null;
 

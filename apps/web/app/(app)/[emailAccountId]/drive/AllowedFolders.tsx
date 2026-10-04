@@ -67,7 +67,11 @@ import { useFolderSelection } from "./use-folder-selection";
 export function AllowedFolders({ emailAccountId }: { emailAccountId: string }) {
   const { data, isLoading, error, mutate } = useDriveFolders(emailAccountId);
   const { data: connectionsData } = useDriveConnections();
-  const driveConnectionId = connectionsData?.connections[0]?.id;
+  const driveConnectionId = connectionsData?.connections.find(
+    (connection) =>
+      connection.isConnected &&
+      (connection.provider === "google" || connection.provider === "microsoft"),
+  )?.id;
 
   return (
     <LoadingContent loading={isLoading} error={error}>
