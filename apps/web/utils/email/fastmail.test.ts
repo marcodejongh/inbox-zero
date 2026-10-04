@@ -16,6 +16,45 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Fastmail mail operations", () => {
   it.each([
+    "searchMessages",
+    "getMessagesWithPagination",
+  ] as const)("%s translates search filters instead of searching for literal Gmail operators", async (method) => {
+    const { provider, calls } = createProvider();
+    const result = await provider[method]({
+      query: "is:unread in:inbox newer_than:2d",
+      maxResults: 20,
+    });
+    expect(result.messages).toHaveLength(1);
+    const query = calls.find(([name]) => name === "Email/query");
+    expect(query?.[1].filter).toMatchObject({
+      operator: "AND",
+      conditions: expect.arrayContaining([
+        {
+          operator: "AND",
+          conditions: [
+            { notKeyword: "$seen" },
+            { inMailbox: "inbox" },
+            { after: expect.any(String) },
+          ],
+        },
+      ]),
+    });
+  });
+
+  it("fetches inbox messages without requesting a forbidden parsed unsubscribe header", async () => {
+    const { provider, calls } = createProvider();
+
+    const messages = await provider.getInboxMessages(20);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].headers["list-unsubscribe"]).toBe(
+      "<https://example.com/unsubscribe>, <mailto:unsubscribe@example.com>",
+    );
+    const emailGet = calls.find(([name]) => name === "Email/get");
+    expect(emailGet?.[1].properties).toContain("header:List-Unsubscribe");
+  });
+
+  it.each([
     { savedDraft: false, attachmentMode: "absent" },
     { savedDraft: false, attachmentMode: "empty" },
     { savedDraft: false, attachmentMode: "added" },
@@ -400,6 +439,15 @@ function createProvider(
             result = { ids: ["message"], position: 0, total: 2 };
             break;
           case "Email/get":
+            if (
+              (args.properties as string[] | undefined)?.includes(
+                "header:List-Unsubscribe:asText",
+              )
+            ) {
+              throw new SafeError(
+                "JMAP error: invalidArguments - List-Unsubscribe cannot use asText",
+              );
+            }
             result = {
               state: "s1",
               list: ((args.ids as string[] | undefined) ?? ["message"]).map(
@@ -412,6 +460,8 @@ function createProvider(
                   from: [{ email: "owner@example.com" }],
                   to: [{ email: "to@example.com" }],
                   subject: "Hello",
+                  "header:List-Unsubscribe":
+                    "<https://example.com/unsubscribe>, <mailto:unsubscribe@example.com>",
                   attachments:
                     options.forwardedAttachments && messageId === "original"
                       ? [

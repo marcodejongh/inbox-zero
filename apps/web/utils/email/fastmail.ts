@@ -21,6 +21,7 @@ import type {
   JMAPMethodResponse,
 } from "@/utils/fastmail/client";
 import { getAccessTokenFromClient } from "@/utils/fastmail/client";
+import { parseFastmailSearchQuery } from "@/utils/fastmail/search-query";
 import { FastmailMailbox } from "@/utils/fastmail/constants";
 import type { InboxZeroLabel } from "@/utils/label";
 import type { ThreadsQuery } from "@/utils/threads/validation";
@@ -89,7 +90,7 @@ const EMAIL_PROPERTIES = [
   "textBody",
   "htmlBody",
   "attachments",
-  "header:List-Unsubscribe:asText",
+  "header:List-Unsubscribe",
   "header:List-Unsubscribe-Post:asText",
 ] as const;
 
@@ -103,8 +104,8 @@ interface JMAPEmail {
   cc?: JMAPEmailAddress[];
   from?: JMAPEmailAddress[];
   hasAttachment: boolean;
+  "header:List-Unsubscribe"?: string;
   "header:List-Unsubscribe-Post:asText"?: string;
-  "header:List-Unsubscribe:asText"?: string;
   htmlBody?: JMAPBodyPart[];
   id: string;
   inReplyTo?: string[];
@@ -575,11 +576,19 @@ export class FastmailProvider implements EmailProvider {
     const conditions: Record<string, unknown>[] = [];
     const search = options.mailboxSearch;
     const text = search?.text;
+    let queryIncludesSpamTrash = false;
     if (text)
       conditions.push({
         [text.field === "any" ? "text" : text.field]: text.value,
       });
-    else if (options.query) conditions.push({ text: options.query });
+    else if (options.query) {
+      const cache = await this.ensureMailboxCache();
+      const parsed = parseFastmailSearchQuery(options.query, [
+        ...cache.byId.values(),
+      ]);
+      conditions.push(parsed.filter);
+      queryIncludesSpamTrash = parsed.includeSpamTrash;
+    }
     if (options.fromEmail) conditions.push({ from: options.fromEmail });
     const read =
       search?.read ??
@@ -607,7 +616,12 @@ export class FastmailProvider implements EmailProvider {
       conditions.push({ inMailbox: label.id });
     }
     const excludedRoles = [...(search?.excludedRoles ?? [])];
-    if (!options.includeSpamTrash && mailbox !== "spam" && mailbox !== "trash")
+    if (
+      !options.includeSpamTrash &&
+      !queryIncludesSpamTrash &&
+      mailbox !== "spam" &&
+      mailbox !== "trash"
+    )
       excludedRoles.push("spam", "trash");
     for (const role of new Set(excludedRoles)) {
       const folder = await this.getMailboxByRole(
@@ -1344,7 +1358,7 @@ export class FastmailProvider implements EmailProvider {
         "reply-to": this.parseEmailAddress(email.replyTo),
         "in-reply-to": email.inReplyTo?.[0],
         references: email.references?.join(" "),
-        "list-unsubscribe": email["header:List-Unsubscribe:asText"],
+        "list-unsubscribe": email["header:List-Unsubscribe"],
         "list-unsubscribe-post": email["header:List-Unsubscribe-Post:asText"],
       },
       textPlain,
@@ -2111,7 +2125,13 @@ export class FastmailProvider implements EmailProvider {
     options: Parameters<EmailProvider["getMessagesWithPagination"]>[0],
   ) {
     const conditions: Record<string, unknown>[] = [];
-    if (options.query) conditions.push({ text: options.query });
+    if (options.query) {
+      const cache = await this.ensureMailboxCache();
+      conditions.push(
+        parseFastmailSearchQuery(options.query, [...cache.byId.values()])
+          .filter,
+      );
+    }
     if (options.after) conditions.push({ after: options.after.toISOString() });
     if (options.before)
       conditions.push({ before: options.before.toISOString() });

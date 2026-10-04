@@ -17,6 +17,7 @@ export class FastmailEventSourceClient {
   private reconnect?: ReturnType<typeof setTimeout>;
   private heartbeat?: ReturnType<typeof setTimeout>;
   private attempts = 0;
+  private connectedAt?: number;
   private closed = false;
 
   private readonly options: Options;
@@ -42,12 +43,13 @@ export class FastmailEventSourceClient {
     );
     this.resetHeartbeat();
     this.stream.onopen = () => {
-      this.attempts = 0;
+      this.connectedAt = Date.now();
       this.resetHeartbeat();
       log("Stream connected", { emailAccountId: this.options.emailAccountId });
       this.options.onConnected?.(this.options.emailAccountId);
     };
     this.stream.addEventListener("ping", () => this.resetHeartbeat());
+    this.stream.addEventListener("close", () => this.retry("server-close"));
     this.stream.addEventListener("state", (event) => {
       this.resetHeartbeat();
       try {
@@ -68,7 +70,7 @@ export class FastmailEventSourceClient {
         this.options.emailAccountId,
         new Error(`EventSource failed: ${event.code ?? "network"}`),
       );
-      this.retry();
+      this.retry("transport-error");
     };
   }
 
@@ -77,6 +79,7 @@ export class FastmailEventSourceClient {
     if (this.heartbeat) clearTimeout(this.heartbeat);
     this.stream?.close();
     this.stream = undefined;
+    this.connectedAt = undefined;
   }
 
   close() {
@@ -95,18 +98,29 @@ export class FastmailEventSourceClient {
 
   private resetHeartbeat() {
     if (this.heartbeat) clearTimeout(this.heartbeat);
-    this.heartbeat = setTimeout(() => this.retry(), 150_000);
+    this.heartbeat = setTimeout(() => this.retry("heartbeat-timeout"), 150_000);
   }
 
-  private retry() {
+  private retry(reason: string) {
+    if (this.closed || !this.stream) return;
+    const connectedForMs =
+      this.connectedAt === undefined ? 0 : Date.now() - this.connectedAt;
+    // An HTTP 200 followed by an immediate close must not defeat the backoff.
+    if (connectedForMs >= 60_000) this.attempts = 0;
     this.disconnect();
     this.options.onDisconnected?.(this.options.emailAccountId);
     if (this.closed) return;
-    const delay = Math.min(1000 * 2 ** Math.min(this.attempts++, 9), 300_000);
-    this.reconnect = setTimeout(
-      () => this.connect(),
-      delay + Math.random() * 1000,
+    const delayMs = Math.min(
+      1000 * 2 ** Math.min(this.attempts++, 9) + Math.random() * 1000,
+      300_000,
     );
+    log("Stream reconnect scheduled", {
+      emailAccountId: this.options.emailAccountId,
+      reason,
+      connectedForMs,
+      delayMs,
+    });
+    this.reconnect = setTimeout(() => this.connect(), delayMs);
   }
 }
 
