@@ -14,6 +14,7 @@ import { processHistoryItem } from "@/utils/webhook/process-history-item";
 import type { FastmailProvider } from "@/utils/email/fastmail";
 import type { Logger } from "@/utils/logger";
 import { enqueueFastmailSync } from "@/utils/fastmail/queue";
+import { InvalidMailboxSyncCursorError } from "@/utils/email/mailbox-sync";
 
 export interface PollSyncResult {
   email: string;
@@ -113,11 +114,7 @@ export async function pollFastmailAccount({
             pageToken: resyncPosition ?? undefined,
           });
         } catch (error) {
-          if (
-            !(error instanceof Error) ||
-            !error.message.includes("JMAP error: anchorNotFound")
-          )
-            throw error;
+          if (!(error instanceof InvalidMailboxSyncCursorError)) throw error;
           // The last scanned message was deleted; restart safely using intake deduplication.
           resyncPosition = null;
           await prisma.emailAccount.update({
