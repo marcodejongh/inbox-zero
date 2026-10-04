@@ -91,9 +91,10 @@ export async function pollFastmailAccount({
     let cursor = account.lastSyncedHistoryId;
     let resyncState = account.fastmailResyncState;
     let resyncPosition = account.fastmailResyncPosition;
-    const baselineDate = account.fastmailSyncStartedAt ?? new Date();
+    const baselineDate =
+      account.fastmailSyncStartedAt ?? account.lastPolledAt ?? new Date();
     if (!account.fastmailSyncStartedAt) {
-      // Existing accounts begin automation here; historical rules remain opt-in.
+      // Preserve the recovery window of accounts connected before this migration.
       await prisma.emailAccount.update({
         where: { id: emailAccountId, fastmailLeaseOwner: owner },
         data: { fastmailSyncStartedAt: baselineDate },

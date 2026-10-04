@@ -131,6 +131,46 @@ describe("durable Fastmail synchronization", () => {
     });
   });
 
+  it("recovers pre-upgrade mail from the previous successful poll", async () => {
+    const lastPolledAt = new Date("2026-09-20");
+    prisma.emailAccount.findUniqueOrThrow.mockResolvedValueOnce({
+      ...getEmailAccount(),
+      id: emailAccountId,
+      lastSyncedHistoryId: "expired",
+      lastPolledAt,
+      fastmailSyncStartedAt: null,
+      fastmailResyncState: null,
+      fastmailResyncPosition: null,
+      rules: [],
+      user: { id: "user", premium: null },
+    } as never);
+    mocks.provider.getEmailChanges
+      .mockRejectedValueOnce(new Error("JMAP error: cannotCalculateChanges"))
+      .mockResolvedValue({
+        newState: "s3",
+        created: [],
+        updated: [],
+        destroyed: [],
+        hasMoreChanges: false,
+      });
+    mocks.provider.getMessagesWithPagination.mockResolvedValue({
+      messages: [getMockMessage({ id: "pre-upgrade" })],
+    });
+    await pollFastmailAccount({ emailAccountId, logger });
+    expect(mocks.provider.getMessagesWithPagination).toHaveBeenCalledWith(
+      expect.objectContaining({ after: lastPolledAt }),
+    );
+    expect(prisma.emailAccount.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { fastmailSyncStartedAt: lastPolledAt },
+      }),
+    );
+    expect(prisma.fastmailSyncItem.createMany).toHaveBeenCalledWith({
+      data: [{ emailAccountId, messageId: "pre-upgrade" }],
+      skipDuplicates: true,
+    });
+  });
+
   it("restarts a recovery page if its anchor was deleted", async () => {
     mocks.provider.getEmailChanges
       .mockRejectedValueOnce(new Error("JMAP error: cannotCalculateChanges"))

@@ -419,6 +419,15 @@ async function migrateFastmailAccounts(tx: SqlTransaction) {
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'",
   );
   if (!String(table.sql).includes("'fastmail'")) {
+    // DROP TABLE runs cascades even with deferred foreign keys. Preserve the derived indexes too.
+    const indexes = await tx.query(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('effective_role_conversations', 'effective_message_memberships')",
+    );
+    for (const { name } of indexes) {
+      await tx.exec(
+        `CREATE TEMP TABLE fastmail_backup_${name} AS SELECT * FROM ${name}`,
+      );
+    }
     // Defer child references while replacing SQLite's immutable CHECK constraint.
     await tx.exec(`
       PRAGMA defer_foreign_keys = ON;
@@ -433,6 +442,12 @@ async function migrateFastmailAccounts(tx: SqlTransaction) {
       DROP TABLE accounts;
       ALTER TABLE accounts_fastmail RENAME TO accounts;
     `);
+    for (const { name } of indexes) {
+      await tx.exec(`
+        INSERT INTO ${name} SELECT * FROM fastmail_backup_${name};
+        DROP TABLE fastmail_backup_${name};
+      `);
+    }
     if ((await tx.query("PRAGMA foreign_key_check")).length)
       throw new Error("Mailbox migration failed reference validation");
     // The table replacement leaves stale deferred violations; the explicit check above validates all references.
