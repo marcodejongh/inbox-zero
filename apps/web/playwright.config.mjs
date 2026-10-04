@@ -17,6 +17,8 @@ const basePort = getUrlPort(baseURL);
 const databaseUrl =
   process.env.DATABASE_URL ??
   "postgresql://postgres:postgres@localhost:5433/postgres";
+const cronSecret = process.env.CRON_SECRET ?? "playwright-cron-secret";
+process.env.CRON_SECRET = cronSecret;
 const mailProvider =
   process.env.PLAYWRIGHT_MAIL_PROVIDER === "microsoft" ? "microsoft" : "google";
 const emulateBaseUrl =
@@ -248,6 +250,8 @@ export default defineConfig({
         NEXT_PUBLIC_MAIL_ENGINE_TEST_INSPECT: "true",
         DATABASE_URL: databaseUrl,
         PREVIEW_DATABASE_URL: databaseUrl,
+        CRON_SECRET: cronSecret,
+        PAPERLESS_ALLOW_PRIVATE_IPS: "true",
         AUTH_SECRET: process.env.AUTH_SECRET ?? "secret",
         ...(process.env.PLAYWRIGHT_SCIM_TEST === "true" && {
           ADMINS: playwrightTestEmail,

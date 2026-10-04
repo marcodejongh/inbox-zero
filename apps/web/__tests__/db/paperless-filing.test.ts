@@ -91,6 +91,12 @@ describe.skipIf(!process.env.RUN_DB_TESTS)(
           attachmentId: "attachment",
           filename: "invoice.pdf",
           mimeType: "application/pdf",
+          headers: {
+            "content-description": "",
+            "content-id": "",
+            "content-transfer-encoding": "base64",
+            "content-type": "application/pdf",
+          },
           size: 100,
         },
         driveConnectionId: connectionId,
@@ -135,6 +141,12 @@ describe.skipIf(!process.env.RUN_DB_TESTS)(
           attachmentId: "attachment",
           filename: row.filename,
           mimeType: "application/pdf",
+          headers: {
+            "content-description": "",
+            "content-id": "",
+            "content-transfer-encoding": "base64",
+            "content-type": "application/pdf",
+          },
           size: 100,
         },
         driveConnectionId: connectionId,
@@ -163,7 +175,7 @@ describe.skipIf(!process.env.RUN_DB_TESTS)(
         });
         const emailAccount = await prisma.emailAccount.findUniqueOrThrow({
           where: { id: emailAccountId },
-          include: { user: true },
+          include: { user: true, account: { select: { provider: true } } },
         });
         const emailProvider = createMockEmailProvider();
         vi.mocked(emailProvider.getAttachment).mockResolvedValue({
@@ -179,6 +191,12 @@ describe.skipIf(!process.env.RUN_DB_TESTS)(
             attachmentId: "attachment",
             filename: "receipt.pdf",
             mimeType: "application/pdf",
+            headers: {
+              "content-description": "",
+              "content-id": "",
+              "content-transfer-encoding": "base64",
+              "content-type": "application/pdf",
+            },
             size: 14,
           },
           manual: true,

@@ -45,6 +45,12 @@ function options() {
     attachmentId: "attachment-1",
     filename: "invoice.pdf",
     mimeType: "application/pdf",
+    headers: {
+      "content-description": "",
+      "content-id": "",
+      "content-transfer-encoding": "base64",
+      "content-type": "application/pdf",
+    },
     size: 10,
   };
   const emailProvider = createMockEmailProvider();

@@ -33,6 +33,12 @@ describe("manual Paperless saves", () => {
         attachmentId,
         filename: "receipt.pdf",
         mimeType: "application/pdf",
+        headers: {
+          "content-description": "",
+          "content-id": "",
+          "content-transfer-encoding": "base64",
+          "content-type": "application/pdf",
+        },
         size: 100,
       })),
     });
