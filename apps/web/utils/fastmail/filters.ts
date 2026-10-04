@@ -29,14 +29,15 @@ export async function saveFastmailFilter(
   const id =
     prefix +
     createHash("sha256").update(`${emailAccountId}\0${sender}`).digest("hex");
+  // Nested actions inherit emailAccountId from the rule's composite key;
+  // Prisma rejects it when passed explicitly.
   const actions = [...new Set(labelIds)].map((labelId) => ({
     type: ActionType.LABEL,
     labelId,
-    emailAccountId,
   }));
   const createActions = [
     ...actions,
-    ...(archive ? [{ type: ActionType.ARCHIVE, emailAccountId }] : []),
+    ...(archive ? [{ type: ActionType.ARCHIVE }] : []),
   ];
   await prisma.rule.upsert({
     where: { id_emailAccountId: { id, emailAccountId } },

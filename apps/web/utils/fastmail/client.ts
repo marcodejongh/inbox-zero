@@ -1,3 +1,4 @@
+import PQueue from "p-queue";
 import { createScopedLogger } from "@/utils/logger";
 import { SafeError } from "@/utils/error";
 
@@ -8,6 +9,9 @@ const MAX_RETRIES = 3;
 
 /** Base delay in ms for exponential backoff */
 const BASE_RETRY_DELAY = 1000;
+
+// Clients are created per request, so the limit is shared per account.
+const requestQueues = new Map<string, PQueue>();
 
 /**
  * Determines if an HTTP status code indicates a transient error worth retrying
@@ -346,12 +350,16 @@ export async function createFastmailClient(
     throw new SafeError("No mail account found in JMAP session");
   }
 
+  const queue = getRequestQueue(session, accountId);
+
   return {
     session,
     accessToken,
     accountId,
     request: (methodCalls: JMAPMethodCall[]) =>
-      makeJMAPRequest(session.apiUrl, accessToken, methodCalls),
+      queue.add(() =>
+        makeJMAPRequest(session.apiUrl, accessToken, methodCalls),
+      ),
     getAccessToken: () => accessToken,
   };
 }
@@ -386,4 +394,20 @@ export async function getUserInfo(accessToken: string) {
  */
 export function getAccessTokenFromClient(client: FastmailClient): string {
   return client.getAccessToken();
+}
+
+// Fan-outs such as loading every thread on a page otherwise exceed the
+// server's concurrency limit and are rejected with 429.
+function getRequestQueue(session: JMAPSession, accountId: string) {
+  let queue = requestQueues.get(accountId);
+  if (!queue) {
+    const core = session.capabilities["urn:ietf:params:jmap:core"] as
+      | { maxConcurrentRequests?: number }
+      | undefined;
+    queue = new PQueue({
+      concurrency: Math.max(1, core?.maxConcurrentRequests ?? 4),
+    });
+    requestQueues.set(accountId, queue);
+  }
+  return queue;
 }
