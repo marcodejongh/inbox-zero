@@ -63,7 +63,11 @@ export function FilingActivity({ paperless = false }: { paperless?: boolean }) {
                   <TableHead>File</TableHead>
                   <TableHead>{paperless ? "Destination" : "Folder"}</TableHead>
                   <TableHead className="w-[100px]">When</TableHead>
-                  <TableHead className="w-[80px] text-center">
+                  <TableHead
+                    className={
+                      paperless ? "min-w-[200px]" : "w-[80px] text-center"
+                    }
+                  >
                     {paperless ? "Status" : "Correct?"}
                   </TableHead>
                   <TableHead className="w-[50px]" />
@@ -256,6 +260,14 @@ function FilingRow({
         </span>
       </TableCell>
       <TableCell className="break-words max-w-[200px]">
+        {paperless ? "Paperless" : <FolderCell filing={filing} />}
+      </TableCell>
+      <TableCell>
+        <span className="text-muted-foreground text-xs">
+          {formatDistanceToNow(new Date(filing.createdAt), { addSuffix: true })}
+        </span>
+      </TableCell>
+      <TableCell>
         {paperless ? (
           <PaperlessFilingStatus
             filingId={filing.id}
@@ -264,73 +276,65 @@ function FilingRow({
             onUpdated={onFeedbackSaved}
           />
         ) : (
-          <FolderCell filing={filing} />
-        )}
-      </TableCell>
-      <TableCell>
-        <span className="text-muted-foreground text-xs">
-          {formatDistanceToNow(new Date(filing.createdAt), { addSuffix: true })}
-        </span>
-      </TableCell>
-      <TableCell>
-        <div className="flex items-center justify-center">
-          {canGiveFeedback && !isSubmitting && otherFolders.length > 0 ? (
-            <DropdownMenu
-              onOpenChange={(open) => {
-                setDropdownOpen(open);
-                if (open) {
-                  voteBeforeDropdownRef.current = vote;
-                  setVote(false);
-                }
-              }}
-            >
-              <DropdownMenuTrigger asChild>
-                <div>
-                  <YesNoIndicator
-                    value={vote}
-                    onClick={handleFeedbackClick}
-                    dropdownTrigger="wrong"
-                    wrongActive={dropdownOpen}
-                  />
-                </div>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuLabel>
-                  Which folder does this file belong in?
-                </DropdownMenuLabel>
-                {otherFolders.map((folder) => (
+          <div className="flex items-center justify-center">
+            {canGiveFeedback && !isSubmitting && otherFolders.length > 0 ? (
+              <DropdownMenu
+                onOpenChange={(open) => {
+                  setDropdownOpen(open);
+                  if (open) {
+                    voteBeforeDropdownRef.current = vote;
+                    setVote(false);
+                  }
+                }}
+              >
+                <DropdownMenuTrigger asChild>
+                  <div>
+                    <YesNoIndicator
+                      value={vote}
+                      onClick={handleFeedbackClick}
+                      dropdownTrigger="wrong"
+                      wrongActive={dropdownOpen}
+                    />
+                  </div>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuLabel>
+                    Which folder does this file belong in?
+                  </DropdownMenuLabel>
+                  {otherFolders.map((folder) => (
+                    <DropdownMenuItem
+                      key={folder.folderId}
+                      onClick={() =>
+                        handleMoveToFolder(
+                          folder.folderId,
+                          folder.folderName,
+                          folder.folderPath,
+                        )
+                      }
+                    >
+                      <FolderIcon className="size-4" />
+                      {folder.folderName}
+                    </DropdownMenuItem>
+                  ))}
                   <DropdownMenuItem
-                    key={folder.folderId}
-                    onClick={() =>
-                      handleMoveToFolder(
-                        folder.folderId,
-                        folder.folderName,
-                        folder.folderPath,
-                      )
-                    }
+                    onClick={() => setVote(voteBeforeDropdownRef.current)}
                   >
-                    <FolderIcon className="size-4" />
-                    {folder.folderName}
+                    Cancel
                   </DropdownMenuItem>
-                ))}
-                <DropdownMenuItem
-                  onClick={() => setVote(voteBeforeDropdownRef.current)}
-                >
-                  Cancel
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <YesNoIndicator
-              value={vote}
-              onClick={
-                canGiveFeedback && !isSubmitting
-                  ? handleFeedbackClick
-                  : undefined
-              }
-            />
-          )}
-        </div>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <YesNoIndicator
+                value={vote}
+                onClick={
+                  canGiveFeedback && !isSubmitting
+                    ? handleFeedbackClick
+                    : undefined
+                }
+              />
+            )}
+          </div>
+        )}
       </TableCell>
       <TableCell>
         {driveUrl && (
