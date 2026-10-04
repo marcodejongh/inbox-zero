@@ -143,10 +143,9 @@ jobs:
           fi
 
           delimiter="PLAYWRIGHT_FILES_$(openssl rand -hex 16)"
+          # Large upstream syncs exceed Linux's per-environment-variable size limit.
+          echo "PLAYWRIGHT_CHANGED_FILES_PATH=$changed_files_path" >> "$GITHUB_ENV"
           {
-            echo "PLAYWRIGHT_CHANGED_FILES<<$delimiter"
-            cat "$changed_files_path"
-            echo "$delimiter"
             echo "PLAYWRIGHT_CHANGED_TEST_FILES<<$delimiter"
             cat "$changed_test_files_path"
             echo "$delimiter"

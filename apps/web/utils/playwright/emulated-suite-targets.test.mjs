@@ -105,6 +105,39 @@ test("focused selections keep their feature names without adding unselected spec
   ]);
 });
 
+test("the runner selects specs from a changed-file list larger than an environment variable", () => {
+  const runner = path.resolve(
+    import.meta.dirname,
+    "../../__tests__/playwright/run-emulated-suite.mjs",
+  );
+  const selected = "__tests__/playwright/emulated/mail/reply.spec.ts";
+  for (const spec of [
+    selected,
+    "__tests__/playwright/emulated/settings/other.spec.ts",
+  ]) {
+    mkdirSync(path.dirname(path.join(appRoot, spec)), { recursive: true });
+    writeFileSync(path.join(appRoot, spec), "");
+  }
+  const changedFilesPath = path.join(appRoot, "changed-files.txt");
+  writeFileSync(
+    changedFilesPath,
+    `${"README.md\n".repeat(20_000)}apps/web/${selected}\n`,
+  );
+  const result = spawnSync(process.execPath, [runner, "--list-targets"], {
+    cwd: appRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PLAYWRIGHT_CHANGED_FILES: "",
+      PLAYWRIGHT_CHANGED_FILES_PATH: changedFilesPath,
+    },
+    timeout: 10_000,
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout).map(({ path }) => path)).toEqual([selected]);
+});
+
 test.each([
   0, 1,
 ])("the batch runner preserves reports and isolation after a spec exits %i", (exitStatus) => {

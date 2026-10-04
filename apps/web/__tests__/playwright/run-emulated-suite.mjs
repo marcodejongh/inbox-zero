@@ -3,6 +3,7 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   statSync,
@@ -29,7 +30,9 @@ const requestedPaths = getRequestedPlaywrightPaths(
 const changedSelection = requestedPaths.length
   ? undefined
   : selectChangedPlaywrightTargets(
-      process.env.PLAYWRIGHT_CHANGED_FILES,
+      process.env.PLAYWRIGHT_CHANGED_FILES_PATH
+        ? readFileSync(process.env.PLAYWRIGHT_CHANGED_FILES_PATH, "utf8")
+        : process.env.PLAYWRIGHT_CHANGED_FILES,
       process.cwd(),
     );
 const selectedPaths = requestedPaths.length
