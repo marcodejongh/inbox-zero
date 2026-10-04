@@ -232,6 +232,9 @@ cron:
   failedJobsHistoryLimit: 3
   concurrencyPolicy: Forbid
   jobs:
+    paperless-filings:
+      schedule: "* * * * *"
+      path: /api/cron/paperless-filings
     scheduled-actions:
       schedule: "* * * * *"
       path: /api/cron/scheduled-actions

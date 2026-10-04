@@ -97,7 +97,7 @@ export async function sendFilingMessagingNotifications({
         });
         if (!destination) continue;
 
-        if (filing.wasAsked) {
+        if (filing.wasAsked && filing.status === "PENDING") {
           deliveryPromises.push(
             sendDocumentAskToSlack({
               accessToken: channel.accessToken,
@@ -105,6 +105,7 @@ export async function sendFilingMessagingNotifications({
               filename: filing.filename,
               reasoning: filing.reasoning,
               senderEmail,
+              paperless: filing.driveConnection.provider === "paperless",
             }),
           );
         } else {
@@ -117,6 +118,7 @@ export async function sendFilingMessagingNotifications({
               driveProvider: filing.driveConnection.provider,
               senderEmail,
               fileId: filing.fileId,
+              webUrl: filing.webUrl,
             }),
           );
         }
@@ -128,17 +130,20 @@ export async function sendFilingMessagingNotifications({
           sendAutomationMessage({
             channel,
             route,
-            text: filing.wasAsked
-              ? formatDocumentAskText({
-                  filename: filing.filename,
-                  reasoning: filing.reasoning,
-                  senderEmail,
-                })
-              : formatDocumentFiledText({
-                  filename: filing.filename,
-                  folderPath: filing.folderPath,
-                  senderEmail,
-                }),
+            text:
+              filing.wasAsked && filing.status === "PENDING"
+                ? formatDocumentAskText({
+                    filename: filing.filename,
+                    reasoning: filing.reasoning,
+                    senderEmail,
+                    paperless: filing.driveConnection.provider === "paperless",
+                  })
+                : formatDocumentFiledText({
+                    filename: filing.filename,
+                    folderPath: filing.folderPath,
+                    senderEmail,
+                    webUrl: filing.webUrl,
+                  }),
             logger: log,
           }),
         );
@@ -161,25 +166,31 @@ function formatDocumentAskText({
   filename,
   reasoning,
   senderEmail,
+  paperless,
 }: {
   filename: string;
   reasoning: string | null;
   senderEmail?: string | null;
+  paperless?: boolean;
 }) {
   const fromPart = senderEmail ? ` from ${senderEmail}` : "";
   const reasonPart = reasoning ? ` — ${reasoning}` : "";
-  return `📄 Where should I file ${filename}${fromPart}?${reasonPart}`;
+  return paperless
+    ? `📄 Save ${filename}${fromPart} to Paperless?${reasonPart} Confirm Save or Skip in attachment filing activity.`
+    : `📄 Where should I file ${filename}${fromPart}?${reasonPart}`;
 }
 
 function formatDocumentFiledText({
   filename,
   folderPath,
   senderEmail,
+  webUrl,
 }: {
   filename: string;
   folderPath: string;
   senderEmail?: string | null;
+  webUrl?: string | null;
 }) {
   const fromPart = senderEmail ? ` from ${senderEmail}` : "";
-  return `📨 Filed ${filename}${fromPart} to ${folderPath}`;
+  return `📨 Filed ${filename}${fromPart} to ${folderPath}${webUrl ? `\n${webUrl}` : ""}`;
 }

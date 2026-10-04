@@ -99,6 +99,8 @@ Open http://localhost:3000
 
 For complete self-hosting instructions, production deployment, OAuth setup, and configuration options, see our **[Self-Hosting Docs](https://docs.getinboxzero.com/hosting/quick-start)**.
 
+For saving email attachments to Paperless-ngx, see the [Paperless setup guide](docs/PAPERLESS.md).
+
 ### Local Development
 
 > **Prerequisites**: macOS or Linux (WSL on Windows), [Node.js](https://nodejs.org/) v24, and the pnpm version pinned in `package.json`. Install either [Docker Desktop](https://docs.docker.com/desktop/) with Compose or native PostgreSQL and Redis. On macOS, native services can be installed with `brew install postgresql@16 redis`.

@@ -1,4 +1,5 @@
 import prisma from "@/utils/prisma";
+import { savePaperlessAttachment } from "@/utils/paperless/save";
 import type { ParsedMessage } from "@/utils/types";
 import type { EmailProvider } from "@/utils/email/types";
 import type { Logger } from "@/utils/logger";
@@ -86,6 +87,11 @@ export async function processFilingReply({
       id: filing.id,
       filename: filing.filename,
       currentFolder: filing.folderPath || "root",
+      destination:
+        filing.driveConnection.provider === "paperless"
+          ? ("paperless" as const)
+          : ("cloud" as const),
+      status: filing.status,
     })),
     emailAccount,
   });
@@ -387,6 +393,34 @@ async function applyFilingReplyAction({
   filing: Awaited<ReturnType<typeof findFilingsFromThread>>[number];
   logger: Logger;
 }): Promise<boolean> {
+  if (filing.driveConnection.provider === "paperless") {
+    if (action.action === "approve" && filing.status === "PENDING") {
+      const account = await prisma.emailAccount.findUniqueOrThrow({
+        where: { id: emailAccountId },
+        select: { account: { select: { provider: true } } },
+      });
+      await savePaperlessAttachment({
+        emailAccountId,
+        provider: account.account.provider,
+        messageId: filing.messageId,
+        attachmentId: filing.attachmentId,
+        logger,
+      });
+      return true;
+    }
+    if (action.action === "undo" && filing.status === "PENDING") {
+      const result = await prisma.documentFiling.updateMany({
+        where: { id: filing.id, emailAccountId, status: "PENDING" },
+        data: { status: "REJECTED" },
+      });
+      return result.count === 1;
+    }
+    if (action.action === "approve" && filing.status === "FILED") {
+      await handleApprove(filing.id);
+      return true;
+    }
+    return false;
+  }
   switch (action.action) {
     case "approve":
       await handleApprove(filing.id);

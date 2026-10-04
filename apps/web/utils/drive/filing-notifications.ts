@@ -41,6 +41,8 @@ type FilingNotification = {
   folderPath: string;
   reasoning: string | null;
   wasAsked: boolean;
+  status?: string;
+  webUrl?: string | null;
 };
 
 // ============================================================================
@@ -81,6 +83,7 @@ export async function sendFiledNotification({
     filename: filing.filename,
     folderPath: filing.folderPath,
     driveProvider: filing.driveConnection.provider,
+    webUrl: filing.webUrl,
   });
 
   await sendNotificationEmail({
@@ -112,6 +115,7 @@ export async function sendAskNotification({
 
   const filing = await prisma.documentFiling.findUnique({
     where: { id: filingId },
+    include: { driveConnection: { select: { provider: true } } },
   });
 
   if (!filing) {
@@ -122,10 +126,14 @@ export async function sendAskNotification({
   const replyToAddress = getFilebotReplyTo({ userEmail });
   const fromAddress = getFilebotFrom({ userEmail });
 
-  const subject = `📄 Where should I file ${filing.filename}?`;
+  const subject =
+    filing.driveConnection.provider === "paperless"
+      ? `📄 Save ${filing.filename} to Paperless?`
+      : `📄 Where should I file ${filing.filename}?`;
   const messageHtml = buildAskEmailHtml({
     filename: filing.filename,
     reasoning: filing.reasoning,
+    paperless: filing.driveConnection.provider === "paperless",
   });
 
   await sendNotificationEmail({
@@ -175,11 +183,17 @@ export async function sendFilingNotifications({
 
   const replyToAddress = getFilebotReplyTo({ userEmail });
   const fromAddress = getFilebotFrom({ userEmail });
-  const askedFilings = filings.filter((filing) => filing.wasAsked);
+  const askedFilings = filings.filter(
+    (filing) =>
+      filing.wasAsked && (!filing.status || filing.status === "PENDING"),
+  );
   const subject = getFilingNotificationSubject({
     filingCount: filings.length,
     askedCount: askedFilings.length,
     firstFilename: filings[0].filename,
+    paperless: filings.every(
+      (filing) => filing.driveConnection.provider === "paperless",
+    ),
   });
   const messageHtml = getFilingNotificationHtml(filings);
 
@@ -254,18 +268,20 @@ function buildFiledEmailHtml({
   filename,
   folderPath,
   driveProvider,
+  webUrl,
 }: {
   filename: string;
   folderPath: string;
   driveProvider: string;
+  webUrl?: string | null;
 }): string {
   return `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px;">
       <p>Filed your document:</p>
-      ${buildFiledItemHtml({ filename, folderPath, driveName: getDriveName(driveProvider) })}
+      ${buildFiledItemHtml({ filename, folderPath, driveName: getDriveName(driveProvider), webUrl })}
       
       <p style="color: #666; font-size: 14px;">
-        Wrong folder? Just reply with where it should go.
+        ${driveProvider === "paperless" ? "Open Paperless to review document organization." : "Wrong folder? Just reply with where it should go."}
       </p>
     </div>
   `;
@@ -274,30 +290,45 @@ function buildFiledEmailHtml({
 function buildAskEmailHtml({
   filename,
   reasoning,
+  paperless = false,
 }: {
   filename: string;
   reasoning: string | null;
+  paperless?: boolean;
 }): string {
   return `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px;">
       <p>Got a document I'm not sure about:</p>
       ${buildAskItemHtml({ filename, reasoning })}
       
-      <p><strong>Where should I put it?</strong></p>
+      <p><strong>${paperless ? "Save this attachment to Paperless?" : "Where should I put it?"}</strong></p>
       
       <p style="color: #666; font-size: 14px;">
-        Reply with a folder path, e.g.:<br>
+        ${
+          paperless
+            ? 'Reply "save" to upload, or "skip" to ignore this attachment.'
+            : `Reply with a folder path, e.g.:<br>
         • "Receipts/2024"<br>
         • "Projects/Acme Corp/Contracts"<br>
-        • "Skip" to ignore this one
+        • "Skip" to ignore this one`
+        }
       </p>
     </div>
   `;
 }
 
 function buildFilingSummaryEmailHtml(filings: FilingNotification[]): string {
-  const filedItems = filings.filter((filing) => !filing.wasAsked);
-  const askedItems = filings.filter((filing) => filing.wasAsked);
+  const paperless = filings.every(
+    (filing) => filing.driveConnection.provider === "paperless",
+  );
+  const filedItems = filings.filter(
+    (filing) =>
+      !(filing.wasAsked && (!filing.status || filing.status === "PENDING")),
+  );
+  const askedItems = filings.filter(
+    (filing) =>
+      filing.wasAsked && (!filing.status || filing.status === "PENDING"),
+  );
 
   return `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px;">
@@ -310,6 +341,7 @@ function buildFilingSummaryEmailHtml(filings: FilingNotification[]): string {
                    filename: filing.filename,
                    folderPath: filing.folderPath,
                    driveName: getDriveName(filing.driveConnection.provider),
+                   webUrl: filing.webUrl,
                  }),
                )
                .join("")}`
@@ -324,9 +356,13 @@ function buildFilingSummaryEmailHtml(filings: FilingNotification[]): string {
 
       <p style="color: #666; font-size: 14px;">
         ${
-          askedItems.length > 0
-            ? "Reply with the document name and folder path for anything that needs your input."
-            : "Wrong folder? Reply with the document name and where it should go."
+          paperless
+            ? askedItems.length > 0
+              ? "Reply with the document name and save or skip for anything that needs your input."
+              : "Open Paperless to review document organization."
+            : askedItems.length > 0
+              ? "Reply with the document name and folder path for anything that needs your input."
+              : "Wrong folder? Reply with the document name and where it should go."
         }
       </p>
     </div>
@@ -337,10 +373,11 @@ function getFilingNotificationHtml(filings: FilingNotification[]): string {
   if (filings.length > 1) return buildFilingSummaryEmailHtml(filings);
 
   const filing = filings[0];
-  if (filing.wasAsked) {
+  if (filing.wasAsked && (!filing.status || filing.status === "PENDING")) {
     return buildAskEmailHtml({
       filename: filing.filename,
       reasoning: filing.reasoning,
+      paperless: filing.driveConnection.provider === "paperless",
     });
   }
 
@@ -348,6 +385,7 @@ function getFilingNotificationHtml(filings: FilingNotification[]): string {
     filename: filing.filename,
     folderPath: filing.folderPath,
     driveProvider: filing.driveConnection.provider,
+    webUrl: filing.webUrl,
   });
 }
 
@@ -355,16 +393,19 @@ function buildFiledItemHtml({
   filename,
   folderPath,
   driveName,
+  webUrl,
 }: {
   filename: string;
   folderPath: string;
   driveName: string;
+  webUrl?: string | null;
 }): string {
   return `
     <div style="background: #f5f5f5; padding: 16px; border-radius: 8px; margin: 12px 0;">
       <p style="margin: 0 0 8px 0;"><strong>📄 ${escapeHtml(filename)}</strong></p>
       <p style="margin: 0; color: #666;">📁 → ${escapeHtml(folderPath)}</p>
       <p style="margin: 8px 0 0 0; font-size: 12px; color: #888;">${driveName}</p>
+      ${webUrl ? `<p><a href="${escapeHtml(webUrl)}">Open document</a></p>` : ""}
     </div>
   `;
 }
@@ -388,26 +429,36 @@ function getFilingNotificationSubject({
   filingCount,
   askedCount,
   firstFilename,
+  paperless = false,
 }: {
   filingCount: number;
   askedCount: number;
   firstFilename: string;
+  paperless?: boolean;
 }): string {
   if (filingCount === 1) {
     return askedCount === 1
-      ? `📄 Where should I file ${firstFilename}?`
+      ? paperless
+        ? `📄 Save ${firstFilename} to Paperless?`
+        : `📄 Where should I file ${firstFilename}?`
       : `✓ Filed ${firstFilename}`;
   }
 
   if (askedCount === 0) return `✓ Filed ${filingCount} documents`;
   if (askedCount === filingCount) {
-    return `📄 Where should I file ${filingCount} documents?`;
+    return paperless
+      ? `📄 Save ${filingCount} documents to Paperless?`
+      : `📄 Where should I file ${filingCount} documents?`;
   }
   return `📄 Filing update for ${filingCount} documents`;
 }
 
 function getDriveName(provider: string): string {
-  return provider === "google" ? "Google Drive" : "OneDrive";
+  return provider === "paperless"
+    ? "Paperless"
+    : provider === "google"
+      ? "Google Drive"
+      : "OneDrive";
 }
 
 async function sendNotificationEmail({

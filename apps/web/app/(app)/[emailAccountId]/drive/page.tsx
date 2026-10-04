@@ -24,6 +24,8 @@ import { FilingPreferences } from "./FilingPreferences";
 import { FilingActivity } from "./FilingActivity";
 import { DriveOnboarding } from "./DriveOnboarding";
 import { DriveSetup } from "./DriveSetup";
+import { PaperlessSettings } from "./PaperlessSettings";
+import { PaperlessSetup } from "./PaperlessSetup";
 import { Switch } from "@/components/ui/switch";
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { useEmailAccountFull } from "@/hooks/useEmailAccountFull";
@@ -62,7 +64,15 @@ export default function DrivePage() {
   const [forceOnboarding] = useQueryState("onboarding", parseAsBoolean);
   const [forceSetup] = useQueryState("setup", parseAsBoolean);
 
-  const hasConnections = (data?.connections?.length ?? 0) > 0;
+  const paperless = emailAccount?.filingDestination === "paperless";
+  const hasConnections =
+    data?.connections?.some(
+      (connection) =>
+        connection.isConnected &&
+        (paperless
+          ? connection.provider === "paperless"
+          : connection.provider !== "paperless"),
+    ) ?? false;
   const filingEnabled = emailAccount?.filingEnabled ?? false;
   const [isSaving, setIsSaving] = useState(false);
 
@@ -104,8 +114,10 @@ export default function DrivePage() {
         loading={isLoading || emailLoading}
         error={error || emailError}
       >
-        {view === "onboarding" && <DriveOnboarding />}
-        {view === "setup" && <DriveSetup />}
+        <PaperlessSettings />
+        {view === "onboarding" &&
+          (paperless ? <PaperlessSetup /> : <DriveOnboarding />)}
+        {view === "setup" && (paperless ? <PaperlessSetup /> : <DriveSetup />)}
         {view === "settings" && (
           <>
             <div className="flex items-center justify-between">
@@ -130,12 +142,12 @@ export default function DrivePage() {
             <div
               className={cn(
                 "mt-6 space-y-4 transition-opacity duration-200",
-                !filingEnabled && "opacity-50 pointer-events-none",
+                !filingEnabled && "opacity-50",
               )}
             >
               <DriveConnections />
               <FilingPreferences />
-              <FilingActivity />
+              <FilingActivity paperless={paperless} />
             </div>
           </>
         )}

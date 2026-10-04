@@ -39,6 +39,7 @@ async function getEmailAccount({
       sentMessageOpenTrackingEnabled: true,
       writingStyle: true,
       filingEnabled: true,
+      filingDestination: true,
       filingPrompt: true,
       filingConfirmationSendEmail: true,
       followUpAwaitingReplyDays: true,

@@ -28,6 +28,7 @@ import { getDriveFileUrl } from "@/utils/drive/url";
 import type { GetFilingsResponse } from "@/app/api/user/drive/filings/route";
 import { useDriveConnections } from "@/hooks/useDriveConnections";
 import type { GetDriveConnectionsResponse } from "@/app/api/user/drive/connections/route";
+import { PaperlessFilingStatus } from "@/components/drive/PaperlessFilingStatus";
 import { YesNoIndicator } from "@/components/drive/YesNoIndicator";
 import type { DriveProviderType } from "@/utils/drive/types";
 import {
@@ -36,7 +37,7 @@ import {
 } from "@/utils/actions/drive";
 import { useAccount } from "@/providers/EmailAccountProvider";
 
-export function FilingActivity() {
+export function FilingActivity({ paperless = false }: { paperless?: boolean }) {
   const { emailAccountId } = useAccount();
   const { data, isLoading, error, mutate } = useFilingActivity({
     limit: 10,
@@ -60,10 +61,10 @@ export function FilingActivity() {
               <TableHeader>
                 <TableRow>
                   <TableHead>File</TableHead>
-                  <TableHead>Folder</TableHead>
+                  <TableHead>{paperless ? "Destination" : "Folder"}</TableHead>
                   <TableHead className="w-[100px]">When</TableHead>
                   <TableHead className="w-[80px] text-center">
-                    Correct?
+                    {paperless ? "Status" : "Correct?"}
                   </TableHead>
                   <TableHead className="w-[50px]" />
                 </TableRow>
@@ -115,12 +116,18 @@ function FilingRow({
 
   const connection = connections.find((c) => c.id === filing.driveConnectionId);
 
-  const driveUrl = filing.fileId
-    ? getDriveFileUrl(filing.fileId, connection?.provider as DriveProviderType)
-    : null;
+  const paperless = filing.driveConnection.provider === "paperless";
+  const driveUrl =
+    filing.webUrl ||
+    (!paperless && filing.fileId
+      ? getDriveFileUrl(
+          filing.fileId,
+          connection?.provider as DriveProviderType,
+        )
+      : null);
 
   const canGiveFeedback =
-    filing.status !== "PENDING" && filing.status !== "ERROR";
+    !paperless && filing.status !== "PENDING" && filing.status !== "ERROR";
 
   useEffect(() => {
     setVote(filing.feedbackPositive ?? null);
@@ -249,7 +256,16 @@ function FilingRow({
         </span>
       </TableCell>
       <TableCell className="break-words max-w-[200px]">
-        <FolderCell filing={filing} />
+        {paperless ? (
+          <PaperlessFilingStatus
+            filingId={filing.id}
+            status={filing.status}
+            errorMessage={filing.errorMessage}
+            onUpdated={onFeedbackSaved}
+          />
+        ) : (
+          <FolderCell filing={filing} />
+        )}
       </TableCell>
       <TableCell>
         <span className="text-muted-foreground text-xs">
@@ -323,7 +339,7 @@ function FilingRow({
             target="_blank"
             rel="noopener noreferrer"
             className="text-muted-foreground hover:text-foreground"
-            aria-label={`Open ${filing.filename} in drive`}
+            aria-label={`Open ${filing.filename} in ${paperless ? "Paperless" : "drive"}`}
           >
             <ExternalLinkIcon className="size-4" />
           </a>

@@ -20,6 +20,11 @@ type DriveConnection = GetDriveConnectionsResponse["connections"][0];
 
 export function getProviderInfo(provider: string) {
   const providers = {
+    paperless: {
+      name: "Paperless",
+      icon: "/images/paperless.svg",
+      alt: "Paperless",
+    },
     microsoft: {
       name: "OneDrive",
       icon: "/images/microsoft.svg",
@@ -73,7 +78,7 @@ export function DriveConnectionCard({
       />
       <span className="font-medium text-foreground">{providerInfo.name}</span>
       <span>·</span>
-      <span>{connection.email}</span>
+      <span>{connection.baseUrl || connection.email}</span>
       {!connection.isConnected && (
         <div className="flex items-center gap-1 text-red-600">
           <XCircle className="h-3 w-3" />

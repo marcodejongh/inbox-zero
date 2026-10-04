@@ -8,7 +8,13 @@ import { createDriveProviderWithRefresh } from "@/utils/drive/provider";
 import { createAndSaveFilingFolder } from "@/utils/drive/folder-utils";
 import { extractTextFromDocument } from "@/utils/drive/document-extraction";
 import { analyzeDocument } from "@/utils/ai/document-filing/analyze-document";
-import { isDuplicateError } from "@/utils/prisma-helpers";
+import {
+  findAttachmentFiling,
+  claimAttachmentFiling,
+  isClaimableFiling,
+  getExistingFilingResult,
+} from "@/utils/drive/filing-claim";
+import { processPaperlessAttachment } from "@/utils/paperless/filing";
 import {
   sendFiledNotification,
   sendAskNotification,
@@ -28,6 +34,8 @@ export interface FilingResult {
     filename: string;
     folderPath: string;
     fileId: string | null;
+    webUrl?: string | null;
+    status?: string;
     wasAsked: boolean;
     confidence: number | null;
     provider: string;
@@ -51,9 +59,6 @@ export interface ProcessAttachmentOptions {
   message: ParsedMessage;
   sendNotification?: boolean;
 }
-
-const DUPLICATE_FILING_FIELDS = ["emailAccountId", "messageId", "attachmentId"];
-const PROCESSING_FILING_STALE_MS = 30 * 60 * 1000;
 
 // ============================================================================
 // Main Filing Engine
@@ -84,6 +89,21 @@ export async function processAttachment({
   let claimedFilingId: string | null = null;
 
   try {
+    const settings = await prisma.emailAccount.findUnique({
+      where: { id: emailAccount.id },
+      select: { filingDestination: true },
+    });
+    if (settings?.filingDestination === "paperless") {
+      return processPaperlessAttachment({
+        emailAccount,
+        message,
+        attachment,
+        emailProvider,
+        logger,
+        sendNotification,
+      });
+    }
+
     // Validate filing is enabled with a prompt
     if (!emailAccount.filingEnabled || !emailAccount.filingPrompt) {
       log.info("Filing not enabled or no prompt configured");
@@ -102,6 +122,7 @@ export async function processAttachment({
         where: {
           emailAccountId: emailAccount.id,
           isConnected: true,
+          provider: { in: ["google", "microsoft"] },
         },
       }),
     ]);
@@ -421,210 +442,6 @@ interface FolderTarget {
   folderId: string;
   folderPath: string;
   needsToCreateFolder: boolean;
-}
-
-type AttachmentFiling = NonNullable<
-  Awaited<ReturnType<typeof findAttachmentFiling>>
->;
-
-type ExistingFilingDecision =
-  | { type: "retry"; filingId: string }
-  | { type: "return"; result: FilingResult };
-
-type AttachmentLookup = {
-  emailAccountId: string;
-  messageId: string;
-  attachmentId: string;
-};
-
-function findAttachmentFiling({
-  emailAccountId,
-  messageId,
-  attachmentId,
-}: AttachmentLookup) {
-  return prisma.documentFiling.findFirst({
-    where: {
-      emailAccountId,
-      messageId,
-      attachmentId,
-    },
-    select: {
-      id: true,
-      filename: true,
-      folderPath: true,
-      fileId: true,
-      status: true,
-      updatedAt: true,
-      wasAsked: true,
-      confidence: true,
-      reasoning: true,
-      driveConnection: {
-        select: {
-          provider: true,
-        },
-      },
-    },
-  });
-}
-
-async function claimAttachmentFiling({
-  existingFiling,
-  attachmentLookup,
-  attachment,
-  driveConnectionId,
-  logger,
-}: {
-  existingFiling: AttachmentFiling | null;
-  attachmentLookup: AttachmentLookup;
-  attachment: Attachment;
-  driveConnectionId: string;
-  logger: Logger;
-}): Promise<ExistingFilingDecision> {
-  if (existingFiling) {
-    return claimOrResolveExistingFiling(existingFiling, logger);
-  }
-
-  try {
-    const processingFiling = await prisma.documentFiling.create({
-      data: {
-        ...attachmentLookup,
-        filename: attachment.filename,
-        folderPath: "",
-        status: "PROCESSING",
-        driveConnectionId,
-      },
-    });
-    return { type: "retry", filingId: processingFiling.id };
-  } catch (claimError) {
-    if (!isDuplicateError(claimError, DUPLICATE_FILING_FIELDS)) {
-      throw claimError;
-    }
-
-    const claimedFiling = await findAttachmentFiling(attachmentLookup);
-    if (!claimedFiling) throw claimError;
-
-    logger.info("Attachment was claimed by another filing process", {
-      filingId: claimedFiling.id,
-      status: claimedFiling.status,
-    });
-
-    return claimOrResolveExistingFiling(claimedFiling, logger);
-  }
-}
-
-async function claimOrResolveExistingFiling(
-  filing: AttachmentFiling,
-  logger: Logger,
-): Promise<ExistingFilingDecision> {
-  logger.info("Attachment already has a filing record", {
-    filingId: filing.id,
-    status: filing.status,
-  });
-
-  if (filing.status === "ERROR") {
-    const claim = await prisma.documentFiling.updateMany({
-      where: {
-        id: filing.id,
-        status: "ERROR",
-      },
-      data: {
-        status: "PROCESSING",
-        reasoning: null,
-        updatedAt: new Date(),
-      },
-    });
-
-    if (claim.count === 1) {
-      logger.info("Retrying attachment after previous filing error", {
-        filingId: filing.id,
-      });
-      return { type: "retry", filingId: filing.id };
-    }
-
-    return alreadyProcessing(filing.id);
-  }
-
-  if (filing.status === "PREVIEW") {
-    return { type: "return", result: getExistingFilingResult(filing) };
-  }
-
-  if (filing.status === "PROCESSING") {
-    const staleCutoff = new Date(Date.now() - PROCESSING_FILING_STALE_MS);
-
-    if (filing.updatedAt <= staleCutoff) {
-      const claim = await prisma.documentFiling.updateMany({
-        where: {
-          id: filing.id,
-          status: "PROCESSING",
-          updatedAt: { lte: staleCutoff },
-        },
-        data: {
-          reasoning: null,
-          updatedAt: new Date(),
-        },
-      });
-
-      if (claim.count === 1) {
-        logger.info("Retrying stale attachment filing claim", {
-          filingId: filing.id,
-        });
-        return { type: "retry", filingId: filing.id };
-      }
-    }
-
-    return alreadyProcessing(filing.id);
-  }
-
-  return { type: "return", result: getExistingFilingResult(filing) };
-}
-
-function alreadyProcessing(filingId: string): ExistingFilingDecision {
-  return {
-    type: "return",
-    result: {
-      success: false,
-      error: "Attachment is already being filed",
-      filingId,
-    },
-  };
-}
-
-function isClaimableFiling(filing: AttachmentFiling) {
-  return filing.status === "ERROR" || filing.status === "PROCESSING";
-}
-
-function getExistingFilingResult(
-  filing: AttachmentFiling,
-  logger?: Logger,
-): FilingResult {
-  logger?.info("Attachment already has a filing record", {
-    filingId: filing.id,
-    status: filing.status,
-  });
-
-  if (filing.status === "PREVIEW") {
-    return {
-      success: false,
-      skipped: true,
-      skipReason:
-        filing.reasoning || "Document doesn't match filing preferences",
-      filingId: filing.id,
-    };
-  }
-
-  return {
-    success: true,
-    filing: {
-      id: filing.id,
-      filename: filing.filename,
-      folderPath: filing.folderPath,
-      fileId: filing.fileId,
-      wasAsked: filing.wasAsked,
-      confidence: filing.confidence,
-      provider: filing.driveConnection.provider,
-    },
-    filingId: filing.id,
-  };
 }
 
 function resolveFolderTarget(

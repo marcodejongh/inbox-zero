@@ -12,6 +12,8 @@ Actions:
 - "move": User wants the document in a different folder. We will move the file to the path they specify.
 - "undo": User wants to reverse the filing. We will move the file to a "To Delete" folder for them to review.
 
+Paperless filings have no folders. For a pending Paperless filing, approve means upload and undo means skip. For an already filed Paperless document, approve means feedback only; organization and removal must be done in Paperless. Never propose a move or undo action for an already saved Paperless document. Describe a requested pending approval as starting processing, not as completed filing.
+
 Return at most one action per filing. Use only filing IDs from the provided list. If the user names documents, act only on those documents. If their reply clearly applies to every document, return an action for each one. If it is ambiguous which document they mean, return no actions and ask them to identify it.
 
 Always write a helpful, concise reply.`;
@@ -36,8 +38,10 @@ export type ParseFilingReplyResult = z.infer<typeof schema>;
 
 interface FilingContext {
   currentFolder: string;
+  destination?: "cloud" | "paperless";
   filename: string;
   id: string;
+  status?: string;
 }
 
 type Message = { role: "user" | "assistant"; content: string };
@@ -65,6 +69,8 @@ ${filingContexts
     (filing) => `<filing id="${filing.id}">
 Document: ${JSON.stringify(filing.filename)}
 Current folder: ${JSON.stringify(filing.currentFolder)}
+Destination: ${JSON.stringify(filing.destination || "cloud")}
+Status: ${JSON.stringify(filing.status || "FILED")}
 </filing>`,
   )
   .join("\n")}

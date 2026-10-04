@@ -97,6 +97,7 @@ export async function sendDocumentFiledToSlack({
   driveProvider,
   senderEmail,
   fileId,
+  webUrl,
 }: SlackDocumentFiledParams): Promise<void> {
   const client = createSlackClient(accessToken);
   const blocks = buildDocumentFiledBlocks({
@@ -105,6 +106,7 @@ export async function sendDocumentFiledToSlack({
     driveProvider,
     senderEmail,
     fileId,
+    webUrl,
   });
 
   await postMessageWithJoin(client, channelId, {
@@ -124,13 +126,21 @@ export async function sendDocumentAskToSlack({
   filename,
   reasoning,
   senderEmail,
+  paperless,
 }: SlackDocumentAskParams): Promise<void> {
   const client = createSlackClient(accessToken);
-  const blocks = buildDocumentAskBlocks({ filename, reasoning, senderEmail });
+  const blocks = buildDocumentAskBlocks({
+    filename,
+    reasoning,
+    senderEmail,
+    paperless,
+  });
 
   await postMessageWithJoin(client, channelId, {
     blocks,
-    text: `📄 Where should I file ${filename}?`,
+    text: paperless
+      ? `📄 Save ${filename} to Paperless?`
+      : `📄 Where should I file ${filename}?`,
   });
 }
 

@@ -3,6 +3,7 @@
 import { useOpenedConversationAttachments } from "./OpenedConversationAttachments";
 import Image from "next/image";
 import { useEffect, useState, useRef } from "react";
+import { SaveToPaperless } from "@/components/drive/SaveToPaperless";
 import { Button } from "@/components/ui/button";
 import { DownloadIcon, ImageIcon, Loader2 } from "lucide-react";
 import type { ThreadMessage } from "@/components/email-list/types";
@@ -133,6 +134,11 @@ export function EmailAttachments({ message }: { message: ThreadMessage }) {
                 >
                   {mimeTypeToString(attachment.mimeType)}
                 </div>
+                <SaveToPaperless
+                  key={`${emailAccountId}:${message.id}:${attachment.attachmentId}`}
+                  messageId={message.id}
+                  attachment={attachment}
+                />
                 <Button
                   variant="outline"
                   size="iconSm"

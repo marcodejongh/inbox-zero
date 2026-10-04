@@ -70,6 +70,7 @@ export type CreateDriveFolderBody = z.infer<typeof createDriveFolderBody>;
 export const fileAttachmentBody = z.object({
   messageId: z.string(),
   filename: z.string(),
+  attachmentId: z.string().optional(),
 });
 export type FileAttachmentBody = z.infer<typeof fileAttachmentBody>;
 

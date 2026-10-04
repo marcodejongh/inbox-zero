@@ -250,6 +250,7 @@ const parsedEnv = createEnv({
     // Defaults to false. Only enable on a trusted, single-tenant self-hosted
     // deployment — never on a shared/multi-tenant instance.
     WEBHOOK_ALLOW_PRIVATE_IPS: booleanString.optional().default(false),
+    PAPERLESS_ALLOW_PRIVATE_IPS: booleanString.optional().default(false),
     DIGEST_MAX_SUMMARIES_PER_24H: z.coerce
       .number()
       .int()

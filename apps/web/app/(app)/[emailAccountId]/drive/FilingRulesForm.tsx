@@ -34,6 +34,7 @@ export function FilingRulesForm({
         <FilingRulesFormContent
           emailAccountId={emailAccountId}
           initialPrompt={data.filingPrompt || ""}
+          paperless={data.filingDestination === "paperless"}
           mutateEmail={mutate}
         />
       )}
@@ -45,10 +46,12 @@ function FilingRulesFormContent({
   emailAccountId,
   initialPrompt,
   mutateEmail,
+  paperless,
 }: {
   emailAccountId: string;
   initialPrompt: string;
   mutateEmail: () => void;
+  paperless: boolean;
 }) {
   const {
     register,
@@ -82,14 +85,22 @@ function FilingRulesFormContent({
     <Card size="sm">
       <CardHeader>
         <CardTitle>Filing rules</CardTitle>
-        <CardDescription>How should we organize your files?</CardDescription>
+        <CardDescription>
+          {paperless
+            ? "Which attachments should we save?"
+            : "How should we organize your files?"}
+        </CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
           <Input
             type="textarea"
             name="filingPrompt"
-            placeholder="Receipts go to Expenses by month. Contracts go to Legal."
+            placeholder={
+              paperless
+                ? "Save receipts and invoices. Skip marketing material."
+                : "Receipts go to Expenses by month. Contracts go to Legal."
+            }
             registerProps={register("filingPrompt")}
             error={errors.filingPrompt}
             autosizeTextarea

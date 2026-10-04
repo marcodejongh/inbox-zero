@@ -53,10 +53,11 @@ async function getAttachmentsData({
     select: {
       id: true,
       filingPrompt: true,
+      filingDestination: true,
       filingFolders: { select: { id: true } },
       driveConnections: {
         where: { isConnected: true },
-        select: { id: true },
+        select: { id: true, provider: true },
       },
     },
   });
@@ -71,11 +72,20 @@ async function getAttachmentsData({
     );
   }
 
-  if (emailAccount.filingFolders.length === 0) {
+  if (
+    emailAccount.filingDestination !== "paperless" &&
+    emailAccount.filingFolders.length === 0
+  ) {
     throw new SafeError("Please select at least one folder before previewing");
   }
 
-  if (emailAccount.driveConnections.length === 0) {
+  if (
+    !emailAccount.driveConnections.some((connection) =>
+      emailAccount.filingDestination === "paperless"
+        ? connection.provider === "paperless"
+        : connection.provider !== "paperless",
+    )
+  ) {
     throw new SafeError("No connected drives found");
   }
 

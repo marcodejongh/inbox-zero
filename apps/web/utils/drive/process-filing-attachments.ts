@@ -32,7 +32,9 @@ export async function processAttachmentsForFiling({
 
     if (
       result?.filing &&
-      (result.filing.wasAsked || emailAccount.filingConfirmationSendEmail)
+      (result.filing.wasAsked ||
+        (result.filing.status !== "PROCESSING" &&
+          emailAccount.filingConfirmationSendEmail))
     ) {
       filingIds.push(result.filing.id);
     }

@@ -21,6 +21,7 @@ async function getData({ emailAccountId }: { emailAccountId: string }) {
       id: true,
       email: true,
       provider: true,
+      baseUrl: true,
       isConnected: true,
       createdAt: true,
     },

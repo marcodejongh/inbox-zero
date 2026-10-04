@@ -31,7 +31,7 @@ async function getData({
     where: { id: emailAccountId },
     select: {
       driveConnections: {
-        where: { isConnected: true },
+        where: { isConnected: true, provider: { in: ["google", "microsoft"] } },
       },
       filingFolders: {
         select: {
