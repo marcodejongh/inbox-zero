@@ -16,6 +16,7 @@ import { PaperlessClient, PaperlessHttpError } from "./client";
 import { analyzePaperlessAttachment } from "./analyze";
 import { isPaperlessAttachment } from "./attachments";
 import { SafeError } from "@/utils/error";
+import { lockPaperlessConnection } from "./lock";
 
 export async function processPaperlessAttachment({
   attachment,
@@ -165,7 +166,10 @@ export async function processPaperlessAttachment({
               ? "PENDING"
               : "PROCESSING",
         wasAsked: shouldAsk,
-        paperlessNotifyOnCompletion: !manual || !!existing?.wasAsked,
+        paperlessNotifyOnCompletion:
+          !manual ||
+          !!existing?.wasAsked ||
+          !!existing?.paperlessNotifyOnCompletion,
         ...(manual && existing?.wasAsked
           ? { notificationBatchId: null, notificationSentAt: null }
           : {}),
@@ -283,16 +287,33 @@ async function submitPaperlessUpload({
     connection.accessToken || "",
   );
   // Persist before POST: a process crash or lost response must never trigger a blind re-upload.
-  const uploadClaim = await prisma.documentFiling.updateMany({
-    where: {
-      id: filingId,
-      status: "PROCESSING",
-      paperlessTaskId: null,
-      paperlessUploadStartedAt: null,
-    },
-    data: { paperlessUploadStartedAt: new Date() },
-  });
-  if (!uploadClaim.count) return false;
+  const [, uploadClaim] = await prisma.$transaction([
+    lockPaperlessConnection(connection.emailAccountId),
+    prisma.documentFiling.updateMany({
+      where: {
+        id: filingId,
+        status: "PROCESSING",
+        paperlessTaskId: null,
+        paperlessUploadStartedAt: null,
+        driveConnection: { baseUrl: connection.baseUrl, isConnected: true },
+      },
+      data: { paperlessUploadStartedAt: new Date() },
+    }),
+  ]);
+  if (!uploadClaim.count) {
+    const currentConnection = await prisma.driveConnection.findUnique({
+      where: { id: connection.id },
+      select: { baseUrl: true, isConnected: true },
+    });
+    if (
+      !currentConnection?.isConnected ||
+      currentConnection.baseUrl !== connection.baseUrl
+    )
+      throw new SafeError(
+        "The Paperless connection changed before upload. Retry this attachment.",
+      );
+    return false;
+  }
   try {
     const taskId = await client.upload({
       content,

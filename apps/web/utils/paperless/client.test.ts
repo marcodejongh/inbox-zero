@@ -137,6 +137,37 @@ describe("Paperless API", () => {
       "rejected the API token",
     );
   });
+  it.each([
+    true,
+    false,
+  ])("bounds API bodies with declared length %s", async (declared) => {
+    request.mockResolvedValue(
+      new Response("x".repeat(1024 * 1024 + 1), {
+        headers: declared ? { "content-length": String(1024 * 1024 + 1) } : {},
+      }),
+    );
+    await expect(client().getTask(taskId)).rejects.toThrow(
+      "oversized API response",
+    );
+  });
+  it("cancels a streaming response as soon as it crosses the size limit", async () => {
+    const cancel = vi.fn();
+    request.mockResolvedValue(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(700_000));
+            controller.enqueue(new Uint8Array(700_000));
+          },
+          cancel,
+        }),
+      ),
+    );
+    await expect(client().getTask(taskId)).rejects.toThrow(
+      "oversized API response",
+    );
+    expect(cancel).toHaveBeenCalledOnce();
+  });
   it("treats network errors as a safe connectivity error", async () => {
     request.mockRejectedValue(new Error("secret-token transport error"));
     await expect(client().getTask(taskId)).rejects.toThrow(

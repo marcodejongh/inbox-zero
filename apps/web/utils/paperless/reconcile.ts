@@ -87,7 +87,6 @@ export async function reconcilePaperlessFilings(logger: Logger) {
                 where: { id: filing.id },
                 data: {
                   status: "ERROR",
-                  paperlessNotifyOnCompletion: false,
                   paperlessUploadStartedAt: null,
                   errorMessage:
                     "Paperless could not consume this document. Check its task log and file support.",

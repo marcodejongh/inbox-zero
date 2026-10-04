@@ -9,6 +9,8 @@ import { createTestLogger } from "@/__tests__/helpers";
 import { createPaperlessEmulator } from "@/__tests__/emulators/paperless";
 import { processPaperlessAttachment } from "@/utils/paperless/filing";
 import { reconcilePaperlessFilings } from "@/utils/paperless/reconcile";
+import { connectPaperless } from "@/utils/paperless/connections";
+import { PaperlessClient } from "@/utils/paperless/client";
 import {
   createMockEmailProvider,
   getMockParsedMessage,
@@ -165,6 +167,121 @@ describe.skipIf(!process.env.RUN_DB_TESTS)(
         data: { isConnected: false, accessToken: null },
       });
       expect(await prisma.documentFiling.count({ where: lookup })).toBe(1);
+    });
+    it("changes an idle connection URL while retaining encrypted credentials", async () => {
+      const emulator = await createPaperlessEmulator();
+      try {
+        await connectPaperless({
+          emailAccountId,
+          baseUrl: emulator.baseUrl,
+          apiToken: emulator.token,
+        });
+        const connection = await prisma.driveConnection.findUniqueOrThrow({
+          where: { id: connectionId },
+        });
+        expect(connection.baseUrl).toBe(emulator.baseUrl);
+        expect(connection.accessToken).toBe(emulator.token);
+      } finally {
+        await emulator.close();
+      }
+    });
+    it("blocks a URL change when an accepted upload arrives during connection validation", async () => {
+      const validate = vi
+        .spyOn(PaperlessClient.prototype, "validateConnection")
+        .mockImplementationOnce(async () => {
+          await prisma.documentFiling.create({
+            data: {
+              emailAccountId,
+              driveConnectionId: connectionId,
+              messageId: "racing-message",
+              attachmentId: "attachment",
+              filename: "receipt.pdf",
+              folderPath: "Paperless",
+              status: "PROCESSING",
+              paperlessTaskId: "accepted-task",
+              paperlessUploadStartedAt: new Date(),
+            },
+          });
+        });
+      try {
+        await expect(
+          connectPaperless({
+            emailAccountId,
+            baseUrl: "https://new.example.com",
+            apiToken: "new-token",
+          }),
+        ).rejects.toThrow("Resolve pending");
+        const connection = await prisma.driveConnection.findUniqueOrThrow({
+          where: { id: connectionId },
+        });
+        expect(connection.baseUrl).toBe("https://paperless.example.com");
+        expect(
+          (
+            await prisma.documentFiling.findFirstOrThrow({
+              where: { emailAccountId },
+            })
+          ).paperlessTaskId,
+        ).toBe("accepted-task");
+      } finally {
+        validate.mockRestore();
+      }
+    });
+    it("does not upload using a cached connection after its URL changes", async () => {
+      const emulator = await createPaperlessEmulator();
+      const staleConnection = await prisma.driveConnection.findUniqueOrThrow({
+        where: { id: connectionId },
+      });
+      try {
+        await connectPaperless({
+          emailAccountId,
+          baseUrl: emulator.baseUrl,
+          apiToken: emulator.token,
+        });
+        const lookup = vi
+          .spyOn(prisma.driveConnection, "findUnique")
+          .mockResolvedValueOnce(staleConnection);
+        try {
+          const emailAccount = await prisma.emailAccount.findUniqueOrThrow({
+            where: { id: emailAccountId },
+            include: { user: true, account: { select: { provider: true } } },
+          });
+          const emailProvider = createMockEmailProvider();
+          vi.mocked(emailProvider.getAttachment).mockResolvedValue({
+            data: Buffer.from("original bytes").toString("base64"),
+            size: 14,
+          });
+          const result = await processPaperlessAttachment({
+            emailAccount,
+            emailProvider,
+            logger: createTestLogger(),
+            message: getMockParsedMessage(),
+            manual: true,
+            attachment: {
+              attachmentId: "attachment",
+              filename: "receipt.pdf",
+              mimeType: "application/pdf",
+              size: 14,
+              headers: {
+                "content-description": "",
+                "content-id": "",
+                "content-transfer-encoding": "base64",
+                "content-type": "application/pdf",
+              },
+            },
+          });
+          expect(result.error).toContain("connection changed");
+          expect(emulator.uploads).toHaveLength(0);
+          const filing = await prisma.documentFiling.findFirstOrThrow({
+            where: { emailAccountId },
+          });
+          expect(filing.status).toBe("ERROR");
+          expect(filing.paperlessUploadStartedAt).toBeNull();
+        } finally {
+          lookup.mockRestore();
+        }
+      } finally {
+        await emulator.close();
+      }
     });
     it("persists one upload across concurrent manual saves and task reconciliation", async () => {
       const emulator = await createPaperlessEmulator();

@@ -14,6 +14,9 @@ vi.mock("./client", async (original) => ({
 describe("Paperless connection isolation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prisma.$transaction.mockImplementation(
+      async (operations) => Promise.all(operations as any) as any,
+    );
     validate.mockResolvedValue(undefined);
     prisma.driveConnection.findUnique.mockResolvedValue(null);
     prisma.emailAccount.findUniqueOrThrow.mockResolvedValue({
@@ -37,12 +40,12 @@ describe("Paperless connection isolation", () => {
     });
     expect(prisma.driveConnection.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: {
+        where: expect.objectContaining({
           emailAccountId_provider: {
             emailAccountId: "mailbox-a",
             provider: "paperless",
           },
-        },
+        }),
       }),
     );
     expect(prisma.emailAccount.update).not.toHaveBeenCalled();

@@ -11,6 +11,7 @@ import {
 const fetchPaperless = createSafeHttpFetch(
   () => env.PAPERLESS_ALLOW_PRIVATE_IPS,
 );
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 const taskSchema = z.object({
   task_id: z.string(),
   status: z.string(),
@@ -177,8 +178,33 @@ export class PaperlessClient {
   }
   private async readJson(response: Awaited<ReturnType<typeof fetchPaperless>>) {
     try {
-      return await response.json();
-    } catch {
+      if (Number(response.headers.get("content-length")) > MAX_RESPONSE_BYTES) {
+        await response.body?.cancel();
+        throw new SafeError("Paperless returned an oversized API response.");
+      }
+      if (!response.body) throw new Error("Empty response");
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > MAX_RESPONSE_BYTES) {
+            await reader.cancel();
+            throw new SafeError(
+              "Paperless returned an oversized API response.",
+            );
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch (error) {
+      if (error instanceof SafeError) throw error;
       throw new SafeError("Paperless returned an unsupported API response.");
     }
   }

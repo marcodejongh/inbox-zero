@@ -70,8 +70,12 @@ function options() {
 describe("Paperless filing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prisma.$transaction.mockImplementation(
+      async (operations) => Promise.all(operations as any) as any,
+    );
     prisma.driveConnection.findUnique.mockResolvedValue({
       id: "paperless-1",
+      emailAccountId: "mailbox-a",
       provider: "paperless",
       isConnected: true,
       baseUrl: "https://paperless.example.com",
@@ -107,6 +111,10 @@ describe("Paperless filing", () => {
           status: "PROCESSING",
           paperlessTaskId: null,
           paperlessUploadStartedAt: null,
+          driveConnection: {
+            baseUrl: "https://paperless.example.com",
+            isConnected: true,
+          },
         },
         data: { paperlessUploadStartedAt: expect.any(Date) },
       }),
@@ -171,6 +179,23 @@ describe("Paperless filing", () => {
         .success,
     ).toBe(false);
     expect(upload).not.toHaveBeenCalled();
+  });
+  it("preserves completion notifications when retrying an automatic filing manually", async () => {
+    prisma.documentFiling.findFirst.mockResolvedValue({
+      id: "existing",
+      status: "ERROR",
+      updatedAt: new Date(),
+      wasAsked: false,
+      paperlessNotifyOnCompletion: true,
+      driveConnection: { provider: "paperless" },
+    } as any);
+    await processPaperlessAttachment({ ...options(), manual: true });
+    expect(upload).toHaveBeenCalledOnce();
+    expect(prisma.documentFiling.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ paperlessNotifyOnCompletion: true }),
+      }),
+    );
   });
   it("keeps a confirmation pending when its email cannot be delivered", async () => {
     vi.mocked(analyzePaperlessAttachment).mockResolvedValue({

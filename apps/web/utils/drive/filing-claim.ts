@@ -40,6 +40,7 @@ export function findAttachmentFiling({
       webUrl: true,
       paperlessTaskId: true,
       paperlessUploadStartedAt: true,
+      paperlessNotifyOnCompletion: true,
       errorMessage: true,
       status: true,
       updatedAt: true,
