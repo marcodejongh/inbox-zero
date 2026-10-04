@@ -177,6 +177,37 @@ describe("Fastmail mail operations", () => {
     ).resolves.toMatchObject({ status: "paused" });
   });
 
+  it("continues thread paging after the anchor email left the result set", async () => {
+    const { provider, calls, request } = createProvider();
+    await provider.getLabels();
+    request.mockRejectedValueOnce(
+      new SafeError("JMAP error: anchorNotFound - Anchor not in results"),
+    );
+
+    const page = await provider.getThreadsWithQuery({
+      query: { type: "inbox", isUnread: true },
+      maxResults: 25,
+      pageToken: "anchor:processed",
+    });
+
+    expect(page.threads).toHaveLength(1);
+    const query = calls.filter(([name]) => name === "Email/query").at(-1);
+    expect(query?.[1]).toMatchObject({
+      position: 0,
+      filter: {
+        operator: "AND",
+        conditions: [
+          {
+            operator: "AND",
+            conditions: [{ notKeyword: "$seen" }, { inMailbox: "inbox" }],
+          },
+          { before: "2026-10-01T12:00:01.000Z" },
+        ],
+      },
+    });
+    expect(query?.[1]).not.toHaveProperty("anchor");
+  });
+
   it("only reports a send after submission succeeds", async () => {
     const { provider, calls } = createProvider();
     await expect(

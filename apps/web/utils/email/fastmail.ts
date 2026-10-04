@@ -2347,14 +2347,29 @@ export class FastmailProvider implements EmailProvider {
     pageToken?: string;
   }): Promise<{ threads: EmailThread[]; nextPageToken?: string }> {
     const query = options.query ?? {};
+    const filter = await this.threadFilter(query);
+    const maxResults = options.maxResults ?? query.limit ?? undefined;
     const page = await this.queryEmails(
-      await this.threadFilter(query),
-      {
-        ...options,
-        maxResults: options.maxResults ?? query.limit ?? undefined,
-      },
+      filter,
+      { ...options, maxResults },
       true,
-    );
+    ).catch(async (error: unknown) => {
+      if (!(error instanceof InvalidMailboxSyncCursorError)) throw error;
+      // Rules archive or mark the anchor email read between pages, which drops
+      // it from the filtered results. Resume from its date instead.
+      const anchor = (
+        await this.getMessagesBatch([options.pageToken!.slice(7)])
+      )[0];
+      if (!anchor?.internalDate) throw error;
+      // `before` is exclusive; the extra second keeps unseen emails received
+      // in the same second, at the cost of repeating ones already returned.
+      const before = new Date(Number(anchor.internalDate) + 1000).toISOString();
+      return this.queryEmails(
+        { operator: "AND", conditions: [filter, { before }] },
+        { maxResults },
+        true,
+      );
+    });
     return {
       threads: await Promise.all(
         page.messages.map((message) =>
