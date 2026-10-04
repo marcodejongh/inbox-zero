@@ -102,6 +102,117 @@ test("reconnects with a rotated token, catches up on connection, and stops clean
   }
 });
 
+test("backs off across short-lived connections and recovers after a stable stream", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  context.mock.method(Math, "random", () => 0);
+  let controller: ReadableStreamDefaultController<Uint8Array>;
+  let connections = 0;
+  context.mock.method(globalThis, "fetch", async () => {
+    connections++;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(value) {
+          controller = value;
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  });
+  const client = new FastmailEventSourceClient({
+    accessToken: "token",
+    accountId: "account",
+    emailAccountId: "local",
+    eventSourceUrl: "https://api.fastmail.com/events",
+    onStateChange: () => {},
+  });
+  try {
+    client.connect();
+    await settle();
+    for (const delay of [
+      1000, 2000, 4000, 8000, 16_000, 32_000, 64_000, 128_000, 256_000, 300_000,
+      300_000,
+    ]) {
+      context.mock.timers.tick(2000);
+      controller!.close();
+      await settle();
+      const before = connections;
+      context.mock.timers.tick(delay - 1);
+      await settle();
+      assert.equal(connections, before, "must wait for the growing backoff");
+      context.mock.timers.tick(1);
+      await settle();
+      assert.equal(connections, before + 1);
+    }
+
+    context.mock.timers.tick(60_000);
+    controller!.close();
+    await settle();
+    const before = connections;
+    context.mock.timers.tick(1000);
+    await settle();
+    assert.equal(connections, before + 1, "a stable stream resets the backoff");
+
+    controller!.close();
+    await settle();
+    client.close();
+    context.mock.timers.tick(300_000);
+    await settle();
+    assert.equal(connections, before + 1, "shutdown cancels a pending retry");
+  } finally {
+    client.close();
+  }
+});
+
+test("handles server close events without waiting for EOF or reporting a network error", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  context.mock.method(Math, "random", () => 0);
+  let controller: ReadableStreamDefaultController<Uint8Array>;
+  let connections = 0;
+  let errors = 0;
+  let disconnected = 0;
+  context.mock.method(globalThis, "fetch", async () => {
+    connections++;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(value) {
+          controller = value;
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  });
+  const client = new FastmailEventSourceClient({
+    accessToken: "token",
+    accountId: "account",
+    emailAccountId: "local",
+    eventSourceUrl: "https://api.fastmail.com/events",
+    onStateChange: () => {},
+    onError: () => {
+      errors++;
+    },
+    onDisconnected: () => {
+      disconnected++;
+    },
+  });
+  try {
+    client.connect();
+    await settle();
+    controller!.enqueue(new TextEncoder().encode("event: close\ndata: {}\n\n"));
+    await settle();
+    assert.equal(client.isConnected(), false);
+    assert.equal(disconnected, 1);
+    assert.equal(errors, 0);
+    controller!.close();
+    await settle();
+    context.mock.timers.tick(1000);
+    await settle();
+    assert.equal(connections, 2, "a server close schedules only one reconnect");
+    assert.equal(errors, 0);
+  } finally {
+    client.close();
+  }
+});
+
 function settle() {
   return new Promise<void>((resolve) => setImmediate(resolve));
 }

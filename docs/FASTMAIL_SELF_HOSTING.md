@@ -22,6 +22,10 @@ Open Calendars → Add Fastmail Calendar and supply your Fastmail email plus a s
 
 Fastmail notifications use **Server-Sent Events**, not WebSockets. The daemon consumes the JMAP session's EventSource URL, refreshes account tokens every minute, and requests synchronization on connection and Email state changes. A webhook acknowledges only after BullMQ accepts its job. No public incoming webhook or daemon database connection is needed.
 
+Run only one active listener for a given Fastmail API token. Concurrent listeners sharing a token can displace each other's streams. When moving between development and production, stop the previous deployment's listener before starting the new one.
+
+Repeated short-lived connections use exponential retry delays capped at five minutes. The retry delay resets only after a connection stays open for at least one minute, or when its token changes. Reconnect logs distinguish server-requested closes, transport errors, and heartbeat timeouts, and include the connection duration and next delay. Recovery polling continues independently when push delivery is unavailable.
+
 A separate cron poll enqueues all connected Fastmail accounts every five minutes, including accounts without AI rules. The web worker holds an account lease, commits discovered message IDs and the JMAP state in one transaction, then processes pending messages. Failures remain pending for retry. Expired history triggers a bounded recovery scan from the account's automation start date. This provides at-least-once processing: external effects cannot be made exactly-once across a provider/network failure. Check Sent before manually retrying an ambiguous send.
 
 Assistant settings → Email Sync shows the latest successful check and pending/retry counts. “Check for new mail” queues an immediate recovery job. If counts persist, inspect web/worker logs and verify Redis and internal authentication. The daemon logs connection counts without message contents or tokens.
