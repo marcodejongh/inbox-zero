@@ -1,115 +1,97 @@
 import { NextResponse } from "next/server";
+import { resolveNativeThreadsQuery } from "@/utils/split-inbox/native-categories";
 import { withEmailProvider } from "@/utils/middleware";
-import { type ThreadsQuery, threadsQuery } from "@/app/api/threads/validation";
-import { isDefined } from "@/utils/types";
-import prisma from "@/utils/prisma";
-import { isIgnoredSender } from "@/utils/filter-ignored-senders";
-import type { EmailProvider } from "@/utils/email/types";
-
-export const dynamic = "force-dynamic";
+import { threadsQuery, threadsView } from "@/utils/threads/validation";
+import { loadThreads, toListThreads } from "@/utils/threads/load";
 
 export const maxDuration = 30;
 
-export const GET = withEmailProvider("threads", async (request) => {
-  const { emailProvider } = request;
-  const { emailAccountId } = request.auth;
+export const GET = withEmailProvider(
+  "threads",
+  async (request) => {
+    const { emailProvider } = request;
+    const { emailAccountId } = request.auth;
 
-  const { searchParams } = new URL(request.url);
-  const limit = searchParams.get("limit");
-  const fromEmail = searchParams.get("fromEmail");
-  const type = searchParams.get("type");
-  const nextPageToken = searchParams.get("nextPageToken");
-  const q = searchParams.get("q");
-  const labelId = searchParams.get("labelId");
-  const after = searchParams.get("after");
-  const before = searchParams.get("before");
-  const isUnread = searchParams.get("isUnread");
+    const { searchParams } = new URL(request.url);
+    const limit = searchParams.get("limit");
+    const fromEmail = searchParams.get("fromEmail");
+    const type = searchParams.get("type");
+    const folderId = searchParams.get("folderId");
+    const rawInboxSection = searchParams.get("inboxSection");
+    const inboxSection =
+      rawInboxSection === "focused" || rawInboxSection === "other"
+        ? rawInboxSection
+        : undefined;
+    const category =
+      searchParams.get("category") ??
+      (rawInboxSection && !inboxSection ? rawInboxSection : undefined);
+    const nextPageToken = searchParams.get("nextPageToken");
+    const q = searchParams.get("q");
+    const labelId = searchParams.get("labelId");
+    const readLabelIds = (key: string) =>
+      searchParams
+        .getAll(key)
+        .flatMap((value) => value.split(","))
+        .map((labelId) => labelId.trim())
+        .filter(Boolean);
+    const labelIds = readLabelIds("labelIds");
+    const anyLabelIds = readLabelIds("anyLabelIds");
+    const after = searchParams.get("after");
+    const before = searchParams.get("before");
+    const isUnread = searchParams.get("isUnread");
+    const anyOf = searchParams.get("anyOf");
+    const view = threadsView.parse(searchParams.get("view"));
 
-  const query = threadsQuery.parse({
-    limit,
-    fromEmail,
-    type,
-    nextPageToken,
-    q,
-    labelId,
-    after,
-    before,
-    isUnread,
-  });
-
-  try {
-    const threads = await getThreads({
-      query,
-      emailAccountId,
-      emailProvider,
+    const query = threadsQuery.parse({
+      limit,
+      fromEmail,
+      type,
+      folderId,
+      inboxSection,
+      category,
+      splitId: searchParams.get("splitId"),
+      nextPageToken,
+      q,
+      labelId,
+      labelIds: labelIds.length ? labelIds : undefined,
+      anyLabelIds: anyLabelIds.length ? anyLabelIds : undefined,
+      after,
+      before,
+      isUnread,
+      anyOf,
+      excludeSplits: searchParams.get("excludeSplits"),
     });
-    return NextResponse.json(threads);
-  } catch (error) {
-    request.logger.error("Error fetching threads", { error, emailAccountId });
-    return NextResponse.json(
-      { error: "Failed to fetch threads" },
-      { status: 500 },
-    );
-  }
-});
 
-export type ThreadsResponse = Awaited<ReturnType<typeof getThreads>>;
-
-async function getThreads({
-  query,
-  emailAccountId,
-  emailProvider,
-}: {
-  query: ThreadsQuery;
-  emailAccountId: string;
-  emailProvider: EmailProvider;
-}) {
-  // Get threads using the provider
-  const { threads, nextPageToken } = await emailProvider.getThreadsWithQuery({
-    query,
-    maxResults: query.limit || 50,
-    pageToken: query.nextPageToken || undefined,
-  });
-
-  const threadIds = threads.map((t) => t.id);
-  const plans = await prisma.executedRule.findMany({
-    where: {
-      emailAccountId,
-      threadId: { in: threadIds },
-    },
-    select: {
-      id: true,
-      messageId: true,
-      threadId: true,
-      rule: true,
-      actionItems: true,
-      status: true,
-      reason: true,
-    },
-  });
-
-  // Process threads with plans and categories
-  const threadsWithPlans = await Promise.all(
-    threads.map(async (thread) => {
-      const plan = plans.find((p) => p.threadId === thread.id);
-
-      // Filter out ignored senders from the already parsed messages
-      const filteredMessages = thread.messages.filter((message) => {
-        if (!message.headers?.from) return true; // Keep messages without from field
-        return !isIgnoredSender(message.headers.from);
+    try {
+      const resolved = await resolveNativeThreadsQuery({
+        emailAccountId,
+        emailProvider,
+        query,
       });
+      const threads = await loadThreads({
+        query: resolved,
+        emailAccountId,
+        emailProvider,
+        messageFormat: view === "list" ? "metadata" : "full",
+      });
+      return NextResponse.json(
+        view === "list" ? toListThreads(threads) : threads,
+      );
+    } catch (error) {
+      request.logger.error("Error fetching threads", {
+        error,
+        emailAccountId,
+      });
+      return NextResponse.json(
+        { error: "Failed to fetch threads" },
+        { status: 500 },
+      );
+    }
+  },
+  { requestTiming: {} },
+);
 
-      return {
-        id: thread.id,
-        messages: filteredMessages,
-        snippet: thread.snippet,
-        plan,
-      };
-    }),
-  );
+export type ThreadsResponse = Awaited<ReturnType<typeof loadThreads>>;
 
-  return {
-    threads: threadsWithPlans.filter(isDefined),
-    nextPageToken,
-  };
-}
+/** Slim rows for the mail list: `?view=list`. No message bodies or attachments. */
+export type ThreadsListResponse = ReturnType<typeof toListThreads>;

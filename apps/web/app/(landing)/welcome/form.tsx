@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type SubmitHandler, useForm } from "react-hook-form";
 import { useRouter, useSearchParams } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
@@ -15,6 +15,7 @@ import {
 } from "@/utils/actions/onboarding";
 import { useOnboardingAnalytics } from "@/hooks/useAnalytics";
 import { useSignUpEvent } from "@/hooks/useSignupEvent";
+import { usePremium } from "@/hooks/usePremium";
 
 const surveyId = env.NEXT_PUBLIC_POSTHOG_ONBOARDING_SURVEY_ID;
 
@@ -27,14 +28,32 @@ export const OnboardingForm = (props: { questionIndex: number }) => {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [showOtherInput, setShowOtherInput] = useState(false);
+  const { isPremium } = usePremium();
 
   const analytics = useOnboardingAnalytics("welcome");
+  const hasTrackedStart = useRef(false);
 
   useSignUpEvent();
 
   useEffect(() => {
-    analytics.onStart();
-  }, [analytics]);
+    const currentQuestion = survey.questions[questionIndex];
+
+    if (questionIndex === 0 && !hasTrackedStart.current) {
+      hasTrackedStart.current = true;
+      analytics.onStart({
+        step: questionIndex + 1,
+        stepKey: currentQuestion.key,
+        totalSteps: survey.questions.length,
+      });
+    }
+
+    analytics.onStepViewed({
+      step: questionIndex + 1,
+      stepKey: currentQuestion.key,
+      totalSteps: survey.questions.length,
+      isOptional: Boolean(currentQuestion.skippable),
+    });
+  }, [analytics, questionIndex]);
 
   const {
     register,
@@ -51,13 +70,23 @@ export const OnboardingForm = (props: { questionIndex: number }) => {
       : (`$survey_response_${questionIndex}` as const);
 
   const isFinalQuestion = questionIndex === survey.questions.length - 1;
+  const currentQuestion = survey.questions[questionIndex];
 
   const submitPosthog = useCallback(
     (responses: Properties) => {
-      analytics.onComplete();
+      analytics.onComplete({
+        step: questionIndex + 1,
+        stepKey: currentQuestion.key,
+        totalSteps: survey.questions.length,
+        destination: isPremium ? "setup" : "welcome-upgrade",
+      });
+      // Index-based `$survey_response` / `$survey_response_N` keys — legacy PostHog
+      // format still supported. Migrating to ID-based keys needs question UUIDs from
+      // the PostHog survey and would break historical response mapping.
+      if (!surveyId) return;
       posthog.capture("survey sent", { ...responses, $survey_id: surveyId });
     },
-    [posthog, analytics],
+    [posthog, analytics, questionIndex, currentQuestion.key, isPremium],
   );
 
   const onSubmit: SubmitHandler<Inputs> = useCallback(
@@ -76,7 +105,20 @@ export const OnboardingForm = (props: { questionIndex: number }) => {
       newSeachParams.set("question", (questionIndex + 1).toString());
       newSeachParams.set(name, answer);
 
-      analytics.onNext(questionIndex + 1);
+      const stepProperties = {
+        step: questionIndex + 1,
+        stepKey: currentQuestion.key,
+        totalSteps: survey.questions.length,
+        nextStep: isFinalQuestion ? undefined : questionIndex + 2,
+        nextStepKey: survey.questions[questionIndex + 1]?.key,
+        isOptional: Boolean(currentQuestion.skippable),
+      };
+
+      if (!answer && currentQuestion.skippable) {
+        analytics.onSkip(stepProperties);
+      } else {
+        analytics.onNext(stepProperties);
+      }
 
       const responses = getResponses(newSeachParams);
       await saveOnboardingAnswersAction({
@@ -90,7 +132,11 @@ export const OnboardingForm = (props: { questionIndex: number }) => {
         submitPosthog(responses);
         await completedOnboardingAction();
 
-        router.push("/welcome-upgrade");
+        if (isPremium) {
+          router.push("/setup");
+        } else {
+          router.push("/welcome-upgrade");
+        }
       } else {
         router.push(`/welcome?${newSeachParams}`);
       }
@@ -104,10 +150,13 @@ export const OnboardingForm = (props: { questionIndex: number }) => {
       setValue,
       isFinalQuestion,
       analytics,
+      currentQuestion.key,
+      currentQuestion.skippable,
+      isPremium,
     ],
   );
 
-  const question = survey.questions[questionIndex];
+  const question = currentQuestion;
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="flex justify-center">
@@ -182,52 +231,10 @@ export const OnboardingForm = (props: { questionIndex: number }) => {
             {question.skippable ? "Skip" : "Next"}
           </Button>
         )}
-
-        {/* {!isFinalQuestion && (
-          <SkipOnboardingButton
-            searchParams={searchParams}
-            submitPosthog={submitPosthog}
-            posthog={posthog}
-            router={router}
-          />
-        )} */}
       </div>
     </form>
   );
 };
-
-// function SkipOnboardingButton({
-//   searchParams,
-//   submitPosthog,
-//   posthog,
-//   router,
-// }: {
-//   searchParams: URLSearchParams;
-//   submitPosthog: (responses: Properties) => void;
-//   posthog: PostHog;
-//   router: AppRouterInstance;
-// }) {
-//   // // A/B test whether to show skip onboarding button
-//   // if (posthog.getFeatureFlag("show-skip-onboarding-button") === "hide")
-//   //   return null;
-
-//   return (
-//     <Button
-//       variant="ghost"
-//       className="mt-8"
-//       type="button"
-//       onClick={async () => {
-//         const responses = getResponses(searchParams);
-//         submitPosthog(responses);
-//         posthog.capture("survey dismissed", { $survey_id: surveyId });
-//         await completedOnboardingAction();
-//         router.push("/setup");
-//       }}
-//     >
-//       Skip Onboarding
-//     </Button>
-//   );
-// }
 
 function getResponses(seachParams: URLSearchParams): Record<string, string> {
   const responses = survey.questions.reduce(

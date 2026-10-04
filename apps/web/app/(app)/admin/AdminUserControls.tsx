@@ -1,5 +1,6 @@
 "use client";
 
+import { type ChangeEvent, useState } from "react";
 import { useAction } from "next-safe-action/hooks";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
@@ -12,11 +13,23 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import {
   adminDeleteAccountAction,
   adminProcessHistoryAction,
+  adminWatchEmailsAction,
+  adminDisableAllRulesAction,
+  adminCleanupDraftsAction,
+  adminLoadResponseTimeDataAction,
+  adminSyncAppleSubscriptionForUserAction,
+  adminSyncStripeForUserAction,
 } from "@/utils/actions/admin";
 import { adminCheckPermissionsAction } from "@/utils/actions/permissions";
 import { toastError, toastSuccess } from "@/components/Toast";
+import { getActionErrorMessage } from "@/utils/error";
 
 export const AdminUserControls = () => {
+  const [responseTimeMaxSentMessages, setResponseTimeMaxSentMessages] =
+    useState(500);
+  const [appleOriginalTransactionId, setAppleOriginalTransactionId] =
+    useState("");
+
   const { execute: processHistory, isExecuting: isProcessing } = useAction(
     adminProcessHistoryAction,
     {
@@ -50,7 +63,118 @@ export const AdminUserControls = () => {
         console.error(error);
         toastError({
           title: "Error checking permissions",
-          description: error.error.serverError ?? "Unknown error",
+          description: getActionErrorMessage(error.error),
+        });
+      },
+    });
+  const { execute: watchEmails, isExecuting: isWatching } = useAction(
+    adminWatchEmailsAction,
+    {
+      onSuccess: (result) => {
+        const results = result.data?.results || [];
+        const successCount = results.filter(
+          (r) => r.status === "success",
+        ).length;
+        const errorCount = results.filter((r) => r.status === "error").length;
+        const description =
+          successCount > 0
+            ? `${successCount} succeeded, ${errorCount} failed`
+            : errorCount > 0
+              ? `0 succeeded, ${errorCount} failed`
+              : "No watchable email accounts found";
+        toastSuccess({
+          title: "Watch completed",
+          description,
+        });
+      },
+      onError: (error) => {
+        toastError({
+          title: "Error watching emails",
+          description: getActionErrorMessage(error.error),
+        });
+      },
+    },
+  );
+  const { execute: syncStripe, isExecuting: isSyncingStripe } = useAction(
+    adminSyncStripeForUserAction,
+    {
+      onSuccess: (result) => {
+        toastSuccess({
+          title: "Stripe synced",
+          description: `Status: ${result.data?.stripeSubscriptionStatus ?? "none"}`,
+        });
+      },
+      onError: (error) => {
+        toastError({
+          title: "Error syncing Stripe",
+          description: getActionErrorMessage(error.error),
+        });
+      },
+    },
+  );
+  const { execute: syncApple, isExecuting: isSyncingApple } = useAction(
+    adminSyncAppleSubscriptionForUserAction,
+    {
+      onSuccess: (result) => {
+        toastSuccess({
+          title: "Apple synced",
+          description: `Status: ${result.data?.appleSubscriptionStatus ?? "none"}; tier: ${result.data?.tier ?? "none"}`,
+        });
+      },
+      onError: (error) => {
+        toastError({
+          title: "Error syncing Apple",
+          description: getActionErrorMessage(error.error),
+        });
+      },
+    },
+  );
+  const { execute: disableRules, isExecuting: isDisablingRules } = useAction(
+    adminDisableAllRulesAction,
+    {
+      onSuccess: (result) => {
+        toastSuccess({
+          title: "Rules disabled",
+          description: `Disabled rules and follow-up for ${result.data?.emailAccountCount} account(s)`,
+        });
+      },
+      onError: (error) => {
+        toastError({
+          title: "Error disabling rules",
+          description: getActionErrorMessage(error.error),
+        });
+      },
+    },
+  );
+  const { execute: cleanupDrafts, isExecuting: isCleaningDrafts } = useAction(
+    adminCleanupDraftsAction,
+    {
+      onSuccess: (result) => {
+        toastSuccess({
+          title: "Drafts cleaned up",
+          description: `Deleted ${result.data?.deleted ?? 0} draft(s), skipped ${result.data?.skippedModified ?? 0} modified`,
+        });
+      },
+      onError: (error) => {
+        toastError({
+          title: "Error cleaning up drafts",
+          description: getActionErrorMessage(error.error),
+        });
+      },
+    },
+  );
+  const { execute: loadResponseTimes, isExecuting: isLoadingResponseTimes } =
+    useAction(adminLoadResponseTimeDataAction, {
+      onSuccess: (result) => {
+        toastSuccess({
+          title: "Response times loaded",
+          description: `Analyzed ${result.data?.emailsAnalyzed ?? 0} email(s) with a cap of ${result.data?.maxEmailsCap ?? responseTimeMaxSentMessages}`,
+        });
+      },
+      onError: (error) => {
+        toastError({
+          title: "Error loading response times",
+          description: getActionErrorMessage(error.error),
         });
       },
     });
@@ -63,10 +187,10 @@ export const AdminUserControls = () => {
           description: "User deleted",
         });
       },
-      onError: () => {
+      onError: (error) => {
         toastError({
           title: "Error deleting user",
-          description: "Error deleting user",
+          description: getActionErrorMessage(error.error),
         });
       },
     },
@@ -89,7 +213,31 @@ export const AdminUserControls = () => {
         registerProps={register("email", { required: true })}
         error={errors.email}
       />
-      <div className="flex gap-2">
+      <Input
+        type="number"
+        name="responseTimeMaxSentMessages"
+        label="Response time sent messages"
+        min={1}
+        max={2000}
+        step={50}
+        registerProps={{
+          value: responseTimeMaxSentMessages,
+          onChange: (event: ChangeEvent<HTMLInputElement>) =>
+            setResponseTimeMaxSentMessages(Number(event.target.value)),
+        }}
+      />
+      <Input
+        type="text"
+        name="appleOriginalTransactionId"
+        label="Apple original transaction ID"
+        placeholder="200000000000000"
+        registerProps={{
+          value: appleOriginalTransactionId,
+          onChange: (event: ChangeEvent<HTMLInputElement>) =>
+            setAppleOriginalTransactionId(event.target.value),
+        }}
+      />
+      <div className="flex flex-wrap gap-2">
         <Button
           variant="outline"
           loading={isProcessing}
@@ -107,6 +255,68 @@ export const AdminUserControls = () => {
           }}
         >
           Check Permissions
+        </Button>
+        <Button
+          variant="outline"
+          loading={isWatching}
+          onClick={() => {
+            watchEmails({ email: getValues("email") });
+          }}
+        >
+          Watch
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          loading={isSyncingStripe}
+          onClick={() => {
+            syncStripe({ email: getValues("email") });
+          }}
+        >
+          Sync Stripe
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          loading={isSyncingApple}
+          onClick={() => {
+            syncApple({
+              email: getValues("email"),
+              transactionId: appleOriginalTransactionId,
+            });
+          }}
+        >
+          Sync Apple
+        </Button>
+        <Button
+          variant="outline"
+          loading={isDisablingRules}
+          onClick={() => {
+            disableRules({ email: getValues("email") });
+          }}
+        >
+          Disable Rules
+        </Button>
+        <Button
+          variant="outline"
+          loading={isCleaningDrafts}
+          onClick={() => {
+            cleanupDrafts({ email: getValues("email") });
+          }}
+        >
+          Cleanup Drafts
+        </Button>
+        <Button
+          variant="outline"
+          loading={isLoadingResponseTimes}
+          onClick={() => {
+            loadResponseTimes({
+              email: getValues("email"),
+              maxSentMessages: responseTimeMaxSentMessages,
+            });
+          }}
+        >
+          Load Response Times
         </Button>
         <Button
           variant="destructive"

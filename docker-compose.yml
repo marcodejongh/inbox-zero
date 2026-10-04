@@ -3,7 +3,10 @@ services:
   db:
     image: postgres:16
     restart: always
-    container_name: inbox-zero
+    # container_name: inbox-zero
+    env_file:
+      - path: ${INBOX_ZERO_ENV_FILE:-./apps/web/.env}
+        required: false
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_DB=${POSTGRES_DB:-inboxzero}
@@ -16,7 +19,7 @@ services:
     volumes:
       - database-data:/var/lib/postgresql/data/
     ports:
-      - ${POSTGRES_PORT:-5432}:5432
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     networks:
       - inbox-zero-network
     profiles:
@@ -26,7 +29,7 @@ services:
   redis:
     image: redis:7
     ports:
-      - ${REDIS_PORT:-6380}:6379
+      - "${REDIS_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6380}:6379"
     volumes:
       - database-data:/data
     networks:
@@ -38,13 +41,14 @@ services:
 
   serverless-redis-http:
     ports:
-      - "${REDIS_HTTP_PORT:-8079}:80"
+      - "${REDIS_HTTP_BIND_HOST:-127.0.0.1}:${REDIS_HTTP_PORT:-8079}:80"
     image: hiett/serverless-redis-http:latest
     env_file:
-      - ./apps/web/.env
+      - path: ${INBOX_ZERO_ENV_FILE:-./apps/web/.env}
+        required: false
     environment:
       SRH_MODE: env
-      SRH_TOKEN: ${UPSTASH_REDIS_TOKEN}
+      SRH_TOKEN: ${REDIS_HTTP_TOKEN:-${UPSTASH_REDIS_TOKEN}}
       SRH_CONNECTION_STRING: "redis://redis:6379" # Using `redis` hostname since they're in the same Docker network.
     networks:
       - inbox-zero-network
@@ -54,9 +58,11 @@ services:
       - all
 
   web:
-    image: ghcr.io/elie222/inbox-zero:latest
+    image: ${INBOX_ZERO_IMAGE:-ghcr.io/marcodejongh/inbox-zero:latest}
+    pull_policy: always
     env_file:
-      - ./apps/web/.env
+      - path: ${INBOX_ZERO_ENV_FILE:-./apps/web/.env}
+        required: false
     depends_on:
       db:
         condition: service_healthy
@@ -72,40 +78,120 @@ services:
       NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:-http://localhost:3000}
       NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS: ${NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS:-true}
       NEXT_PUBLIC_EMAIL_SEND_ENABLED: ${NEXT_PUBLIC_EMAIL_SEND_ENABLED:-true}
+      NEXT_PUBLIC_AI_MODEL_SETTINGS_DISABLED: ${NEXT_PUBLIC_AI_MODEL_SETTINGS_DISABLED:-false}
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-inboxzero}?schema=public}
       DIRECT_URL: ${DIRECT_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-inboxzero}?schema=public}
-      UPSTASH_REDIS_URL: ${UPSTASH_REDIS_URL:-http://serverless-redis-http:80}
+      REDIS_HTTP_URL: ${REDIS_HTTP_URL:-${UPSTASH_REDIS_URL:-http://serverless-redis-http:80}}
       INTERNAL_API_URL: ${INTERNAL_API_URL:-http://web:3000}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      QUEUE_BACKEND: bullmq
     restart: always
+
+  worker:
+    image: ${INBOX_ZERO_IMAGE:-ghcr.io/marcodejongh/inbox-zero:latest}
+    pull_policy: always
+    command: ["/app/docker/scripts/start-worker.sh"]
+    env_file:
+      - path: ${INBOX_ZERO_ENV_FILE:-./apps/web/.env}
+        required: false
+    depends_on:
+      web:
+        condition: service_started
+      redis:
+        condition: service_started
+        required: false
+    networks:
+      - inbox-zero-network
+    environment:
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://web:3000}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      QUEUE_BACKEND: bullmq
+    restart: always
+
+  fastmail-daemon:
+    image: ${FASTMAIL_DAEMON_IMAGE:-ghcr.io/marcodejongh/inbox-zero-fastmail-daemon:latest}
+    build:
+      context: .
+      dockerfile: apps/fastmail-eventsource-daemon/Dockerfile
+    environment:
+      MAIN_APP_URL: http://web:3000
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      FASTMAIL_WEBHOOK_SECRET: ${FASTMAIL_WEBHOOK_SECRET}
+    depends_on:
+      - web
+    networks:
+      - inbox-zero-network
+    restart: always
+    profiles:
+      - fastmail
+      - all
 
   cron:
     image: alpine:latest
     command: >
       sh -c "
-        apk add --no-cache curl &&
-        WATCH_INTERVAL=21600 &&
-        MEETING_BRIEFS_INTERVAL=900 &&
-        LAST_WATCH=0 &&
-        while true; do
-          NOW=$$(date +%s)
-          
-          # Meeting briefs: every 15 minutes
-          echo \"[cron] Processing meeting briefs...\"
-          curl -s -X GET 'http://web:3000/api/meeting-briefs' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: meeting-briefs request failed\"
-          
-          # Email watch renewal: every 6 hours
-          if [ $$((NOW - LAST_WATCH)) -ge $$WATCH_INTERVAL ]; then
+        apk add --no-cache curl && {
+        (
+          while true; do
+            echo \"[cron] Processing scheduled actions...\"
+            curl -s -X GET 'http://web:3000/api/cron/scheduled-actions' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: scheduled-actions request failed\"
+            sleep 900
+          done
+        ) &
+        (
+          while true; do
+            echo \"[cron] Processing automation jobs...\"
+            curl -s -X GET 'http://web:3000/api/cron/automation-jobs' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: automation-jobs request failed\"
+            sleep 900
+          done
+        ) &
+        (
+          while true; do
+            echo \"[cron] Processing follow-up reminders...\"
+            curl -s -X GET 'http://web:3000/api/follow-up-reminders' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: follow-up-reminders request failed\"
+            sleep 3600
+          done
+        ) &
+        (
+          while true; do
+            echo \"[cron] Processing digest emails...\"
+            curl -s -X GET 'http://web:3000/api/resend/digest/all' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: digest request failed\"
+            sleep 1800
+          done
+        ) &
+        (
+          while true; do
+            echo \"[cron] Processing meeting briefs...\"
+            curl -s -X GET 'http://web:3000/api/meeting-briefs' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: meeting-briefs request failed\"
+            sleep 900
+          done
+        ) &
+        (
+          while true; do
+            echo \"[cron] Scheduling meeting recorder bots...\"
+            curl -s -X GET 'http://web:3000/api/meeting-recorder/schedule' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: meeting-recorder request failed\"
+            sleep 300
+          done
+        ) &
+        (
+          while true; do
             echo \"[cron] Renewing email watches...\"
             curl -s -X GET 'http://web:3000/api/watch/all' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Warning: watch request failed\"
-            LAST_WATCH=$$NOW
-          fi
-          
-          echo \"[cron] Sleeping for 15 minutes...\"
-          sleep $$MEETING_BRIEFS_INTERVAL
-        done
+            sleep 21600
+          done
+        ) &
+        (
+          while true; do
+            curl -fsS --max-time 60 'http://web:3000/api/fastmail/poll' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[cron] Fastmail recovery request failed\"
+            sleep 300
+          done
+        ) &
+        wait
+        }
       "
     env_file:
-      - ./apps/web/.env
+      - path: ${INBOX_ZERO_ENV_FILE:-./apps/web/.env}
+        required: false
     depends_on:
       - web
     networks:

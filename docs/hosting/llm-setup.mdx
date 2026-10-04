@@ -1,0 +1,135 @@
+---
+title: 'LLM'
+description: 'Configure your AI provider via environment variables'
+---
+
+For self-hosting, configure AI through environment variables in `apps/web/.env`.
+If you used `inbox-zero setup`, many of these values are configured automatically.
+
+Start here:
+
+- [Environment Variables](/hosting/environment-variables) (full reference)
+
+<Warning>
+  API keys require billing credits on the provider's platform. A ChatGPT Plus or Claude Pro subscription does **not** include API access.
+</Warning>
+
+## Providers
+
+Use one of these provider values before the colon in `*_LLMS` entries:
+
+| Provider | Value |
+|---|---|
+| [OpenAI](https://platform.openai.com/docs/overview) | `openai` |
+| [Anthropic](https://docs.anthropic.com/en/docs/welcome) | `anthropic` |
+| [Azure OpenAI](https://ai-sdk.dev/providers/ai-sdk-providers/azure) | `azure` |
+| Azure AI Foundry | `azure-foundry` |
+| [Google Gemini (AI Studio)](https://ai.google.dev/gemini-api/docs) | `google` |
+| [Google Vertex AI](https://ai-sdk.dev/providers/ai-sdk-providers/google-vertex) | `vertex` |
+| [OpenRouter](https://openrouter.ai/docs/quickstart) | `openrouter` |
+| [Groq](https://console.groq.com/docs/quickstart) | `groq` |
+| [Cerebras](https://inference-docs.cerebras.ai/quickstart) | `cerebras` |
+| [Vercel AI Gateway](https://ai-sdk.dev/providers/ai-sdk-providers/ai-gateway) | `aigateway` |
+| [AWS Bedrock](https://ai-sdk.dev/providers/ai-sdk-providers/amazon-bedrock) | `bedrock` |
+| [Ollama](https://ollama.com/) | `ollama` |
+| OpenAI-compatible (LM Studio, vLLM, LiteLLM, etc.) | `openai-compatible` |
+| Codex CLI (experimental, self-host only) | `codex-cli` |
+| Claude Code (experimental, self-host only) | `claude-code` |
+
+## Tiers
+
+For most self-hosted setups, configure the default tier and optionally override cheaper or role-specific tiers:
+
+- `DEFAULT_LLMS` (required): normal AI tasks.
+- `ECONOMY_LLMS` (optional): lower-cost model for high-volume tasks. If unset, it falls back to default.
+- `CHAT_LLMS` (optional): assistant chat. If unset, it falls back to default.
+- `DRAFT_LLMS` (optional): reply drafting. If unset, it falls back to default.
+- `NANO_LLMS` (optional): lightweight classification and extraction. If unset, it falls back to economy/default behavior.
+
+Each value is an ordered comma-separated list in `provider:model` format. The first valid entry is the primary model. Later valid entries are ordered fallbacks. Model names can contain colons; only the first colon separates the provider from the model.
+
+Minimal example:
+
+```env
+DEFAULT_LLMS=openai:gpt-6-luna
+ECONOMY_LLMS=openai:gpt-6-luna
+LLM_API_KEY=sk-...
+```
+
+Provider-specific keys (for example `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) also work. See [Environment Variables](/hosting/environment-variables) for the full list.
+
+## App Settings
+
+The app also has **Settings → AI** for per-user keys/models, but self-hosted deployments usually keep configuration at the environment-variable level.
+
+## Sensitive Data Protection
+
+Self-hosted deployments can choose how LLM requests handle sensitive data matches before they are sent to an AI provider. The current scanner targets likely credentials/tokens and payment-card-like numbers; it is not a full DLP or PHI classifier.
+
+```env
+SENSITIVE_DATA_POLICY_DEFAULT=ALLOW # ALLOW, REDACT, or BLOCK
+NEXT_PUBLIC_SENSITIVE_DATA_POLICY_LOCKED=false
+```
+
+`ALLOW` preserves the default behavior. `REDACT` replaces matched values before the LLM request. `BLOCK` stops the request when a match is found. Leave `NEXT_PUBLIC_SENSITIVE_DATA_POLICY_LOCKED=false` to let users choose per account in Settings, or set it to `true` to enforce the deployment default for all accounts and hide the setting from the UI.
+
+## Provider-specific details
+
+- `azure-foundry` requires `AZURE_FOUNDRY_API_KEY` and `AZURE_FOUNDRY_BASE_URL`. Use the deployment name as the model portion of the `azure-foundry:<deployment>` entry.
+- `cerebras` uses `CEREBRAS_API_KEY` (or `LLM_API_KEY`) against `https://api.cerebras.ai/v1`. Example chat model: `CHAT_LLMS=cerebras:qwen-3.8-27b`.
+- `openai-compatible` also requires `OPENAI_COMPATIBLE_BASE_URL`. Set `OPENAI_COMPATIBLE_AUTH_HEADER=api-key` when the server expects an `api-key` header instead of bearer authorization. This can point at Cerebras (`https://api.cerebras.ai/v1`) if you do not want the dedicated provider, but then you cannot also use a local OpenAI-compatible server.
+- `ollama` can use `OLLAMA_BASE_URL` and `OLLAMA_MODEL`.
+
+## Fallbacks
+
+Add fallbacks by adding more entries to the same role list:
+
+```env
+DEFAULT_LLMS=openrouter:anthropic/claude-sonnet-5,openai:gpt-6-luna
+ECONOMY_LLMS=openrouter:openai/gpt-6-luna,google:gemini-3.1-flash-lite
+CHAT_LLMS=openrouter:anthropic/claude-haiku-4.5,openai:gpt-6-luna
+```
+
+Unsupported providers, entries without configured credentials, entries without models, and duplicates are skipped with warnings.
+
+### Legacy variables
+
+The old `DEFAULT_LLM_PROVIDER` / `DEFAULT_LLM_MODEL`, role-specific `*_LLM_PROVIDER` / `*_LLM_MODEL`, and `*_LLM_FALLBACKS` variables are deprecated but still supported for existing deployments. At startup, they are converted into the corresponding `*_LLMS` value. New deployments and CLI-generated env files should use `*_LLMS`.
+
+### CLI LLM providers
+
+`codex-cli` and `claude-code` are experimental self-host options. They use
+third-party community AI SDK provider packages that spawn local CLI tools, so
+they are disabled unless `CLI_LLM_ENABLED=true`.
+
+Use them only on trusted self-hosted deployments. Review the provider package
+source, pin exact package versions, and make sure you comply with the relevant
+OpenAI or Anthropic terms for your authentication method.
+
+Codex example:
+
+```bash
+cd apps/web
+pnpm add ai-sdk-provider-codex-cli@1.1.0
+pnpm add -g @openai/codex
+codex login
+```
+
+```env
+CLI_LLM_ENABLED=true
+DEFAULT_LLMS=codex-cli:gpt-5.3-codex
+CODEX_CLI_ALLOW_NPX=false
+```
+
+Claude Code example:
+
+```bash
+cd apps/web
+pnpm add ai-sdk-provider-claude-code@4.3.1
+claude auth login
+```
+
+```env
+CLI_LLM_ENABLED=true
+DEFAULT_LLMS=claude-code:sonnet
+```

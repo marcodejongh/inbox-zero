@@ -4,6 +4,8 @@ import { withEmailAccount } from "@/utils/middleware";
 import { getConditions } from "@/utils/condition";
 import { hasVariables } from "@/utils/template";
 import { SafeError } from "@/utils/error";
+import type { AttachmentSourceInput } from "@/utils/attachments/source-schema";
+import type { IntegrationActionArgs } from "@/utils/actions/rule.validation";
 
 export type RuleResponse = Awaited<ReturnType<typeof getRule>>;
 
@@ -15,9 +17,10 @@ async function getRule({
   emailAccountId: string;
 }) {
   const rule = await prisma.rule.findUnique({
-    where: { id: ruleId, emailAccount: { id: emailAccountId } },
+    where: { id: ruleId, emailAccountId },
     include: {
       actions: true,
+      attachmentSources: true,
     },
   });
 
@@ -40,7 +43,17 @@ async function getRule({
       url: { value: action.url },
       folderName: { value: action.folderName },
       folderId: { value: action.folderId },
+      staticAttachments: Array.isArray(action.staticAttachments)
+        ? (action.staticAttachments as AttachmentSourceInput[])
+        : undefined,
+      integrationArgs:
+        action.integrationArgs &&
+        typeof action.integrationArgs === "object" &&
+        !Array.isArray(action.integrationArgs)
+          ? (action.integrationArgs as IntegrationActionArgs)
+          : undefined,
     })),
+    attachmentSources: rule.attachmentSources,
     conditions: getConditions(rule),
   };
 

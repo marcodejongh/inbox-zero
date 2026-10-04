@@ -1,40 +1,21 @@
 import { NextResponse } from "next/server";
-import { withError } from "@/utils/middleware";
-import { validateApiKeyAndGetEmailProvider } from "@/utils/api-auth";
-import { getEmailAccountId } from "@/app/api/v1/helpers";
+import { withStatsApiKey } from "@/utils/api-middleware";
 import { getStatsByPeriod } from "@/app/api/user/stats/by-period/controller";
 import { statsByPeriodQuerySchema } from "./validation";
+import { createPublicApiMethodNotAllowedHandler } from "@/utils/public-api-error";
 
-export const GET = withError("v1/stats/by-period", async (request) => {
-  const { userId, accountId } =
-    await validateApiKeyAndGetEmailProvider(request);
+export const POST = createPublicApiMethodNotAllowedHandler(["GET"]);
+export const PUT = createPublicApiMethodNotAllowedHandler(["GET"]);
+export const PATCH = createPublicApiMethodNotAllowedHandler(["GET"]);
+export const DELETE = createPublicApiMethodNotAllowedHandler(["GET"]);
 
+export const GET = withStatsApiKey("v1/stats/by-period", async (request) => {
+  const { emailAccountId } = request.apiAuth;
   const { searchParams } = new URL(request.url);
-  const queryResult = statsByPeriodQuerySchema.safeParse(
+  const query = statsByPeriodQuerySchema.parse(
     Object.fromEntries(searchParams),
   );
-
-  if (!queryResult.success) {
-    return NextResponse.json(
-      { error: "Invalid query parameters" },
-      { status: 400 },
-    );
-  }
-
-  const { period, fromDate, toDate, email } = queryResult.data;
-
-  const emailAccountId = await getEmailAccountId({
-    email,
-    accountId,
-    userId,
-  });
-
-  if (!emailAccountId) {
-    return NextResponse.json(
-      { error: "Email account not found" },
-      { status: 400 },
-    );
-  }
+  const { period, fromDate, toDate } = query;
 
   const result = await getStatsByPeriod({
     period,

@@ -1,0 +1,298 @@
+import { withThreadPageBufferDeletion } from "@/utils/redis/thread-page-buffer";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@/generated/prisma/client";
+import { createTestLogger } from "@/__tests__/helpers";
+import prisma from "@/utils/__mocks__/prisma";
+import { deleteAccountUploadDirectory } from "@/utils/mail-api/upload-blobs";
+import { deleteUser } from "@/utils/user/delete";
+import { deleteTinybirdEmailData } from "@inboxzero/tinybird";
+import { createEmailProvider } from "@/utils/email/provider";
+
+vi.mock("@/utils/prisma");
+vi.mock("@/utils/mail-api/upload-blobs", () => ({
+  deleteAccountUploadDirectory: vi.fn(() => Promise.resolve()),
+}));
+vi.mock("@/utils/redis/thread-page-buffer", () => ({
+  withThreadPageBufferDeletion: vi.fn(async (_ids, operation) => operation()),
+}));
+vi.mock("@inboxzero/loops", () => ({
+  deleteContact: vi.fn(),
+}));
+vi.mock("@inboxzero/transactional-email", () => ({
+  deleteContact: vi.fn(),
+}));
+vi.mock("@inboxzero/tinybird", () => ({
+  deleteTinybirdEmailData: vi.fn(() => Promise.resolve()),
+}));
+vi.mock("@/utils/posthog", () => ({
+  deletePosthogUser: vi.fn(() => Promise.resolve()),
+  trackUserDeleted: vi.fn(() => Promise.resolve()),
+  trackUserDeletionRequested: vi.fn(() => Promise.resolve()),
+}));
+vi.mock("@/utils/email/watch-manager", () => ({
+  unwatchEmails: vi.fn(),
+}));
+vi.mock("@/utils/email/provider", () => ({
+  createEmailProvider: vi.fn(),
+}));
+vi.mock("@/utils/redis/research-cache", () => ({
+  clearCachedResearchForUser: vi.fn(() => Promise.resolve()),
+}));
+
+const logger = createTestLogger();
+
+describe("deleteUser", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prisma.member.findMany.mockResolvedValue([]);
+  });
+
+  it("does not delete a user when their email accounts own an organization with remaining members", async () => {
+    prisma.account.findMany.mockResolvedValue([
+      {
+        provider: "google",
+        access_token: null,
+        refresh_token: null,
+        expires_at: null,
+        emailAccount: {
+          id: "email-account-1",
+          email: "owner@example.com",
+          watchEmailsSubscriptionId: null,
+        },
+      },
+    ] as Awaited<ReturnType<typeof prisma.account.findMany>>);
+    prisma.member.findMany.mockResolvedValue([
+      { organizationId: "org-1" },
+    ] as Awaited<ReturnType<typeof prisma.member.findMany>>);
+    prisma.organization.findMany.mockResolvedValue([
+      {
+        id: "org-1",
+        name: "Org",
+        members: [
+          { emailAccountId: "email-account-1", role: "owner" },
+          { emailAccountId: "email-account-2", role: "member" },
+        ],
+      },
+    ] as Awaited<ReturnType<typeof prisma.organization.findMany>>);
+
+    await expect(deleteUser({ userId: "user-1", logger })).rejects.toThrow(
+      "Transfer organization ownership before deleting your account.",
+    );
+
+    expect(prisma.session.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.user.deleteMany).not.toHaveBeenCalled();
+    expect(deleteAccountUploadDirectory).not.toHaveBeenCalled();
+  });
+
+  it("keeps Tinybird data when deleting the user fails", async () => {
+    prisma.account.findMany.mockResolvedValue([
+      {
+        provider: "google",
+        access_token: null,
+        refresh_token: null,
+        expires_at: null,
+        emailAccount: {
+          id: "email-account-1",
+          email: "owner@example.com",
+          watchEmailsSubscriptionId: null,
+        },
+      },
+    ] as Awaited<ReturnType<typeof prisma.account.findMany>>);
+    prisma.executedRule.findMany.mockResolvedValue([]);
+    prisma.user.deleteMany.mockRejectedValue(new Error("database unavailable"));
+
+    await expect(deleteUser({ userId: "user-1", logger })).rejects.toThrow(
+      "database unavailable",
+    );
+    expect(deleteTinybirdEmailData).not.toHaveBeenCalled();
+  });
+
+  it("deletes solo organizations before deleting the user", async () => {
+    prisma.account.findMany.mockResolvedValue([
+      {
+        provider: "google",
+        access_token: null,
+        refresh_token: null,
+        expires_at: null,
+        emailAccount: {
+          id: "email-account-1",
+          email: "owner@example.com",
+          watchEmailsSubscriptionId: null,
+        },
+      },
+    ] as Awaited<ReturnType<typeof prisma.account.findMany>>);
+    prisma.member.findMany.mockResolvedValue([
+      { organizationId: "org-1" },
+    ] as Awaited<ReturnType<typeof prisma.member.findMany>>);
+    prisma.organization.findMany.mockResolvedValue([
+      {
+        id: "org-1",
+        name: "Org",
+        members: [{ emailAccountId: "email-account-1", role: "owner" }],
+      },
+    ] as Awaited<ReturnType<typeof prisma.organization.findMany>>);
+    prisma.executedRule.findMany.mockResolvedValue([]);
+    prisma.user.deleteMany.mockResolvedValue({ count: 1 } as any);
+
+    await deleteUser({ userId: "user-1", logger });
+    expect(deleteTinybirdEmailData).toHaveBeenCalledWith(["owner@example.com"]);
+    expect(withThreadPageBufferDeletion).toHaveBeenCalledWith(
+      ["email-account-1"],
+      expect.any(Function),
+    );
+
+    expect(prisma.organization.deleteMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["org-1"] },
+        members: {
+          every: {
+            emailAccountId: { in: ["email-account-1"] },
+          },
+        },
+      },
+    });
+    expect(prisma.session.deleteMany).toHaveBeenCalledWith({
+      where: { userId: "user-1" },
+    });
+    expect(prisma.user.deleteMany).toHaveBeenCalledWith({
+      where: { id: "user-1" },
+    });
+    expect(deleteAccountUploadDirectory).toHaveBeenCalledWith(
+      "email-account-1",
+    );
+  });
+
+  it("deletes a user when a revoked token prevents provider creation", async () => {
+    prisma.account.findMany.mockResolvedValue([
+      {
+        provider: "google",
+        access_token: "expired-token",
+        refresh_token: null,
+        expires_at: null,
+        emailAccount: {
+          id: "email-account-1",
+          email: "user@example.com",
+          watchEmailsSubscriptionId: null,
+        },
+      },
+    ] as Awaited<ReturnType<typeof prisma.account.findMany>>);
+    vi.mocked(createEmailProvider).mockRejectedValue(
+      new Error("invalid_grant"),
+    );
+    prisma.executedRule.findMany.mockResolvedValue([]);
+    prisma.user.deleteMany.mockResolvedValue({ count: 1 } as any);
+
+    await deleteUser({ userId: "user-1", logger });
+
+    expect(prisma.user.deleteMany).toHaveBeenCalledWith({
+      where: { id: "user-1" },
+    });
+  });
+
+  it("deletes ownerless solo organizations before deleting the user", async () => {
+    prisma.account.findMany.mockResolvedValue([
+      {
+        provider: "google",
+        access_token: null,
+        refresh_token: null,
+        expires_at: null,
+        emailAccount: {
+          id: "email-account-1",
+          email: "admin@example.com",
+          watchEmailsSubscriptionId: null,
+        },
+      },
+    ] as Awaited<ReturnType<typeof prisma.account.findMany>>);
+    prisma.member.findMany.mockImplementation(async (args) => {
+      const roleFilter = (
+        args as Parameters<typeof prisma.member.findMany>[0] | undefined
+      )?.where?.role;
+
+      return (roleFilter ? [] : [{ organizationId: "org-1" }]) as Awaited<
+        ReturnType<typeof prisma.member.findMany>
+      >;
+    });
+    prisma.organization.findMany.mockResolvedValue([
+      {
+        id: "org-1",
+        name: "Org",
+        members: [{ emailAccountId: "email-account-1", role: "admin" }],
+      },
+    ] as Awaited<ReturnType<typeof prisma.organization.findMany>>);
+    prisma.executedRule.findMany.mockResolvedValue([]);
+    prisma.user.deleteMany.mockResolvedValue({ count: 1 } as any);
+
+    await deleteUser({ userId: "user-1", logger });
+
+    expect(prisma.organization.deleteMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["org-1"] },
+        members: {
+          every: {
+            emailAccountId: { in: ["email-account-1"] },
+          },
+        },
+      },
+    });
+    expect(prisma.user.deleteMany).toHaveBeenCalledWith({
+      where: { id: "user-1" },
+    });
+  });
+
+  it("surfaces the ownership transfer message when the database rejects a raced user deletion", async () => {
+    prisma.account.findMany.mockResolvedValue([
+      {
+        provider: "google",
+        access_token: null,
+        refresh_token: null,
+        expires_at: null,
+        emailAccount: {
+          id: "email-account-1",
+          email: "owner@example.com",
+          watchEmailsSubscriptionId: null,
+        },
+      },
+    ] as Awaited<ReturnType<typeof prisma.account.findMany>>);
+    prisma.executedRule.findMany.mockResolvedValue([]);
+    prisma.user.deleteMany.mockRejectedValue(
+      new Error("organization_must_have_owner"),
+    );
+
+    await expect(deleteUser({ userId: "user-1", logger })).rejects.toThrow(
+      "Transfer organization ownership before deleting your account.",
+    );
+    expect(deleteAccountUploadDirectory).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the ownership transfer message when membership blocks raced user deletion", async () => {
+    prisma.account.findMany.mockResolvedValue([
+      {
+        provider: "google",
+        access_token: null,
+        refresh_token: null,
+        expires_at: null,
+        emailAccount: {
+          id: "email-account-1",
+          email: "owner@example.com",
+          watchEmailsSubscriptionId: null,
+        },
+      },
+    ] as Awaited<ReturnType<typeof prisma.account.findMany>>);
+    prisma.executedRule.findMany.mockResolvedValue([]);
+    prisma.user.deleteMany.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError(
+        "Foreign key constraint failed",
+        {
+          code: "P2003",
+          clientVersion: "test",
+          meta: { field_name: "Member_emailAccountId_fkey" },
+        },
+      ),
+    );
+
+    await expect(deleteUser({ userId: "user-1", logger })).rejects.toThrow(
+      "Transfer organization ownership before deleting your account.",
+    );
+    expect(deleteAccountUploadDirectory).not.toHaveBeenCalled();
+  });
+});

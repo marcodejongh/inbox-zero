@@ -1,5 +1,7 @@
 "use client";
 
+import Image from "next/image";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -7,8 +9,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Trash2, XCircle } from "lucide-react";
+import {
+  Trash2Icon,
+  XCircle,
+  ChevronDown,
+  MoreHorizontalIcon,
+} from "lucide-react";
 import { CalendarList } from "./CalendarList";
 import { useAction } from "next-safe-action/hooks";
 import {
@@ -19,8 +25,19 @@ import { useAccount } from "@/providers/EmailAccountProvider";
 import { useCalendars } from "@/hooks/useCalendars";
 import { useState } from "react";
 import type { GetCalendarsResponse } from "@/app/api/user/calendars/route";
-import Image from "next/image";
 import { TypographyP } from "@/components/Typography";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Separator } from "@/components/ui/separator";
 
 type CalendarConnection = GetCalendarsResponse["connections"][0];
 
@@ -30,6 +47,11 @@ interface CalendarConnectionCardProps {
 
 const getProviderInfo = (provider: string) => {
   const providers = {
+    fastmail: {
+      name: "Fastmail Calendar",
+      icon: "/images/calendar.svg",
+      alt: "Fastmail Calendar",
+    },
     microsoft: {
       name: "Microsoft Calendar",
       icon: "/images/product/outlook-calendar.svg",
@@ -53,8 +75,15 @@ export function CalendarConnectionCard({
   const [optimisticUpdates, setOptimisticUpdates] = useState<
     Record<string, boolean>
   >({});
+  const [isOpen, setIsOpen] = useState(false);
 
   const providerInfo = getProviderInfo(connection.provider);
+
+  const calendars = connection.calendars || [];
+  const enabledCalendars = calendars.filter((cal) => {
+    const optimisticValue = optimisticUpdates[cal.id];
+    return optimisticValue !== undefined ? optimisticValue : cal.isEnabled;
+  });
 
   const { execute: executeDisconnect, isExecuting: isDisconnecting } =
     useAction(disconnectCalendarAction.bind(null, emailAccountId));
@@ -116,11 +145,12 @@ export function CalendarConnectionCard({
     }
   };
 
+  // TODO: use card - sm variant once we merge the big pr
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="p-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <Image
               src={providerInfo.icon}
               alt={providerInfo.alt}
@@ -128,12 +158,12 @@ export function CalendarConnectionCard({
               height={32}
               unoptimized
             />
-            <div>
+            <div className="min-w-0">
               <CardTitle className="text-lg">{providerInfo.name}</CardTitle>
               <CardDescription className="flex items-center gap-2">
-                {connection.email}
+                <span className="truncate">{connection.email}</span>
                 {!connection.isConnected && (
-                  <div className="flex items-center gap-1 text-red-600">
+                  <div className="flex shrink-0 items-center gap-1 text-red-600">
                     <XCircle className="h-3 w-3" />
                     <span className="text-xs">Disconnected</span>
                   </div>
@@ -141,45 +171,73 @@ export function CalendarConnectionCard({
               </CardDescription>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="destructiveSoft"
-              size="sm"
-              onClick={handleDisconnect}
-              disabled={isDisconnecting}
-              Icon={Trash2}
-              loading={isDisconnecting}
-            >
-              Disconnect
-            </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  aria-label="Calendar options"
+                  disabled={isDisconnecting}
+                  variant="ghostMuted"
+                  size="iconSm"
+                >
+                  <MoreHorizontalIcon className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onSelect={(e) => {
+                    e.preventDefault();
+                    handleDisconnect();
+                  }}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <Trash2Icon className="mr-2 size-4" />
+                  Disconnect
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
       </CardHeader>
-      <CardContent>
-        <div className="space-y-4">
+      <Separator className="mb-4" />
+      <CardContent className="p-4 pt-0">
+        {calendars.length > 0 ? (
+          <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+            <CollapsibleTrigger asChild>
+              <button
+                type="button"
+                className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors w-full text-left"
+              >
+                <span>
+                  {enabledCalendars.length} of {calendars.length} calendars
+                  selected for availability
+                </span>
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${
+                    isOpen ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-4 space-y-4">
+              <CalendarList
+                calendars={calendars.map((cal) => ({
+                  ...cal,
+                  isEnabled:
+                    optimisticUpdates[cal.id] !== undefined
+                      ? optimisticUpdates[cal.id]
+                      : cal.isEnabled,
+                }))}
+                onToggleCalendar={handleToggleCalendar}
+              />
+            </CollapsibleContent>
+          </Collapsible>
+        ) : (
           <TypographyP className="text-sm">
-            Toggle the calendars you want to check for conflicts to prevent
-            double bookings.
+            No calendars found. Your calendars will be synced automatically.
           </TypographyP>
-
-          {connection.calendars && connection.calendars.length > 0 ? (
-            <CalendarList
-              calendars={connection.calendars.map((cal) => ({
-                ...cal,
-                isEnabled:
-                  optimisticUpdates[cal.id] !== undefined
-                    ? optimisticUpdates[cal.id]
-                    : cal.isEnabled,
-              }))}
-              onToggleCalendar={handleToggleCalendar}
-            />
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              No calendars available. Calendar details will be synced
-              automatically.
-            </p>
-          )}
-        </div>
+        )}
       </CardContent>
     </Card>
   );

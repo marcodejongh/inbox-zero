@@ -1,0 +1,176 @@
+import {
+  MAX_RECIPIENTS,
+  type MessageAttachmentDescriptor,
+  type MessageMetadata,
+} from "@inboxzero/mail-core/messages";
+import type { Provider } from "@inboxzero/mail-core/identities";
+import {
+  type BodyObservation,
+  MAX_BODY_ATTACHMENTS,
+  MAX_BODY_LENGTH,
+  type ProviderChange,
+} from "@inboxzero/mail-core/sync";
+import type { ParsedMessage } from "@/utils/types";
+
+const ROLE_LABELS = {
+  INBOX: "inbox",
+  SENT: "sent",
+  DRAFT: "draft",
+  TRASH: "trash",
+  SPAM: "spam",
+} as const;
+
+export function parsedMessageMetadata(message: ParsedMessage): MessageMetadata {
+  const labels = message.labelIds ?? [];
+  const archived = labels.includes("ARCHIVE");
+  const roles = [
+    ...new Set([
+      ...labels.flatMap((label) => {
+        const role = ROLE_LABELS[label as keyof typeof ROLE_LABELS];
+        return role ? [role] : [];
+      }),
+      ...rolesFromFolder(message.parentFolderId),
+    ]),
+  ].filter((role) => role !== "inbox" || !archived);
+  const categoryIds = labels.filter((label) => label.startsWith("CATEGORY_"));
+  const labelIds = labels.filter(
+    (label) =>
+      !(label in ROLE_LABELS) &&
+      label !== "UNREAD" &&
+      label !== "STARRED" &&
+      label !== "IMPORTANT" &&
+      !label.startsWith("CATEGORY_"),
+  );
+  return {
+    subject: message.subject || "",
+    preview: message.snippet || "",
+    externalUrl: message.externalUrl ?? undefined,
+    from: message.headers.from || "",
+    to: splitAddresses(message.headers.to),
+    cc: splitAddresses(message.headers.cc),
+    receivedAtMs: receivedAtMs(message),
+    read: !labels.includes("UNREAD"),
+    starred: labels.includes("STARRED"),
+    folderId: message.parentFolderId ?? null,
+    inboxSection: message.inboxSection ?? null,
+    labelIds,
+    categoryIds,
+    roles,
+    hasAttachments:
+      message.hasAttachment ?? Boolean(message.attachments?.length),
+  };
+}
+
+export function parsedMessagePatch(
+  accountId: string,
+  provider: Provider,
+  message: ParsedMessage,
+): ProviderChange {
+  return {
+    kind: "message_patch",
+    key: { accountId, messageId: message.id },
+    reference: {
+      provider,
+      messageId: message.id,
+      conversationId: message.threadId,
+      version: message.historyId || null,
+    },
+    fields: parsedMessageMetadata(message),
+  };
+}
+
+export function parsedMessageBodyObservation(
+  accountId: string,
+  message: ParsedMessage,
+): BodyObservation | null {
+  const attachments = parsedMessageAttachmentDescriptors(message);
+  const isMeetingInvitation = message.isMeetingInvitation === true;
+  if (
+    !message.textPlain &&
+    !message.textHtml &&
+    attachments.length === 0 &&
+    !isMeetingInvitation
+  ) {
+    return null;
+  }
+  // Protocol limits are enforced on every page, so one oversized message
+  // would otherwise fail its whole page on every retry and stall sync.
+  return {
+    key: { accountId, messageId: message.id },
+    version: message.historyId || null,
+    html: message.textHtml?.slice(0, MAX_BODY_LENGTH) ?? null,
+    text: message.textPlain?.slice(0, MAX_BODY_LENGTH) ?? null,
+    attachments: attachments.slice(0, MAX_BODY_ATTACHMENTS),
+    isMeetingInvitation,
+  };
+}
+
+function parsedMessageAttachmentDescriptors(
+  message: ParsedMessage,
+): MessageAttachmentDescriptor[] {
+  return [
+    ...(message.attachments ?? []).map((attachment) =>
+      descriptorFromParsed(attachment, false),
+    ),
+    ...(message.inline ?? []).map((attachment) =>
+      descriptorFromParsed(attachment, true),
+    ),
+  ].filter(
+    // Gmail omits the id when a small part's data is embedded in the message.
+    // It can't be fetched by id, and one missing id fails the whole sync page.
+    (descriptor) => Boolean(descriptor.attachmentId),
+  );
+}
+
+function descriptorFromParsed(
+  attachment: {
+    attachmentId: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+  },
+  inline: boolean,
+): MessageAttachmentDescriptor {
+  return {
+    attachmentId: attachment.attachmentId,
+    filename: attachment.filename,
+    mimeType: attachment.mimeType,
+    size: Number.isFinite(attachment.size) ? attachment.size : 0,
+    inline,
+  };
+}
+
+function receivedAtMs(message: ParsedMessage): number {
+  if (message.internalDate) {
+    const numeric = Number(message.internalDate);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+    }
+  }
+  const parsed = Date.parse(message.date);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function splitAddresses(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .slice(0, MAX_RECIPIENTS);
+}
+
+function rolesFromFolder(
+  folderId: string | undefined,
+): Array<"inbox" | "sent" | "draft" | "trash" | "spam"> {
+  if (!folderId) return [];
+  const folder = folderId.toLowerCase();
+  // Folder ids are often opaque. A substring match treated archive folders
+  // whose id happened to contain "inbox" as the inbox itself.
+  if (folder === "inbox") return ["inbox"];
+  if (folder.includes("sent")) return ["sent"];
+  if (folder.includes("draft")) return ["draft"];
+  if (folder.includes("deleted") || folder.includes("trash")) return ["trash"];
+  if (folder.includes("junk") || folder.includes("spam")) return ["spam"];
+  return [];
+}

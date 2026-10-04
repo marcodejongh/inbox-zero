@@ -2,6 +2,7 @@ import { chatCompletionStream } from "@/utils/llms";
 import type { EmailAccountWithAI } from "@/utils/llms/types";
 import { expire } from "@/utils/redis";
 import { saveSummary } from "@/utils/redis/summary";
+import { LlmUseCase } from "@/utils/llms/use-cases";
 
 export async function summarise({
   text,
@@ -20,6 +21,10 @@ export async function summarise({
 
   const response = await chatCompletionStream({
     userAi: userAi.user,
+    userId: userAi.userId,
+    emailAccountId: userAi.id,
+    useCase: LlmUseCase.Summarise,
+    promptHardening: { trust: "untrusted", level: "compact" },
     messages: [
       {
         role: "system",
@@ -32,7 +37,8 @@ export async function summarise({
     ],
     userEmail,
     usageLabel: "Summarise",
-    onFinish: async (result) => {
+    sensitiveDataPolicy: userAi.sensitiveDataPolicy,
+    onEnd: async (result) => {
       await saveSummary(prompt, result.text);
       await expire(prompt, 60 * 60 * 24);
     },

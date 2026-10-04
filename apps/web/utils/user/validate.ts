@@ -1,5 +1,10 @@
 import { SafeError } from "@/utils/error";
-import { hasAiAccess } from "@/utils/premium";
+import {
+  getUserTier,
+  hasAiAccess,
+  isPremiumRecord,
+  premiumEntitlementSelect,
+} from "@/utils/premium";
 import prisma from "@/utils/prisma";
 
 export async function validateUserAndAiAccess({
@@ -15,6 +20,7 @@ export async function validateUserAndAiAccess({
       email: true,
       about: true,
       multiRuleSelectionEnabled: true,
+      sensitiveDataPolicy: true,
       timezone: true,
       calendarBookingLink: true,
       user: {
@@ -23,9 +29,7 @@ export async function validateUserAndAiAccess({
           aiModel: true,
           aiApiKey: true,
           premium: {
-            select: {
-              tier: true,
-            },
+            select: premiumEntitlementSelect,
           },
         },
       },
@@ -34,9 +38,12 @@ export async function validateUserAndAiAccess({
   });
   if (!emailAccount) throw new SafeError("User not found");
 
+  const isUserPremium = isPremiumRecord(emailAccount.user.premium);
+  if (!isUserPremium) throw new SafeError("Please upgrade for AI access");
+
   const userHasAiAccess = hasAiAccess(
-    emailAccount.user.premium?.tier || null,
-    emailAccount.user.aiApiKey,
+    getUserTier(emailAccount.user.premium),
+    !!emailAccount.user.aiApiKey,
   );
   if (!userHasAiAccess) throw new SafeError("Please upgrade for AI access");
 

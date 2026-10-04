@@ -1,10 +1,16 @@
 import { auth, gmail, type gmail_v1 } from "@googleapis/gmail";
 import { people } from "@googleapis/people";
-import { saveTokens } from "@/utils/auth";
-import { env } from "@/env";
+import { saveTokens } from "@/utils/auth/save-tokens";
+import { cleanupInvalidTokens } from "@/utils/auth/cleanup-invalid-tokens";
 import type { Logger } from "@/utils/logger";
 import { SCOPES } from "@/utils/gmail/scopes";
-import { SafeError } from "@/utils/error";
+import { isInvalidGrantError, SafeError } from "@/utils/error";
+import { env } from "@/env";
+import {
+  getGoogleGmailApiRootUrl,
+  getGoogleOauthClientOptions,
+  getGooglePeopleApiRootUrl,
+} from "@/utils/gmail/oauth";
 
 type AuthOptions = {
   accessToken?: string | null;
@@ -12,6 +18,8 @@ type AuthOptions = {
   expiryDate?: number | null;
   expiresAt?: number | null;
 };
+
+const TOKEN_REFRESH_BUFFER_MS = 10 * 60 * 1000;
 
 const getAuth = ({
   accessToken,
@@ -21,10 +29,7 @@ const getAuth = ({
 }: AuthOptions) => {
   const expiryDate = expiresAt ? expiresAt : rest.expiryDate;
 
-  const googleAuth = new auth.OAuth2({
-    clientId: env.GOOGLE_CLIENT_ID,
-    clientSecret: env.GOOGLE_CLIENT_SECRET,
-  });
+  const googleAuth = new auth.OAuth2(getGoogleOauthClientOptions());
   googleAuth.setCredentials({
     access_token: accessToken,
     refresh_token: refreshToken,
@@ -36,11 +41,11 @@ const getAuth = ({
 };
 
 export function getLinkingOAuth2Client() {
-  return new auth.OAuth2({
-    clientId: env.GOOGLE_CLIENT_ID,
-    clientSecret: env.GOOGLE_CLIENT_SECRET,
-    redirectUri: `${env.NEXT_PUBLIC_BASE_URL}/api/google/linking/callback`,
-  });
+  return new auth.OAuth2(
+    getGoogleOauthClientOptions(
+      `${env.NEXT_PUBLIC_BASE_URL}/api/google/linking/callback`,
+    ),
+  );
 }
 
 // we should potentially use this everywhere instead of getGmailClient as this handles refreshing the access token and saving it to the db
@@ -58,16 +63,28 @@ export const getGmailClientWithRefresh = async ({
   logger: Logger;
 }): Promise<gmail_v1.Gmail> => {
   if (!refreshToken) {
-    logger.error("No refresh token", { emailAccountId });
+    // expected for disconnected accounts
+    logger.warn("No refresh token", { emailAccountId });
+    await cleanupInvalidTokens({
+      emailAccountId,
+      reason: "invalid_grant",
+      failedAccessToken: accessToken ?? undefined,
+      failedRefreshToken: null,
+      logger,
+    }).catch((error) =>
+      logger.warn("Failed to record missing refresh token", { error }),
+    );
     throw new SafeError("No refresh token");
   }
 
   // we handle refresh ourselves so not passing in expiresAt
   const auth = getAuth({ accessToken, refreshToken });
-  const g = gmail({ version: "v1", auth });
+  const g = gmail({ version: "v1", auth, rootUrl: getGoogleGmailApiRootUrl() });
 
   const expiryDate = expiresAt ? expiresAt : null;
-  if (expiryDate && expiryDate > Date.now()) return g;
+  if (expiryDate && expiryDate > Date.now() + TOKEN_REFRESH_BUFFER_MS) {
+    return g;
+  }
 
   // may throw `invalid_grant` error
   try {
@@ -85,20 +102,37 @@ export const getGmailClientWithRefresh = async ({
         accountRefreshToken: refreshToken,
         emailAccountId,
         provider: "google",
+        expectedExpiresAt: expiresAt,
       });
     }
 
     return g;
   } catch (error) {
-    const isInvalidGrantError =
-      error instanceof Error && error.message.includes("invalid_grant");
-
-    if (isInvalidGrantError) {
+    if (isInvalidGrantError(error)) {
       logger.warn("Error refreshing Gmail access token", {
         emailAccountId,
-        error: error.message,
+        error: error instanceof Error ? error.message : String(error),
+        // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
         errorDescription: (error as any).response?.data?.error_description,
       });
+
+      try {
+        await cleanupInvalidTokens({
+          emailAccountId,
+          reason: "invalid_grant",
+          failedAccessToken: accessToken ?? undefined,
+          failedRefreshToken: refreshToken,
+          logger,
+        });
+      } catch (cleanupError) {
+        logger.error(
+          "Failed to clean up invalid tokens after refresh failure",
+          {
+            emailAccountId,
+            cleanupError,
+          },
+        );
+      }
     }
 
     throw error;
@@ -112,12 +146,17 @@ export const getContactsClient = ({
   refreshToken,
 }: AuthOptions) => {
   const auth = getAuth({ accessToken, refreshToken });
-  const contacts = people({ version: "v1", auth });
+  const contacts = people({
+    version: "v1",
+    auth,
+    rootUrl: getGooglePeopleApiRootUrl(),
+  });
 
   return contacts;
 };
 
 export const getAccessTokenFromClient = (client: gmail_v1.Gmail): string => {
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   const accessToken = (client.context._options.auth as any).credentials
     .access_token;
   if (!accessToken) throw new Error("No access token");

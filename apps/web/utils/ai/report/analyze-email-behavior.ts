@@ -2,10 +2,7 @@ import { z } from "zod";
 import { createGenerateObject } from "@/utils/llms";
 import type { EmailAccountWithAI } from "@/utils/llms/types";
 import type { EmailSummary } from "@/utils/ai/report/summarize-emails";
-import { createScopedLogger } from "@/utils/logger";
-import { getModel } from "@/utils/llms/model";
-
-const _logger = createScopedLogger("email-report-email-behavior");
+import { getModelForUseCase, LlmUseCase } from "@/utils/llms/use-cases";
 
 const emailBehaviorSchema = z.object({
   timingPatterns: z.object({
@@ -57,17 +54,21 @@ Analyze the email patterns and identify:
 3. Engagement triggers (what prompts them to take action)
 4. Specific automation opportunities with estimated time savings`;
 
-  const modelOptions = getModel(emailAccount.user, "economy");
+  const modelOptions = getModelForUseCase(
+    emailAccount.user,
+    LlmUseCase.EmailReportEmailBehavior,
+  );
 
   const generateObject = createGenerateObject({
     emailAccount,
     label: "email-report-email-behavior",
     modelOptions,
+    promptHardening: { trust: "untrusted", level: "none" },
   });
 
   const result = await generateObject({
     ...modelOptions,
-    system,
+    instructions: system,
     prompt,
     schema: emailBehaviorSchema,
   });

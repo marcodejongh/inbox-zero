@@ -8,14 +8,22 @@ import { SafeError } from "@/utils/error";
 import { extractSSOProviderConfigFromXML } from "@/utils/sso/extract-sso-provider-config-from-xml";
 import prisma from "@/utils/prisma";
 import { validateIdpMetadata } from "@/utils/sso/validate-idp-metadata";
+import { ADMIN_ROLES } from "@/utils/organizations/roles";
 import { slugify } from "@/utils/string";
+import { isDuplicateError } from "@/utils/prisma-helpers";
 
 export const registerSSOProviderAction = adminActionClient
   .metadata({ name: "registerSSOProvider" })
   .inputSchema(ssoRegistrationBody)
   .action(
     async ({
-      parsedInput: { organizationName, idpMetadata, domain, providerId },
+      parsedInput: {
+        organizationName,
+        organizationId,
+        idpMetadata,
+        domain,
+        providerId,
+      },
     }) => {
       const session = await auth();
       const userId = session?.user?.id;
@@ -47,33 +55,68 @@ export const registerSSOProviderAction = adminActionClient
 
       const existingOrganization = await prisma.organization.findUnique({
         where: { slug: organizationSlug },
-        select: { id: true },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          SsoProvider: { select: { providerId: true } },
+          members: {
+            where: { role: { in: ADMIN_ROLES } },
+            select: { emailAccount: { select: { email: true } } },
+          },
+        },
       });
 
       if (existingOrganization) {
+        if (existingOrganization.id !== organizationId) {
+          throw new SafeError(
+            "An organization with this name already exists. Enter its exact organization ID to attach SSO.",
+          );
+        }
+
+        if (existingOrganization.SsoProvider) {
+          throw new SafeError(
+            "This organization already has an SSO provider configured.",
+          );
+        }
+
+        // Guard against slug squatting: only attach SSO to an existing
+        // organization if one of its owners/admins belongs to the SSO domain.
+        const domainSuffix = `@${domain.toLowerCase()}`;
+        const hasAdminOnDomain = existingOrganization.members.some((member) =>
+          member.emailAccount.email.toLowerCase().endsWith(domainSuffix),
+        );
+
+        if (!hasAdminOnDomain) {
+          throw new SafeError(
+            `An organization with this name already exists, but none of its owners or admins have an email on "${domain}". Verify the organization before attaching SSO, or choose a different name.`,
+          );
+        }
+      } else if (organizationId) {
         throw new SafeError(
-          "An organization with this name already exists. Please choose a different name.",
+          "The organization name does not match the supplied organization ID.",
         );
       }
 
-      const organization = await prisma.organization.create({
-        data: {
-          name: organizationName,
-          slug: organizationSlug,
-        },
-        select: { id: true, name: true, slug: true },
-      });
+      const organization =
+        existingOrganization ??
+        (await prisma.organization.create({
+          data: {
+            name: organizationName,
+            slug: organizationSlug,
+          },
+          select: { id: true, name: true, slug: true },
+        }));
 
-      // Compute callback URL to store with config (informational)
       const callbackUrl = new URL(
-        `/api/auth/sso/saml2/callback/${encodeURIComponent(providerId)}`,
+        `/api/auth/sso/saml2/sp/acs/${encodeURIComponent(providerId)}`,
         env.NEXT_PUBLIC_BASE_URL,
       ).toString();
 
       const samlConfig = {
+        issuer: env.NEXT_PUBLIC_BASE_URL,
         entryPoint: ssoConfig.entryPoint,
         cert: ssoConfig.cert,
-        callbackUrl,
         wantAssertionsSigned: ssoConfig.wantAssertionsSigned ?? true,
         signatureAlgorithm: "sha256",
         digestAlgorithm: "sha256",
@@ -90,24 +133,41 @@ export const registerSSOProviderAction = adminActionClient
         },
       } as const;
 
-      const created = await prisma.ssoProvider.create({
-        data: {
-          providerId,
-          issuer: ssoConfig.issuer,
-          domain,
-          samlConfig: JSON.stringify(samlConfig),
-          organizationId: organization.id,
-        },
-        select: {
-          id: true,
-          providerId: true,
-          domain: true,
-          organization: {
-            select: { id: true, name: true, slug: true },
+      const created = await prisma.ssoProvider
+        .create({
+          data: {
+            providerId,
+            issuer: ssoConfig.issuer,
+            domain,
+            samlConfig: JSON.stringify(samlConfig),
+            userId,
+            organizationId: organization.id,
           },
-        },
-      });
+          select: {
+            id: true,
+            providerId: true,
+            domain: true,
+            organization: {
+              select: { id: true, name: true, slug: true },
+            },
+          },
+        })
+        .catch((error: unknown) => {
+          if (isDuplicateError(error, "organizationId")) {
+            throw new SafeError(
+              "This organization already has an SSO provider configured.",
+            );
+          }
 
-      return created;
+          if (isDuplicateError(error, "providerId")) {
+            throw new SafeError(
+              `SSO provider with ID "${providerId}" already exists`,
+            );
+          }
+
+          throw error;
+        });
+
+      return { ...created, callbackUrl };
     },
   );

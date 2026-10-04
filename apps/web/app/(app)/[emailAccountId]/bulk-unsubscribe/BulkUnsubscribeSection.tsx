@@ -1,23 +1,24 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import useSWR from "swr";
 import { subDays } from "date-fns/subDays";
 import { ChevronDown } from "lucide-react";
 import { usePostHog } from "posthog-js/react";
 import {
   ArchiveIcon,
-  BadgeCheckIcon,
   CheckIcon,
   ChevronsDownIcon,
   ChevronsUpIcon,
   InboxIcon,
   ListIcon,
-  MailMinusIcon,
+  MailXIcon,
+  SparklesIcon,
+  ThumbsUpIcon,
 } from "lucide-react";
 import type { DateRange } from "react-day-picker";
 import { LoadingContent } from "@/components/LoadingContent";
-import { Skeleton } from "@/components/ui/skeleton";
 import type {
   NewsletterStatsQuery,
   NewsletterStatsResponse,
@@ -25,23 +26,26 @@ import type {
 import { getDateRangeParams } from "@/app/(app)/[emailAccountId]/stats/params";
 import { NewsletterModal } from "@/app/(app)/[emailAccountId]/stats/NewsletterModal";
 import { useEmailsToIncludeFilter } from "@/app/(app)/[emailAccountId]/stats/EmailsToIncludeFilter";
-import { usePremium } from "@/components/PremiumAlert";
+import { usePremium } from "@/hooks/usePremium";
 import {
   useNewsletterFilter,
   useBulkUnsubscribeShortcuts,
-  type NewsletterFilterType,
 } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/hooks";
+import { createSearchParams } from "@/utils/url";
+import type { NewsletterFilterType } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/types";
+import {
+  getSuggestedModeRows,
+  isUnsubscribeSuggestion,
+  SUGGESTION_READ_RATE_THRESHOLD,
+} from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/suggestions";
 import { useStatLoader } from "@/providers/StatLoaderProvider";
 import { usePremiumModal } from "@/app/(app)/premium/PremiumModal";
 import { useLabels } from "@/hooks/useLabels";
 import {
-  BulkUnsubscribeMobile,
-  BulkUnsubscribeRowMobile,
-} from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/BulkUnsubscribeMobile";
-import {
   BulkUnsubscribeDesktop,
   BulkUnsubscribeRowDesktop,
 } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/BulkUnsubscribeDesktop";
+import { BulkUnsubscribeDesktopSkeleton } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/BulkUnsubscribeSkeleton";
 import { Card } from "@/components/ui/card";
 import { SearchBar } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/SearchBar";
 import { useToggleSelect } from "@/hooks/useToggleSelect";
@@ -49,7 +53,6 @@ import { BulkActions } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/BulkA
 import { ArchiveProgress } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/ArchiveProgress";
 import { ClientOnly } from "@/components/ClientOnly";
 import { useAccount } from "@/providers/EmailAccountProvider";
-import { useWindowSize } from "usehooks-ts";
 import { LoadStatsButton } from "@/app/(app)/[emailAccountId]/stats/LoadStatsButton";
 import { PageWrapper } from "@/components/PageWrapper";
 import { PageHeader } from "@/components/PageHeader";
@@ -65,6 +68,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 type Newsletter = NewsletterStatsResponse["newsletters"][number];
 
@@ -74,27 +83,31 @@ const filterOptions: {
   icon: React.ReactNode;
   separatorAfter?: boolean;
 }[] = [
-  { label: "All", value: "all", icon: <ListIcon className="size-4" /> },
   {
     label: "Unhandled",
     value: "unhandled",
     icon: <InboxIcon className="size-4" />,
+  },
+  {
+    label: "All",
+    value: "all",
+    icon: <ListIcon className="size-4" />,
     separatorAfter: true,
   },
   {
     label: "Unsubscribed",
     value: "unsubscribed",
-    icon: <MailMinusIcon className="size-4" />,
+    icon: <MailXIcon className="size-4" />,
   },
   {
-    label: "Skip Inbox",
+    label: "Auto Archive",
     value: "autoArchived",
     icon: <ArchiveIcon className="size-4" />,
   },
   {
     label: "Approved",
     value: "approved",
-    icon: <BadgeCheckIcon className="size-4" />,
+    icon: <ThumbsUpIcon className="size-4" />,
   },
 ];
 
@@ -108,9 +121,6 @@ const selectOptions = [
 const defaultSelected = selectOptions[2];
 
 export function BulkUnsubscribe() {
-  const windowSize = useWindowSize();
-  const isMobile = windowSize.width < 768;
-
   const [dateDropdown, setDateDropdown] = useState<string>(
     defaultSelected.label,
   );
@@ -184,15 +194,28 @@ export function BulkUnsubscribe() {
     ...getDateRangeParams(dateRange),
     ...(search ? { search } : {}),
   };
-  // biome-ignore lint/suspicious/noExplicitAny: simplest
-  const urlParams = new URLSearchParams(params as any);
-  const { data, isLoading, error, mutate } = useSWR<
+  const urlParams = createSearchParams(params);
+  const { data, isLoading, isValidating, error, mutate } = useSWR<
     NewsletterStatsResponse,
     { error: string }
   >(`/api/user/stats/newsletters?${urlParams}`, {
     refreshInterval,
     keepPreviousData: true,
   });
+
+  // Track whether we're switching views (filter, sort, search, date range, expanded)
+  // Show skeleton when validating with different params, not on background refresh
+  const [lastFetchedParams, setLastFetchedParams] = useState<string>("");
+  const currentParamsString = urlParams.toString();
+  const isParamsChanged = lastFetchedParams !== currentParamsString;
+  const showSkeleton = isValidating && isParamsChanged;
+
+  // Update lastFetchedParams when data arrives for new params
+  useEffect(() => {
+    if (!isValidating && data) {
+      setLastFetchedParams(currentParamsString);
+    }
+  }, [isValidating, data, currentParamsString]);
 
   const { hasUnsubscribeAccess, mutate: refetchPremium } = usePremium();
 
@@ -223,26 +246,105 @@ export function BulkUnsubscribe() {
 
   const { PremiumModal, openModal } = usePremiumModal();
 
-  const RowComponent = isMobile
-    ? BulkUnsubscribeRowMobile
-    : BulkUnsubscribeRowDesktop;
-
   // Data is now filtered, sorted, and limited by the backend
   const rows = data?.newsletters;
+  const [isSuggestedMode, setIsSuggestedMode] = useState(false);
 
-  const { selected, isAllSelected, onToggleSelect, onToggleSelectAll } =
-    useToggleSelect(rows?.map((item) => ({ id: item.name })) || []);
+  const {
+    selected,
+    onToggleSelect,
+    onToggleSelectItems,
+    selectItems,
+    clearSelection,
+    deselectItem,
+  } = useToggleSelect(rows?.map((item) => ({ id: item.name })) || []);
+
+  const suggestedRows = useMemo(
+    () => rows?.filter(isUnsubscribeSuggestion) ?? [],
+    [rows],
+  );
+
+  const visibleRows = useMemo(
+    () =>
+      isSuggestedMode
+        ? getSuggestedModeRows(rows ?? [], selected)
+        : (rows ?? []),
+    [isSuggestedMode, rows, selected],
+  );
+  const visibleRowIds = useMemo(
+    () => visibleRows.map((row) => row.name),
+    [visibleRows],
+  );
+  const isAllVisibleSelected =
+    visibleRows.length > 0 &&
+    visibleRows.every((row) => selected.get(row.name));
+  const isSomeVisibleSelected = visibleRows.some((row) =>
+    selected.get(row.name),
+  );
+
+  const onToggleSuggestedMode = useCallback(() => {
+    if (isSuggestedMode) {
+      setIsSuggestedMode(false);
+      return;
+    }
+
+    selectItems(suggestedRows.map((row) => row.name));
+    setIsSuggestedMode(true);
+    posthog?.capture("Clicked Select Suggested Unsubscribes", {
+      count: suggestedRows.length,
+    });
+  }, [isSuggestedMode, selectItems, suggestedRows, posthog]);
+
+  const onToggleVisibleRow = useCallback(
+    (id: string, shiftKey = false) =>
+      onToggleSelect(id, shiftKey, visibleRowIds),
+    [onToggleSelect, visibleRowIds],
+  );
+
+  const onToggleSelectAllVisible = useCallback(
+    () => onToggleSelectItems(visibleRowIds),
+    [onToggleSelectItems, visibleRowIds],
+  );
+
+  // Clear selection when filter changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally clearing selection when filter changes
+  useEffect(() => {
+    clearSelection();
+    setIsSuggestedMode(false);
+  }, [filter]);
+
+  // Deep link (e.g. from the inbox health email or onboarding):
+  // ?select=suggested auto-selects the suggested rows once after the first
+  // rows load, then strips the param so re-renders and filter changes don't
+  // reselect.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const hasAppliedSelectParamRef = useRef(false);
+
+  useEffect(() => {
+    if (hasAppliedSelectParamRef.current) return;
+    if (searchParams.get("select") !== "suggested") return;
+    if (!rows) return;
+
+    hasAppliedSelectParamRef.current = true;
+    selectItems(rows.filter(isUnsubscribeSuggestion).map((row) => row.name));
+    setIsSuggestedMode(true);
+
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("select");
+    router.replace(nextParams.size ? `${pathname}?${nextParams}` : pathname, {
+      scroll: false,
+    });
+  }, [searchParams, rows, selectItems, router, pathname]);
 
   // Backend now handles sorting, so we just map the rows in order
-  const tableRows = rows?.map((item) => {
+  const tableRows = visibleRows.map((item) => {
     const readPercentage =
       item.value > 0 ? (item.readEmails / item.value) * 100 : 0;
-    const archivedEmails = item.value - item.inboxEmails;
-    const archivedPercentage =
-      item.value > 0 ? (archivedEmails / item.value) * 100 : 0;
 
     return (
-      <RowComponent
+      <BulkUnsubscribeRowDesktop
         key={item.name}
         item={item}
         userEmail={userEmail}
@@ -257,10 +359,9 @@ export function BulkUnsubscribe() {
         refetchPremium={refetchPremium}
         openPremiumModal={openModal}
         checked={selected.get(item.name) || false}
-        onToggleSelect={onToggleSelect}
+        onToggleSelect={onToggleVisibleRow}
         readPercentage={readPercentage}
-        archivedEmails={archivedEmails}
-        archivedPercentage={archivedPercentage}
+        filter={filter}
       />
     );
   });
@@ -299,8 +400,13 @@ export function BulkUnsubscribe() {
           "Learn how to use the Bulk Unsubscribe to unsubscribe from and archive unwanted emails."
         }
         videoSrc="https://www.youtube.com/embed/T1rnooV4OYc"
+        youtubeVideoId="T1rnooV4OYc"
         thumbnailSrc="https://img.youtube.com/vi/T1rnooV4OYc/0.jpg"
         storageKey="bulk-unsubscribe-onboarding-video"
+        videoAnalytics={{
+          page: "bulk_unsubscribe",
+          surface: "dismissible_card",
+        }}
       />
 
       <div className="items-center justify-between flex mt-4 flex-wrap">
@@ -341,6 +447,34 @@ export function BulkUnsubscribe() {
             onSetDateDropdown={onSetDateDropdown}
           />
           <SearchBar onSearch={setSearch} />
+          {(suggestedRows.length > 0 || isSuggestedMode) && (
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={isSuggestedMode ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-10"
+                    aria-pressed={isSuggestedMode}
+                    onClick={onToggleSuggestedMode}
+                  >
+                    <SparklesIcon className="size-4 text-amber-500" />
+                    <span className="ml-2">
+                      {isSuggestedMode ? "Showing" : "Select"}{" "}
+                      {suggestedRows.length} suggested
+                    </span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p className="max-w-xs">
+                    {isSuggestedMode
+                      ? "Shows suggested senders and any other senders you already selected. Click to show all senders."
+                      : `Selects and shows senders you rarely read (under ${SUGGESTION_READ_RATE_THRESHOLD}% read rate) so you can unsubscribe, block, or archive them in one go.`}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
         </ActionBar>
       </div>
 
@@ -348,39 +482,38 @@ export function BulkUnsubscribe() {
         <ArchiveProgress />
       </ClientOnly>
 
-      {Array.from(selected.values()).filter(Boolean).length > 0 ? (
-        <BulkActions selected={selected} mutate={mutate} />
-      ) : null}
+      <BulkActions
+        selected={selected}
+        mutate={mutate}
+        onClearSelection={clearSelection}
+        deselectItem={deselectItem}
+        newsletters={rows}
+        filter={filter}
+        totalCount={rows?.length ?? 0}
+        dateRange={dateRange}
+      />
 
-      <Card className="mt-2 md:mt-4">
-        {isStatsLoading && !isLoading && !data?.newsletters.length ? (
-          <div className="p-4">
-            <Skeleton className="h-screen rounded" />
-          </div>
+      <Card className="mt-2 md:mt-4 max-sm:border-0 max-sm:shadow-none">
+        {(isStatsLoading && !isLoading && !data?.newsletters.length) ||
+        showSkeleton ? (
+          <BulkUnsubscribeDesktopSkeleton />
         ) : (
           <LoadingContent
             loading={!data && isLoading}
             error={error}
-            loadingComponent={
-              <div className="p-4">
-                <Skeleton className="h-screen rounded" />
-              </div>
-            }
+            loadingComponent={<BulkUnsubscribeDesktopSkeleton />}
           >
             {tableRows?.length ? (
               <>
-                {isMobile ? (
-                  <BulkUnsubscribeMobile tableRows={tableRows} />
-                ) : (
-                  <BulkUnsubscribeDesktop
-                    sortColumn={sortColumn}
-                    sortDirection={sortDirection}
-                    onSort={handleSort}
-                    tableRows={tableRows}
-                    isAllSelected={isAllSelected}
-                    onToggleSelectAll={onToggleSelectAll}
-                  />
-                )}
+                <BulkUnsubscribeDesktop
+                  sortColumn={sortColumn}
+                  sortDirection={sortDirection}
+                  onSort={handleSort}
+                  tableRows={tableRows}
+                  isAllSelected={isAllVisibleSelected}
+                  isSomeSelected={isSomeVisibleSelected}
+                  onToggleSelectAll={onToggleSelectAllVisible}
+                />
                 {/* Only show expand/collapse when there might be more results */}
                 {(expanded || (rows && rows.length >= 50)) && (
                   <div className="mt-2 px-6 pb-6">
@@ -406,9 +539,14 @@ export function BulkUnsubscribe() {
                 )}
               </>
             ) : (
-              <p className="space-y-4 p-4 text-muted-foreground">
-                No emails found. Adjust the filters, or click "Load More".
-              </p>
+              <div className="flex flex-col items-center justify-center py-16 px-4">
+                <InboxIcon className="h-16 w-16 text-gray-300" />
+                <h3 className="mt-4 text-lg font-semibold">No emails found</h3>
+                <p className="mt-2 text-center text-muted-foreground">
+                  Adjust the filters or click "Load More" to load additional
+                  emails.
+                </p>
+              </div>
             )}
           </LoadingContent>
         )}

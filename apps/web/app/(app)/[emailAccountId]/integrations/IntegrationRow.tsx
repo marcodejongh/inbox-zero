@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import type { GetIntegrationsResponse } from "@/app/api/mcp/integrations/route";
-import type { GetMcpAuthUrlResponse } from "@/app/api/mcp/[integration]/auth-url/route";
 import { Toggle } from "@/components/Toggle";
-import { TypographyP } from "@/components/Typography";
+import { MutedText, TypographyP } from "@/components/Typography";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { TableRow, TableCell } from "@/components/ui/table";
 import {
@@ -13,18 +13,21 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ChevronDown, ChevronRight, MoreVertical } from "lucide-react";
+import { MoreVertical } from "lucide-react";
 import clsx from "clsx";
 import { toastError, toastSuccess } from "@/components/Toast";
+import { DomainIcon } from "@/components/charts/DomainIcon";
 import {
   disconnectMcpConnectionAction,
+  removeCustomMcpServerAction,
   toggleMcpConnectionAction,
   toggleMcpToolAction,
 } from "@/utils/actions/mcp";
 import { useAccount } from "@/providers/EmailAccountProvider";
-import { fetchWithAccount } from "@/utils/fetch";
 import { RequestAccessDialog } from "./RequestAccessDialog";
+import { startMcpOAuth } from "./startMcpOAuth";
 import { truncate } from "@/utils/string";
+import { useProductAnalytics } from "@/hooks/useProductAnalytics";
 
 interface IntegrationRowProps {
   integration: GetIntegrationsResponse["integrations"][number];
@@ -36,9 +39,12 @@ export function IntegrationRow({
   onConnectionChange,
 }: IntegrationRowProps) {
   const { emailAccountId } = useAccount();
+  const analytics = useProductAnalytics("integrations");
+  const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [expandedTools, setExpandedTools] = useState(false);
 
+  const isCustom = integration.isCustom;
   const conn = integration.connection;
 
   const connected = !!conn;
@@ -49,7 +55,16 @@ export function IntegrationRow({
   const tools = conn?.tools || [];
 
   const handleConnect = async () => {
+    analytics.captureAction("integration_connect_started", {
+      integration: integration.name,
+      auth_type: integration.authType,
+    });
+
     if (integration.authType === "api-token") {
+      analytics.captureAction("integration_connect_failed", {
+        integration: integration.name,
+        reason: "unsupported_auth_type",
+      });
       toastError({
         title: "Error connecting to integration",
         description: "API token connections are not supported yet",
@@ -57,60 +72,85 @@ export function IntegrationRow({
       return;
     }
 
+    setConnecting(true);
+
     try {
-      const response = await fetchWithAccount({
-        url: `/api/mcp/${integration.name}/auth-url`,
+      await startMcpOAuth({
+        integrationName: integration.name,
         emailAccountId,
       });
-
-      if (!response.ok) {
-        throw new Error("Failed to get authorization URL");
-      }
-
-      const data: GetMcpAuthUrlResponse = await response.json();
-      window.location.href = data.url;
     } catch (error) {
+      analytics.captureAction("integration_connect_failed", {
+        integration: integration.name,
+        reason: "auth_url_error",
+        error_message:
+          error instanceof Error && error.message ? error.message : undefined,
+      });
       console.error(
         `Failed to initiate ${integration.name} connection:`,
         error,
       );
       toastError({
-        title: `Error connecting to ${integration.name}`,
+        title: `Error connecting to ${integration.displayName}`,
         description:
-          "Please try again or contact support if the issue persists.",
+          error instanceof Error && error.message
+            ? error.message
+            : "Please try again or contact support if the issue persists.",
       });
+      setConnecting(false);
     }
   };
 
-  const handleToggle = async (enabled: boolean) => {
+  const handleToggleToolsExpanded = () => {
+    analytics.captureAction("integration_tools_expanded", {
+      integration: integration.name,
+      expanded: !expandedTools,
+      enabled_tool_count: toolsCount,
+      total_tool_count: totalTools,
+    });
+    setExpandedTools(!expandedTools);
+  };
+
+  const handleTogglePause = async () => {
     if (!connectionId) return;
+
+    const nextActive = !isActive;
+    analytics.captureAction("integration_toggled", {
+      integration: integration.name,
+      enabled: nextActive,
+    });
 
     try {
       const result = await toggleMcpConnectionAction(emailAccountId, {
         connectionId,
-        isActive: enabled,
+        isActive: nextActive,
       });
 
       if (result?.serverError) {
         toastError({
-          title: "Error toggling connection",
+          title: "Error updating integration",
           description: result.serverError,
         });
       } else {
         toastSuccess({
-          description: `${integration.displayName} ${enabled ? "enabled" : "disabled"}`,
+          description: `${integration.displayName} ${nextActive ? "resumed" : "paused"}`,
         });
         onConnectionChange();
       }
     } catch (error) {
       toastError({
-        title: "Error toggling connection",
+        title: "Error updating integration",
         description: error instanceof Error ? error.message : "Unknown error",
       });
     }
   };
 
   const handleToggleTool = async (toolId: string, isEnabled: boolean) => {
+    analytics.captureAction("integration_tool_toggled", {
+      integration: integration.name,
+      enabled: isEnabled,
+    });
+
     try {
       const result = await toggleMcpToolAction(emailAccountId, {
         toolId,
@@ -135,22 +175,27 @@ export function IntegrationRow({
   };
 
   const handleDisconnect = async () => {
-    if (
-      !confirm(
-        "Are you sure you want to disconnect this integration? This will remove all associated tools.",
-      )
-    ) {
-      return;
-    }
+    const confirmMessage = isCustom
+      ? "Are you sure you want to remove this server? This permanently deletes its connection, credentials, and tools."
+      : "Are you sure you want to disconnect this integration? This will remove all associated tools.";
 
-    if (!connectionId) return;
+    if (!confirm(confirmMessage)) return;
 
+    if (!isCustom && !connectionId) return;
+
+    analytics.captureAction("integration_disconnect_started", {
+      integration: integration.name,
+    });
     setDisconnecting(true);
 
     try {
-      const result = await disconnectMcpConnectionAction(emailAccountId, {
-        connectionId,
-      });
+      const result = isCustom
+        ? await removeCustomMcpServerAction(emailAccountId, {
+            name: integration.name,
+          })
+        : await disconnectMcpConnectionAction(emailAccountId, {
+            connectionId: connectionId!,
+          });
 
       if (result?.serverError) {
         toastError({
@@ -158,9 +203,14 @@ export function IntegrationRow({
           description: result.serverError,
         });
       } else {
+        analytics.captureAction("integration_disconnected", {
+          integration: integration.name,
+        });
         toastSuccess({
-          title: "Disconnected successfully",
-          description: `Disconnected from ${integration.displayName}`,
+          title: isCustom ? "Server removed" : "Disconnected successfully",
+          description: isCustom
+            ? `Removed ${integration.displayName}`
+            : `Disconnected from ${integration.displayName}`,
         });
         onConnectionChange();
       }
@@ -177,30 +227,46 @@ export function IntegrationRow({
   return (
     <>
       <TableRow>
-        <TableCell>{integration.displayName}</TableCell>
-        <TableCell>
+        <TableCell className="w-full">
+          <div className="flex items-center gap-3">
+            <DomainIcon domain={integration.url} size={32} />
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span>{integration.shortName || integration.displayName}</span>
+                {integration.comingSoon && (
+                  <Badge variant="secondary">Coming soon</Badge>
+                )}
+                {isCustom && <Badge variant="secondary">Custom</Badge>}
+              </div>
+              {integration.description && (
+                <MutedText>{integration.description}</MutedText>
+              )}
+            </div>
+          </div>
+        </TableCell>
+        <TableCell className="whitespace-nowrap">
           {integration.comingSoon ? (
             <RequestAccessDialog integrationName={integration.displayName} />
-          ) : integration.authType === "oauth" ||
-            integration.authType === "api-token" ? (
+          ) : connected || integration.authType !== "none" ? (
             <div className="flex items-center gap-2">
               {connected ? (
-                <div className="flex items-center gap-2">
-                  <span
-                    className={
-                      isActive
-                        ? "text-green-600 text-sm"
-                        : "text-gray-500 text-sm"
-                    }
-                  >
-                    {isActive ? "✓ Connected" : "○ Connected (Disabled)"}
-                  </span>
-                </div>
+                isActive ? (
+                  <span className="text-green-600 text-sm">✓ Connected</span>
+                ) : (
+                  <span className="text-muted-foreground text-sm">Paused</span>
+                )
               ) : (
-                <Button size="sm" variant="outline" onClick={handleConnect}>
-                  {integration.authType === "api-token"
-                    ? "Connect with API Key"
-                    : "Connect"}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleConnect}
+                  disabled={connecting}
+                >
+                  {connecting
+                    ? "Connecting..."
+                    : integration.authType === "api-token"
+                      ? "Connect with API Key"
+                      : "Connect"}
                 </Button>
               )}
             </div>
@@ -211,55 +277,46 @@ export function IntegrationRow({
           )}
         </TableCell>
         <TableCell>
-          {integration.comingSoon ? (
-            <span className="text-gray-400 text-sm">Coming Soon</span>
-          ) : connected && tools.length > 0 ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="flex items-center gap-1"
-              onClick={() => setExpandedTools(!expandedTools)}
-            >
-              {expandedTools ? (
-                <ChevronDown className="h-4 w-4" />
-              ) : (
-                <ChevronRight className="h-4 w-4" />
-              )}
-              {toolsCount}/{totalTools} tools
-            </Button>
-          ) : (
-            <span className="text-gray-400 text-sm">No tools</span>
-          )}
-        </TableCell>
-        <TableCell>
-          {!integration.comingSoon && (
-            <Toggle
-              name={`integrations.${integration.name}.enabled`}
-              enabled={isActive}
-              onChange={handleToggle}
-            />
-          )}
-        </TableCell>
-        <TableCell>
-          {connected && !integration.comingSoon && (
+          {(connected || isCustom) && !integration.comingSoon && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="sm"
-                  className="h-8 w-8 p-0"
+                  size="iconSm"
                   aria-label="Integration actions"
                 >
                   <MoreVertical className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {connected && (
+                  <>
+                    {tools.length > 0 && (
+                      <DropdownMenuItem onClick={handleToggleToolsExpanded}>
+                        {expandedTools
+                          ? "Hide tools"
+                          : `Manage tools (${toolsCount} of ${totalTools} on)`}
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuItem onClick={handleTogglePause}>
+                      {isActive ? "Pause" : "Resume"}
+                    </DropdownMenuItem>
+                    {integration.authType === "oauth" && (
+                      <DropdownMenuItem
+                        onClick={handleConnect}
+                        disabled={connecting}
+                      >
+                        {connecting ? "Reconnecting..." : "Reconnect"}
+                      </DropdownMenuItem>
+                    )}
+                  </>
+                )}
                 <DropdownMenuItem
                   onClick={handleDisconnect}
                   disabled={disconnecting}
                   className="text-red-600"
                 >
-                  {disconnecting ? "Disconnecting..." : "Disconnect"}
+                  {getDisconnectLabel({ isCustom, disconnecting })}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -274,11 +331,22 @@ export function IntegrationRow({
   );
 }
 
+function getDisconnectLabel({
+  isCustom,
+  disconnecting,
+}: {
+  isCustom: boolean;
+  disconnecting: boolean;
+}) {
+  if (isCustom) return disconnecting ? "Removing..." : "Remove";
+  return disconnecting ? "Disconnecting..." : "Disconnect";
+}
+
 interface ToolsListProps {
+  onToggleTool: (toolId: string, isEnabled: boolean) => void;
   tools: NonNullable<
     GetIntegrationsResponse["integrations"][number]["connection"]
   >["tools"];
-  onToggleTool: (toolId: string, isEnabled: boolean) => void;
 }
 
 function ToolsList({ tools, onToggleTool }: ToolsListProps) {
@@ -286,7 +354,7 @@ function ToolsList({ tools, onToggleTool }: ToolsListProps) {
 
   return (
     <TableRow>
-      <TableCell colSpan={5} className="bg-muted/50">
+      <TableCell colSpan={3} className="bg-muted/50">
         <div className="space-y-3">
           {sortedTools.map((tool) => (
             <div
@@ -312,9 +380,9 @@ function ToolsList({ tools, onToggleTool }: ToolsListProps) {
                   </span>
                 </div>
                 {tool.description && (
-                  <p className="text-sm text-muted-foreground whitespace-pre-wrap">
+                  <MutedText className="whitespace-pre-wrap">
                     {truncate(tool.description, 100)}
-                  </p>
+                  </MutedText>
                 )}
               </div>
               <div className="flex-shrink-0">

@@ -1,145 +1,53 @@
-name: "Build Inbox Zero Docker Image"
-run-name: "Build Inbox Zero Docker Image"
-
+name: Build self-hosted images
 on:
   push:
-    branches: ["main"]
-    paths-ignore:
-      - version.txt
-
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
-  contents: write # Needed to commit version bump and push tags
-  packages: write # Needed to push Docker image to GHCR
-  id-token: write # Needed for Depot OIDC token authentication
-
-env:
-  DOCKER_IMAGE_REGISTRY: "ghcr.io"
-  DOCKER_USERNAME: "elie222"
-  DEPOT_PROJECT_ID: "2s1sh2pjrf"
-
+  contents: read
+  packages: write
 jobs:
-  fetch-version:
-    if: github.repository == 'elie222/inbox-zero'
+  build:
     runs-on: ubuntu-latest
-
-    outputs:
-      version: ${{ steps.set_version.outputs.version }}
-
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: inbox-zero
+            dockerfile: docker/Dockerfile.prod
+          - image: inbox-zero-fastmail-daemon
+            dockerfile: apps/fastmail-eventsource-daemon/Dockerfile
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4.1.1
-
-      - name: Force Pull Latest Code
-        run: |
-          git fetch origin main
-          git pull origin main
-
-      - name: Set version
-        id: set_version
-        run: |
-          version=$(cat version.txt)
-          echo "version=$version" >> $GITHUB_OUTPUT
-
-  update_version_txt:
-    if: github.repository == 'elie222/inbox-zero'
-    needs:
-      - fetch-version
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4.1.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Normalize registry owner
+        run: echo "REGISTRY_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Bump version on main branch
-        id: update_version
-        shell: bash
-        env:
-          FETCHED_BASE_VERSION: ${{ needs.fetch-version.outputs.version }}
-        run: |
-          set -x
-          BASE_VERSION="$FETCHED_BASE_VERSION"
-          IFS='.' read -r -a version_parts <<< "$BASE_VERSION"
-          for i in {0..2}; do
-            version_parts[$i]=${version_parts[$i]:-0}
-          done
-          version_parts[2]=$((version_parts[2] + 1))
-          new_version="${version_parts[0]}.${version_parts[1]}.${version_parts[2]}"
-          echo "new_version=${new_version}" >> $GITHUB_OUTPUT
-
-      - name: Commit updated version file
-        shell: bash
-        env:
-          VERSION: ${{ needs.fetch-version.outputs.version }}
-          NEW_VERSION: ${{ steps.update_version.outputs.new_version }}
-        run: |
-          echo "$NEW_VERSION" > version.txt
-          git config --local user.email "github-actions@getinboxzero.com"
-          git config --local user.name "github-actions"
-          git tag -a "$VERSION" -m "Release version $VERSION"
-          git commit -a -m "Bump version from $VERSION to $NEW_VERSION"
-          echo "Tagged version $VERSION. Updated version.txt to $NEW_VERSION on main." >> $GITHUB_STEP_SUMMARY
-
-      - name: Push changes
-        uses: ad-m/github-push-action@v0.8.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref }}
-          force_with_lease: true
-          tags: true
-
-  build-docker:
-    if: github.repository == 'elie222/inbox-zero'
-    name: "Build Docker Image"
-    runs-on: ubuntu-latest
-    needs:
-      - fetch-version
-      - update_version_txt
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.DOCKER_IMAGE_REGISTRY }}
-          username: ${{ env.DOCKER_USERNAME }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        id: meta
         with:
-          username: ${{ env.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Set up Depot
-        uses: depot/setup-action@v1
-
-      - name: Build and Push Docker Image
-        uses: depot/build-push-action@v1
+          images: ghcr.io/${{ env.REGISTRY_OWNER }}/${{ matrix.image }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+      - uses: docker/build-push-action@v6
         with:
-          project: ${{ env.DEPOT_PROJECT_ID }}
           context: .
-          file: docker/Dockerfile.prod
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ env.DOCKER_USERNAME }}/inbox-zero:latest
-            ghcr.io/${{ env.DOCKER_USERNAME }}/inbox-zero:${{ needs.fetch-version.outputs.version }}
-            ${{ env.DOCKER_USERNAME }}/inbox-zero:latest
-            ${{ env.DOCKER_USERNAME }}/inbox-zero:${{ needs.fetch-version.outputs.version }}
-
-      - name: Update Docker Hub Description
-        uses: peter-evans/dockerhub-description@v4
-        with:
-          username: ${{ env.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.DOCKER_USERNAME }}/inbox-zero
-          short-description: "Inbox Zero - AI email assistant for Gmail and Outlook to reach inbox zero fast"
-          readme-filepath: ./README.md
-
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

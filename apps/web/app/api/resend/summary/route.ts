@@ -1,21 +1,38 @@
-import { z } from "zod";
 import { NextResponse } from "next/server";
 import { subHours } from "date-fns/subHours";
-import { sendSummaryEmail } from "@inboxzero/resend";
+import { sendSummaryEmail } from "@inboxzero/transactional-email";
 import { withEmailAccount, withError } from "@/utils/middleware";
 import { env } from "@/env";
-import { hasCronSecret } from "@/utils/cron";
+import { isAuthorizedCronOrInternalRequest } from "@/utils/cron";
 import { captureException } from "@/utils/error";
+import type { Prisma } from "@/generated/prisma/client";
 import prisma from "@/utils/prisma";
-import { ThreadTrackerType } from "@/generated/prisma/enums";
+import {
+  ActionType,
+  ExecutedRuleStatus,
+  ScheduledActionStatus,
+  SystemType,
+} from "@/generated/prisma/enums";
 import type { Logger } from "@/utils/logger";
-import { getMessagesBatch } from "@/utils/gmail/message";
 import { decodeSnippet } from "@/utils/gmail/decode";
 import { createUnsubscribeToken } from "@/utils/unsubscribe";
+import { extractEmailAddress } from "@/utils/email";
+import { getEmailSearchUrl, getEmailUrlForMessage } from "@/utils/url";
+import { sendSummaryEmailBody } from "./validation";
+import { createEmailProvider } from "@/utils/email/provider";
+import {
+  isGoogleProvider,
+  isMicrosoftProvider,
+} from "@/utils/email/provider-types";
+import type { ParsedMessage } from "@/utils/types";
+import {
+  ARCHIVED_EMAIL_DISPLAY_LIMIT,
+  buildArchivedEmailSummaryItems,
+} from "./archived-emails";
 
 export const maxDuration = 60;
 
-const sendSummaryEmailBody = z.object({ emailAccountId: z.string() });
+const COLD_EMAIL_DISPLAY_LIMIT = 100;
 
 export const GET = withEmailAccount("resend/summary", async (request) => {
   // send to self
@@ -34,7 +51,7 @@ export const GET = withEmailAccount("resend/summary", async (request) => {
 
 export const POST = withError("resend/summary", async (request) => {
   const logger = request.logger;
-  if (!hasCronSecret(request)) {
+  if (!isAuthorizedCronOrInternalRequest(request)) {
     logger.error("Unauthorized cron request");
     captureException(new Error("Unauthorized cron request: resend"));
     return new Response("Unauthorized", { status: 401 });
@@ -109,11 +126,13 @@ async function sendEmail({
   const emailAccount = await prisma.emailAccount.findUnique({
     where: { id: emailAccountId },
     select: {
+      userId: true,
       email: true,
-      coldEmails: { where: { createdAt: { gt: cutOffDate } } },
       account: {
         select: {
+          provider: true,
           access_token: true,
+          refresh_token: true,
         },
       },
     },
@@ -124,141 +143,157 @@ async function sendEmail({
     return { success: false };
   }
 
-  if (emailAccount) {
-    logger.info("Email account found");
-  } else {
-    logger.error("Email account not found or cutoff date is in the future", {
-      cutOffDate,
-    });
-    return { success: true };
-  }
+  logger = logger.with({ userId: emailAccount.userId });
 
-  // Get counts and recent threads for each type
+  const coldEmailRule = await prisma.rule.findUnique({
+    where: {
+      emailAccountId_systemType: {
+        emailAccountId,
+        systemType: SystemType.COLD_EMAIL,
+      },
+    },
+    select: { id: true },
+  });
+
+  const archivedActionWhere = {
+    type: ActionType.ARCHIVE,
+    createdAt: { gt: cutOffDate },
+    executedRule: {
+      emailAccountId,
+      automated: true,
+    },
+    OR: [
+      {
+        scheduledAction: {
+          is: { status: ScheduledActionStatus.COMPLETED },
+        },
+      },
+      {
+        scheduledAction: { is: null },
+        executedRule: { status: ExecutedRuleStatus.APPLIED },
+      },
+    ],
+  } satisfies Prisma.ExecutedActionWhereInput;
+
+  const coldExecutedRuleWhere = coldEmailRule
+    ? ({
+        ruleId: coldEmailRule.id,
+        automated: true,
+        createdAt: { gt: cutOffDate },
+      } satisfies Prisma.ExecutedRuleWhereInput)
+    : null;
+
   const [
-    counts,
-    needsReply,
-    awaitingReply,
-    // needsAction
+    coldEmailCount,
+    coldExecutedRules,
+    archivedEmailCount,
+    archivedActions,
   ] = await Promise.all([
-    // total count
-    // NOTE: should really be distinct by threadId. this will cause a mismatch in some cases
-    prisma.threadTracker.groupBy({
-      by: ["type"],
-      where: {
-        emailAccountId,
-        resolved: false,
-      },
-      _count: true,
+    coldExecutedRuleWhere
+      ? prisma.executedRule.count({ where: coldExecutedRuleWhere })
+      : Promise.resolve(0),
+    coldExecutedRuleWhere
+      ? prisma.executedRule.findMany({
+          where: coldExecutedRuleWhere,
+          orderBy: { createdAt: "desc" },
+          take: COLD_EMAIL_DISPLAY_LIMIT,
+          select: {
+            messageId: true,
+            createdAt: true,
+          },
+        })
+      : Promise.resolve([]),
+    prisma.executedAction.count({
+      where: archivedActionWhere,
     }),
-    // needs reply
-    prisma.threadTracker.findMany({
-      where: {
-        emailAccountId,
-        type: ThreadTrackerType.NEEDS_REPLY,
-        resolved: false,
+    prisma.executedAction.findMany({
+      where: archivedActionWhere,
+      orderBy: { createdAt: "desc" },
+      take: ARCHIVED_EMAIL_DISPLAY_LIMIT,
+      select: {
+        id: true,
+        createdAt: true,
+        executedRule: {
+          select: {
+            messageId: true,
+            rule: {
+              select: {
+                name: true,
+                systemType: true,
+              },
+            },
+          },
+        },
       },
-      orderBy: { sentAt: "desc" },
-      take: 20,
-      distinct: ["threadId"],
     }),
-    // awaiting reply
-    prisma.threadTracker.findMany({
-      where: {
-        emailAccountId,
-        type: ThreadTrackerType.AWAITING,
-        resolved: false,
-        // only show emails that are more than 3 days overdue
-        sentAt: { lt: subHours(new Date(), 24 * 3) },
-      },
-      orderBy: { sentAt: "desc" },
-      take: 20,
-      distinct: ["threadId"],
-    }),
-    // needs action - currently not used
-    // prisma.threadTracker.findMany({
-    //   where: {
-    //     userId: user.id,
-    //     type: ThreadTrackerType.NEEDS_ACTION,
-    //     resolved: false,
-    //   },
-    //   orderBy: { sentAt: "desc" },
-    //   take: 20,
-    //   distinct: ["threadId"],
-    // }),
   ]);
 
-  const typeCounts = Object.fromEntries(
-    counts.map((count) => [count.type, count._count]),
-  );
-
-  const coldEmailers = emailAccount.coldEmails.map((e) => ({
-    from: e.fromEmail,
-    subject: "",
-    sentAt: e.createdAt,
-  }));
-
-  // get messages
   const messageIds = [
-    ...needsReply.map((m) => m.messageId),
-    ...awaitingReply.map((m) => m.messageId),
-    // ...needsAction.map((m) => m.messageId),
+    ...coldExecutedRules.map((r) => r.messageId),
+    ...archivedActions.map((a) => a.executedRule.messageId),
   ];
 
   logger.info("Getting messages", {
     messagesCount: messageIds.length,
   });
 
-  const messages = emailAccount.account.access_token
-    ? await getMessagesBatch({
-        messageIds,
-        accessToken: emailAccount.account.access_token,
-      })
-    : [];
+  const messages = await getMessages({
+    emailAccountId,
+    provider: emailAccount.account.provider,
+    hasCredentials: !!(emailAccount.account.provider === "fastmail"
+      ? emailAccount.account.access_token
+      : emailAccount.account.refresh_token),
+    messageIds,
+    logger,
+  });
 
   const messageMap = Object.fromEntries(
     messages.map((message) => [message.id, message]),
   );
 
-  const recentNeedsReply = needsReply.map((t) => {
-    const message = messageMap[t.messageId];
+  const getEmailLinks = (message: ParsedMessage) => {
+    const senderAddress = extractEmailAddress(message.headers.from);
+    return {
+      url: getEmailUrlForMessage(
+        message.id,
+        message.threadId,
+        emailAccount.email,
+        emailAccount.account.provider,
+      ),
+      senderUrl: senderAddress
+        ? getEmailSearchUrl(
+            senderAddress,
+            emailAccount.email,
+            emailAccount.account.provider,
+          )
+        : undefined,
+    };
+  };
+
+  const coldEmailers = coldExecutedRules.map((r) => {
+    const message = messageMap[r.messageId];
     return {
       from: message?.headers.from || "Unknown",
       subject: decodeSnippet(message?.snippet) || "",
-      sentAt: t.sentAt,
+      sentAt: r.createdAt,
+      ...(message ? getEmailLinks(message) : {}),
     };
   });
 
-  const recentAwaitingReply = awaitingReply.map((t) => {
-    const message = messageMap[t.messageId];
-    return {
-      from: message?.headers.to || "Unknown",
-      subject: decodeSnippet(message?.snippet) || "",
-      sentAt: t.sentAt,
-    };
+  const archivedEmails = buildArchivedEmailSummaryItems({
+    archivedActions,
+    messageMap,
+    getEmailLinks,
   });
 
-  // const recentNeedsAction = needsAction.map((t) => {
-  //   const message = messageMap[t.messageId];
-  //   return {
-  //     from: message?.headers.from || "Unknown",
-  //     subject: decodeSnippet(message?.snippet) || "",
-  //     sentAt: t.sentAt,
-  //   };
-  // });
-
-  const shouldSendEmail = !!(
-    coldEmailers.length ||
-    typeCounts[ThreadTrackerType.NEEDS_REPLY] ||
-    typeCounts[ThreadTrackerType.AWAITING] ||
-    typeCounts[ThreadTrackerType.NEEDS_ACTION]
-  );
+  const shouldSendEmail = !!(archivedEmailCount || coldEmailCount);
 
   logger.info("Sending summary email to user", {
     shouldSendEmail,
-    coldEmailers: coldEmailers.length,
-    needsReplyCount: typeCounts[ThreadTrackerType.NEEDS_REPLY],
-    awaitingReplyCount: typeCounts[ThreadTrackerType.AWAITING],
-    needsActionCount: typeCounts[ThreadTrackerType.NEEDS_ACTION],
+    archivedEmailCount,
+    archivedEmailsShown: archivedEmails.length,
+    coldEmailCount,
+    coldEmailersShown: coldEmailers.length,
   });
 
   async function sendEmail({
@@ -275,13 +310,10 @@ async function sendEmail({
       to: userEmail,
       emailProps: {
         baseUrl: env.NEXT_PUBLIC_BASE_URL,
+        archivedEmailCount,
+        archivedEmails,
+        coldEmailCount,
         coldEmailers,
-        needsReplyCount: typeCounts[ThreadTrackerType.NEEDS_REPLY],
-        awaitingReplyCount: typeCounts[ThreadTrackerType.AWAITING],
-        needsActionCount: typeCounts[ThreadTrackerType.NEEDS_ACTION],
-        needsReply: recentNeedsReply,
-        awaitingReply: recentAwaitingReply,
-        // needsAction: recentNeedsAction,
         unsubscribeToken: token,
       },
     });
@@ -298,4 +330,55 @@ async function sendEmail({
   ]);
 
   return { success: true };
+}
+
+async function getMessages({
+  emailAccountId,
+  provider,
+  hasCredentials,
+  messageIds,
+  logger,
+}: {
+  emailAccountId: string;
+  provider: string;
+  hasCredentials: boolean;
+  messageIds: string[];
+  logger: Logger;
+}): Promise<ParsedMessage[]> {
+  const uniqueMessageIds = Array.from(new Set(messageIds)).filter(Boolean);
+  if (!uniqueMessageIds.length) return [];
+
+  if (!hasCredentials) {
+    logger.warn(
+      "Skipping summary message fetch: account has no mail credentials",
+    );
+    return [];
+  }
+
+  if (
+    !isGoogleProvider(provider) &&
+    !isMicrosoftProvider(provider) &&
+    provider !== "fastmail"
+  ) {
+    logger.warn("Skipping summary message fetch: unsupported provider", {
+      provider,
+    });
+    return [];
+  }
+
+  const emailProvider = await createEmailProvider({
+    emailAccountId,
+    provider,
+    logger,
+  });
+
+  const messages: ParsedMessage[] = [];
+  const batchSize = 100;
+
+  for (let i = 0; i < uniqueMessageIds.length; i += batchSize) {
+    const batch = uniqueMessageIds.slice(i, i + batchSize);
+    messages.push(...(await emailProvider.getMessagesBatch(batch)));
+  }
+
+  return messages;
 }

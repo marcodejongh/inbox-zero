@@ -1,0 +1,206 @@
+import { cleanupInvalidTokens } from "@/utils/auth/cleanup-invalid-tokens";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  Client,
+  type Context,
+  type Middleware,
+} from "@microsoft/microsoft-graph-client";
+import { saveTokens } from "@/utils/auth/save-tokens";
+import { createTestLogger } from "@/__tests__/helpers";
+import {
+  createOutlookClient,
+  getLinkingOAuth2Url,
+  getOutlookClientWithRefresh,
+} from "./client";
+import {
+  getMicrosoftGraphClientOptions,
+  getMicrosoftOauthAuthorizeUrl,
+  requestMicrosoftToken,
+} from "@/utils/outlook/oauth";
+
+vi.mock("@microsoft/microsoft-graph-client", () => ({
+  Client: {
+    init: vi.fn(),
+    initWithMiddleware: vi.fn(),
+  },
+  MiddlewareFactory: {
+    getDefaultMiddlewareChain: vi.fn(() => [
+      { execute: vi.fn(), setNext: vi.fn() },
+      { execute: vi.fn(), setNext: vi.fn() },
+    ]),
+  },
+}));
+
+vi.mock("@/utils/auth/save-tokens", () => ({
+  saveTokens: vi.fn(),
+}));
+
+vi.mock("@/utils/auth/cleanup-invalid-tokens", () => ({
+  cleanupInvalidTokens: vi.fn(),
+}));
+
+vi.mock("@/utils/outlook/oauth", () => ({
+  getMicrosoftGraphClientOptions: vi.fn(() => ({
+    baseUrl: "http://localhost:4003/",
+    customHosts: new Set(["localhost"]),
+    defaultVersion: "v1.0",
+    fetchOptions: {
+      headers: {
+        Authorization: "Bearer emulator-token",
+      },
+    },
+  })),
+  getMicrosoftOauthAuthorizeUrl: vi.fn(
+    () => "http://localhost:4003/oauth2/v2.0/authorize",
+  ),
+  getMicrosoftOauthTokenUrl: vi.fn(),
+  requestMicrosoftToken: vi.fn(),
+}));
+
+vi.mock("@/env", () => ({
+  env: {
+    MICROSOFT_CLIENT_ID: "client-id",
+    MICROSOFT_CLIENT_SECRET: "client-secret",
+    MICROSOFT_TENANT_ID: "common",
+    NEXT_PUBLIC_BASE_URL: "http://localhost:3000",
+    NEXT_PUBLIC_EMAIL_SEND_ENABLED: false,
+  },
+}));
+
+describe("outlook client emulator configuration", () => {
+  it("records missing refresh tokens using the failed credential snapshot", async () => {
+    const logger = createTestLogger();
+    vi.mocked(cleanupInvalidTokens).mockResolvedValueOnce(undefined);
+    await expect(
+      getOutlookClientWithRefresh({
+        accessToken: "access-token",
+        refreshToken: null,
+        expiresAt: null,
+        emailAccountId: "email-account-id",
+        logger,
+      }),
+    ).rejects.toThrow("No refresh token");
+    expect(cleanupInvalidTokens).toHaveBeenCalledWith({
+      emailAccountId: "email-account-id",
+      reason: "invalid_grant",
+      failedAccessToken: "access-token",
+      failedRefreshToken: null,
+      logger,
+    });
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("uses a request-rewriting middleware for the HTTP emulator", async () => {
+    createOutlookClient("emulator-token", createTestLogger());
+
+    expect(getMicrosoftGraphClientOptions).toHaveBeenCalledWith(
+      "emulator-token",
+    );
+    expect(Client.initWithMiddleware).toHaveBeenCalledWith({
+      defaultVersion: "v1.0",
+      fetchOptions: {
+        headers: {
+          Prefer: 'IdType="ImmutableId"',
+        },
+      },
+      middleware: expect.any(Array),
+    });
+    expect(Client.init).not.toHaveBeenCalled();
+
+    const clientOptions = vi.mocked(Client.initWithMiddleware).mock
+      .calls[0]?.[0];
+    const rewriteMiddleware = clientOptions?.middleware?.[1];
+    const executeNext = vi.fn();
+    const nextMiddleware: Middleware = { execute: executeNext };
+    const context: Context = {
+      request: "https://graph.microsoft.com/v1.0/me/messages",
+    };
+
+    expect(clientOptions?.middleware).toHaveLength(3);
+    rewriteMiddleware?.setNext?.(nextMiddleware);
+    await rewriteMiddleware?.execute(context);
+
+    expect(context.request).toBe("http://localhost:4003/v1.0/me/messages");
+    expect(executeNext).toHaveBeenCalledWith(context);
+  });
+
+  it("uses the emulator authorize URL for linking", () => {
+    const url = new URL(getLinkingOAuth2Url());
+
+    expect(url.origin + url.pathname).toBe(
+      "http://localhost:4003/oauth2/v2.0/authorize",
+    );
+    expect(url.searchParams.get("client_id")).toBe("client-id");
+    expect(url.searchParams.get("response_type")).toBe("code");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "http://localhost:3000/api/outlook/linking/callback",
+    );
+    expect(url.searchParams.get("prompt")).toBe("consent");
+    expect(url.searchParams.get("scope")).toBe(
+      "openid profile email User.Read offline_access Mail.ReadWrite MailboxSettings.ReadWrite",
+    );
+    expect(getMicrosoftOauthAuthorizeUrl).toHaveBeenCalledWith();
+  });
+
+  it("saves refreshed Outlook tokens with optimistic concurrency", async () => {
+    const staleExpiresAt = Date.now() - 1000;
+    vi.mocked(requestMicrosoftToken).mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        access_token: "new-access-token",
+        expires_in: 3600,
+      }),
+    } as any);
+
+    await getOutlookClientWithRefresh({
+      accessToken: "stale-access-token",
+      refreshToken: "refresh-token",
+      expiresAt: staleExpiresAt,
+      emailAccountId: "email-account-id",
+      logger: createTestLogger(),
+    });
+
+    expect(saveTokens).toHaveBeenCalledWith(
+      expect.objectContaining({
+        emailAccountId: "email-account-id",
+        accountRefreshToken: "refresh-token",
+        provider: "microsoft",
+        expectedExpiresAt: staleExpiresAt,
+        tokens: expect.objectContaining({
+          access_token: "new-access-token",
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    [
+      "a device management policy",
+      "AADSTS530003: Your device is required to be managed to access this resource.",
+    ],
+    [
+      "a malformed refresh token",
+      "AADSTS9002313: Invalid request. Request is malformed or invalid.",
+    ],
+  ])("asks the user to reconnect when refresh is blocked by %s", async (_case, errorDescription) => {
+    vi.mocked(requestMicrosoftToken).mockResolvedValue({
+      ok: false,
+      json: vi.fn().mockResolvedValue({ error_description: errorDescription }),
+    } as any);
+    vi.mocked(cleanupInvalidTokens).mockResolvedValue(undefined as any);
+
+    await expect(
+      getOutlookClientWithRefresh({
+        accessToken: "stale-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 1000,
+        emailAccountId: "email-account-id",
+        logger: createTestLogger(),
+      }),
+    ).rejects.toThrow("Microsoft authorization has expired");
+    expect(cleanupInvalidTokens).toHaveBeenCalled();
+  });
+});

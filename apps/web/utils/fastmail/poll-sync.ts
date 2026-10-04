@@ -1,332 +1,343 @@
+import {
+  applyFastmailFilters,
+  isManagedFastmailFilter,
+} from "@/utils/fastmail/filters";
+import { randomUUID } from "node:crypto";
 import prisma from "@/utils/prisma";
-import { hasAiAccess, getPremiumUserFilter } from "@/utils/premium";
+import {
+  hasAiAccess,
+  getUserTier,
+  premiumEntitlementSelect,
+} from "@/utils/premium";
 import { createEmailProvider } from "@/utils/email/provider";
 import { processHistoryItem } from "@/utils/webhook/process-history-item";
 import type { FastmailProvider } from "@/utils/email/fastmail";
 import type { Logger } from "@/utils/logger";
+import { enqueueFastmailSync } from "@/utils/fastmail/queue";
 
 export interface PollSyncResult {
-  emailAccountId: string;
   email: string;
-  status: "success" | "error" | "skipped" | "no_changes";
-  processedCount?: number;
-  newState?: string;
+  emailAccountId: string;
   error?: string;
+  newState?: string;
+  processedCount?: number;
+  status: "success" | "error" | "skipped" | "no_changes";
 }
 
-/**
- * Get Fastmail accounts that are eligible for polling
- */
-async function getFastmailAccountsToPoll() {
-  return prisma.emailAccount.findMany({
-    where: {
-      account: {
-        provider: "fastmail",
-      },
-      ...getPremiumUserFilter(),
-    },
-    select: {
-      id: true,
-      email: true,
-      lastSyncedHistoryId: true,
-      lastPolledAt: true,
-      autoCategorizeSenders: true,
-      about: true,
-      multiRuleSelectionEnabled: true,
-      timezone: true,
-      calendarBookingLink: true,
-      account: {
-        select: {
-          provider: true,
-          access_token: true,
-          refresh_token: true,
-          expires_at: true,
-        },
-      },
-      rules: {
-        where: { enabled: true },
-        include: { actions: true },
-      },
-      user: {
-        select: {
-          id: true,
-          aiProvider: true,
-          aiModel: true,
-          aiApiKey: true,
-          premium: {
-            select: {
-              tier: true,
-              lemonSqueezyRenewsAt: true,
-              stripeSubscriptionStatus: true,
-            },
-          },
-        },
-      },
-    },
-    orderBy: {
-      lastPolledAt: { sort: "asc", nulls: "first" },
-    },
+export async function pollAllFastmailAccounts(
+  logger: Logger,
+): Promise<PollSyncResult[]> {
+  const accounts = await prisma.emailAccount.findMany({
+    where: { account: { provider: "fastmail", access_token: { not: null } } },
+    select: { id: true, email: true },
   });
+  const results: PollSyncResult[] = [];
+  for (const account of accounts) {
+    try {
+      await enqueueFastmailSync(account.id);
+      results.push({
+        emailAccountId: account.id,
+        email: account.email,
+        status: "success",
+      });
+    } catch (error) {
+      logger.error("Could not enqueue Fastmail recovery", {
+        emailAccountId: account.id,
+        error,
+      });
+      throw error;
+    }
+  }
+  return results;
 }
 
-/**
- * Poll a single Fastmail account for new emails and process them through the rule engine
- */
 export async function pollFastmailAccount({
   emailAccountId,
   logger,
-  forceSync = false,
 }: {
   emailAccountId: string;
   logger: Logger;
   forceSync?: boolean;
 }): Promise<PollSyncResult> {
-  const log = logger.with({ emailAccountId, action: "pollFastmailAccount" });
-
+  const owner = randomUUID();
+  const log = logger.with({ emailAccountId });
+  const started = Date.now();
+  const claimed = await prisma.emailAccount.updateMany({
+    where: {
+      id: emailAccountId,
+      account: { provider: "fastmail" },
+      OR: [
+        { fastmailLeaseUntil: null },
+        { fastmailLeaseUntil: { lt: new Date() } },
+      ],
+    },
+    data: {
+      fastmailLeaseOwner: owner,
+      fastmailLeaseUntil: new Date(Date.now() + 600_000),
+    },
+  });
+  if (!claimed.count) return { emailAccountId, email: "", status: "skipped" };
+  let processedCount = 0;
   try {
-    const account = await prisma.emailAccount.findUnique({
+    const account = await prisma.emailAccount.findUniqueOrThrow({
       where: { id: emailAccountId },
-      select: {
-        id: true,
-        email: true,
-        lastSyncedHistoryId: true,
-        lastPolledAt: true,
-        autoCategorizeSenders: true,
-        about: true,
-        multiRuleSelectionEnabled: true,
-        timezone: true,
-        calendarBookingLink: true,
-        account: {
-          select: {
-            provider: true,
-            access_token: true,
-            refresh_token: true,
-            expires_at: true,
-          },
-        },
-        rules: {
-          where: { enabled: true },
-          include: { actions: true },
-        },
-        user: {
-          select: {
-            id: true,
-            aiProvider: true,
-            aiModel: true,
-            aiApiKey: true,
-            premium: {
-              select: {
-                tier: true,
-                lemonSqueezyRenewsAt: true,
-                stripeSubscriptionStatus: true,
-              },
-            },
-          },
-        },
-      },
+      select: accountSelect,
     });
-
-    if (!account) {
-      return {
-        emailAccountId,
-        email: "",
-        status: "error",
-        error: "Account not found",
-      };
-    }
-
-    if (account.account?.provider !== "fastmail") {
-      return {
-        emailAccountId,
-        email: account.email,
-        status: "skipped",
-        error: "Not a Fastmail account",
-      };
-    }
-
-    // Skip accounts polled recently (< 2 minutes ago) during cron unless forced
-    if (!forceSync && account.lastPolledAt) {
-      const timeSinceLastPoll = Date.now() - account.lastPolledAt.getTime();
-      if (timeSinceLastPoll < 2 * 60 * 1000) {
-        log.info("Skipping recently polled account", {
-          lastPolledAt: account.lastPolledAt,
-          timeSinceLastPoll,
-        });
-        return {
-          emailAccountId,
-          email: account.email,
-          status: "skipped",
-          error: "Recently polled",
-        };
-      }
-    }
-
-    // Check if user has AI access
-    const userHasAiAccess = hasAiAccess(
-      account.user.premium?.tier || null,
-      account.user.aiApiKey,
-    );
-
-    if (!userHasAiAccess) {
-      log.info("User does not have AI access");
-      return {
-        emailAccountId,
-        email: account.email,
-        status: "skipped",
-        error: "No AI access",
-      };
-    }
-
-    // Check if user has rules
-    const hasAutomationRules = account.rules.length > 0;
-    if (!hasAutomationRules) {
-      log.info("User has no enabled rules");
-      return {
-        emailAccountId,
-        email: account.email,
-        status: "skipped",
-        error: "No rules enabled",
-      };
-    }
-
-    // Check for tokens (refresh_token is optional for app token accounts)
-    if (!account.account?.access_token) {
-      log.error("Missing access token");
-      return {
-        emailAccountId,
-        email: account.email,
-        status: "error",
-        error: "Missing authentication tokens",
-      };
-    }
-
-    log.info("Creating Fastmail provider");
-
     const provider = (await createEmailProvider({
       emailAccountId,
       provider: "fastmail",
       logger: log,
     })) as FastmailProvider;
-
-    // Get changes since last state
-    const sinceState = account.lastSyncedHistoryId;
-    log.info("Getting email changes", { sinceState });
-
-    const changes = await provider.getEmailChanges(sinceState);
-
-    if (changes.created.length === 0 && changes.updated.length === 0) {
-      log.info("No new emails found");
-      // Update lastPolledAt even when no changes
+    let cursor = account.lastSyncedHistoryId;
+    let resyncState = account.fastmailResyncState;
+    let resyncPosition = account.fastmailResyncPosition;
+    const baselineDate =
+      account.fastmailSyncStartedAt ?? account.lastPolledAt ?? new Date();
+    if (!account.fastmailSyncStartedAt) {
+      // Preserve the recovery window of accounts connected before this migration.
       await prisma.emailAccount.update({
-        where: { id: emailAccountId },
-        data: {
-          lastPolledAt: new Date(),
-          lastSyncedHistoryId: changes.newState,
-        },
+        where: { id: emailAccountId, fastmailLeaseOwner: owner },
+        data: { fastmailSyncStartedAt: baselineDate },
       });
-      return {
-        emailAccountId,
-        email: account.email,
-        status: "no_changes",
-        newState: changes.newState,
-      };
     }
-
-    log.info("Processing new emails", {
-      created: changes.created.length,
-      updated: changes.updated.length,
-    });
-
-    // Process new emails through the rule engine
-    let processedCount = 0;
-    for (const messageId of changes.created) {
-      try {
-        log.info("Processing message", { messageId });
-        await processHistoryItem(
-          { messageId },
-          {
-            provider,
-            emailAccount: {
-              ...account,
-              userId: account.user.id,
-              user: account.user,
+    let more = true;
+    while (more && Date.now() - started < 120_000) {
+      if (resyncState) {
+        let page: Awaited<
+          ReturnType<FastmailProvider["getMessagesWithPagination"]>
+        >;
+        try {
+          page = await provider.getMessagesWithPagination({
+            after: baselineDate,
+            maxResults: 100,
+            pageToken: resyncPosition ?? undefined,
+          });
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !error.message.includes("JMAP error: anchorNotFound")
+          )
+            throw error;
+          // The last scanned message was deleted; restart safely using intake deduplication.
+          resyncPosition = null;
+          await prisma.emailAccount.update({
+            where: { id: emailAccountId, fastmailLeaseOwner: owner },
+            data: { fastmailResyncPosition: null },
+          });
+          continue;
+        }
+        await prisma.$transaction([
+          prisma.fastmailSyncItem.createMany({
+            data: page.messages.map((message) => ({
+              emailAccountId,
+              messageId: message.id,
+            })),
+            skipDuplicates: true,
+          }),
+          prisma.emailAccount.update({
+            where: { id: emailAccountId, fastmailLeaseOwner: owner },
+            data: {
+              fastmailResyncPosition: page.nextPageToken ?? null,
+              fastmailResyncState: page.nextPageToken ? resyncState : null,
+              ...(page.nextPageToken
+                ? {}
+                : { lastSyncedHistoryId: resyncState }),
             },
-            hasAutomationRules,
-            hasAiAccess: userHasAiAccess,
-            rules: account.rules,
-            logger: log.with({ messageId }),
+          }),
+        ]);
+        resyncPosition = page.nextPageToken ?? null;
+        if (!page.nextPageToken) {
+          cursor = resyncState;
+          resyncState = null;
+        }
+        continue;
+      }
+      let changes: Awaited<ReturnType<FastmailProvider["getEmailChanges"]>>;
+      try {
+        changes = await provider.getEmailChanges(cursor);
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !/JMAP error: (cannotCalculateChanges|invalidState)/.test(
+            error.message,
+          )
+        )
+          throw error;
+        resyncState = (await provider.getEmailChanges(null)).newState;
+        resyncPosition = null;
+        await prisma.emailAccount.update({
+          where: { id: emailAccountId, fastmailLeaseOwner: owner },
+          data: {
+            fastmailResyncState: resyncState,
+            fastmailResyncPosition: null,
           },
-        );
+        });
+        continue;
+      }
+      await prisma.$transaction([
+        prisma.fastmailSyncItem.createMany({
+          data: changes.created.map((messageId) => ({
+            emailAccountId,
+            messageId,
+          })),
+          skipDuplicates: true,
+        }),
+        prisma.emailAccount.update({
+          where: { id: emailAccountId, fastmailLeaseOwner: owner },
+          data: { lastSyncedHistoryId: changes.newState },
+        }),
+      ]);
+      cursor = changes.newState;
+      more = changes.hasMoreChanges;
+    }
+    const pending = await prisma.fastmailSyncItem.findMany({
+      where: { emailAccountId, processedAt: null },
+      orderBy: [{ attempts: "asc" }, { createdAt: "asc" }],
+      take: 100,
+    });
+    let failed = false;
+    for (const item of pending) {
+      if (Date.now() - started > 230_000) {
+        more = true;
+        break;
+      }
+      const owned = await prisma.emailAccount.updateMany({
+        where: { id: emailAccountId, fastmailLeaseOwner: owner },
+        data: { fastmailLeaseUntil: new Date(Date.now() + 600_000) },
+      });
+      if (!owned.count) throw new Error("Fastmail sync lease was lost");
+      try {
+        const message = (await provider.getMessagesBatch([item.messageId]))[0];
+        if (message)
+          await applyFastmailFilters(message, account.rules, provider);
+        if (message)
+          await processHistoryItem(
+            { messageId: item.messageId, message },
+            {
+              provider,
+              emailAccount: { ...account, userId: account.user.id },
+              rules: account.rules.filter(
+                (rule) => !isManagedFastmailFilter(rule),
+              ),
+              hasAutomationRules: account.rules.length > 0,
+              hasAiAccess: hasAiAccess(
+                getUserTier(account.user.premium),
+                !!account.user.aiApiKey,
+              ),
+              propagateProcessingErrors: true,
+              logger: log.with({ messageId: item.messageId }),
+            },
+          );
+        await prisma.fastmailSyncItem.update({
+          where: {
+            emailAccountId_messageId: {
+              emailAccountId,
+              messageId: item.messageId,
+            },
+          },
+          data: { processedAt: new Date(), lastError: null },
+        });
         processedCount++;
       } catch (error) {
-        log.error("Error processing message", { messageId, error });
+        failed = true;
+        log.error("Fastmail message remains pending", {
+          messageId: item.messageId,
+          error,
+        });
+        await prisma.fastmailSyncItem.update({
+          where: {
+            emailAccountId_messageId: {
+              emailAccountId,
+              messageId: item.messageId,
+            },
+          },
+          data: {
+            attempts: { increment: 1 },
+            lastError: "Message processing failed; see server logs.",
+          },
+        });
       }
     }
-
-    // Update state and polling timestamp
+    if (failed)
+      throw new Error("Some Fastmail messages remain pending for retry");
     await prisma.emailAccount.update({
-      where: { id: emailAccountId },
-      data: {
-        lastSyncedHistoryId: changes.newState,
-        lastPolledAt: new Date(),
-      },
+      where: { id: emailAccountId, fastmailLeaseOwner: owner },
+      data: { lastPolledAt: new Date() },
     });
-
-    // Handle pagination if there are more changes
-    if (changes.hasMoreChanges) {
-      log.info("More changes available, will be processed on next poll");
-    }
-
-    log.info("Completed polling", {
-      processedCount,
-      newState: changes.newState,
+    // Release before scheduling the next page so a fast worker can claim it.
+    await prisma.emailAccount.updateMany({
+      where: { id: emailAccountId, fastmailLeaseOwner: owner },
+      data: { fastmailLeaseOwner: null, fastmailLeaseUntil: null },
     });
-
+    if (more || pending.length === 100)
+      await enqueueFastmailSync(emailAccountId);
     return {
       emailAccountId,
       email: account.email,
-      status: "success",
+      status: processedCount ? "success" : "no_changes",
       processedCount,
-      newState: changes.newState,
+      newState: cursor ?? undefined,
     };
   } catch (error) {
-    log.error("Error polling Fastmail account", { error });
+    log.error("Fastmail synchronization failed", { error });
     return {
       emailAccountId,
       email: "",
       status: "error",
-      error: error instanceof Error ? error.message : String(error),
+      processedCount,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Fastmail synchronization failed",
     };
-  }
-}
-
-/**
- * Poll all Fastmail accounts for new emails
- */
-export async function pollAllFastmailAccounts(
-  logger: Logger,
-): Promise<PollSyncResult[]> {
-  const fastmailAccounts = await getFastmailAccountsToPoll();
-
-  logger.info("Polling Fastmail accounts", { count: fastmailAccounts.length });
-
-  const results: PollSyncResult[] = [];
-
-  for (const account of fastmailAccounts) {
-    const result = await pollFastmailAccount({
-      emailAccountId: account.id,
-      logger: logger.with({ email: account.email }),
+  } finally {
+    await prisma.emailAccount.updateMany({
+      where: { id: emailAccountId, fastmailLeaseOwner: owner },
+      data: { fastmailLeaseOwner: null, fastmailLeaseUntil: null },
     });
-    results.push(result);
   }
-
-  logger.info("Completed polling all Fastmail accounts", {
-    total: results.length,
-    successful: results.filter((r) => r.status === "success").length,
-    noChanges: results.filter((r) => r.status === "no_changes").length,
-    skipped: results.filter((r) => r.status === "skipped").length,
-    errors: results.filter((r) => r.status === "error").length,
-  });
-
-  return results;
 }
+const accountSelect = {
+  id: true,
+  email: true,
+  lastSyncedHistoryId: true,
+  lastPolledAt: true,
+  fastmailSyncStartedAt: true,
+  fastmailResyncState: true,
+  fastmailResyncPosition: true,
+  autoCategorizeSenders: true,
+  about: true,
+  multiRuleSelectionEnabled: true,
+  timezone: true,
+  calendarBookingLink: true,
+  sensitiveDataPolicy: true,
+  draftReplyConfidence: true,
+  filingEnabled: true,
+  filingPrompt: true,
+  filingConfirmationSendEmail: true,
+  account: {
+    select: {
+      provider: true,
+      access_token: true,
+      refresh_token: true,
+      expires_at: true,
+    },
+  },
+  rules: {
+    where: { enabled: true },
+    include: { actions: true },
+  },
+  user: {
+    select: {
+      id: true,
+      aiProvider: true,
+      aiModel: true,
+      aiApiKey: true,
+      premium: {
+        select: {
+          ...premiumEntitlementSelect,
+        },
+      },
+    },
+  },
+} as const;

@@ -1,23 +1,48 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { actionClient } from "@/utils/actions/safe-action";
 import {
+  createCustomMcpServerBody,
   disconnectMcpConnectionBody,
+  removeCustomMcpServerBody,
   toggleMcpConnectionBody,
   toggleMcpToolBody,
 } from "@/utils/actions/mcp.validation";
-import prisma from "@/utils/prisma";
 import { SafeError } from "@/utils/error";
-import { mcpAgent } from "@/utils/ai/mcp/mcp-agent";
-import { getEmailAccountWithAi } from "@/utils/user/get";
-import type { EmailForLLM } from "@/utils/types";
-import { testMcpSchema } from "@/utils/actions/mcp.validation";
+import {
+  CUSTOM_INTEGRATION_PREFIX,
+  toDbAuthType,
+} from "@/utils/mcp/resolve-integration";
+import { assertIntegrationsTierAccess } from "@/utils/mcp/tier-access";
+import { findIntegration } from "@/utils/mcp/integrations";
+import { getIntegrationProvider } from "@/utils/mcp/providers/registry";
+import { syncMcpTools } from "@/utils/mcp/sync-tools";
+import { getCustomMcpServerUrlError } from "@/utils/mcp/safe-fetch";
+import prisma from "@/utils/prisma";
+
+const MAX_CUSTOM_SERVERS_PER_ACCOUNT = 10;
 
 export const disconnectMcpConnectionAction = actionClient
   .metadata({ name: "disconnectMcpConnection" })
   .inputSchema(disconnectMcpConnectionBody)
   .action(
     async ({ ctx: { emailAccountId }, parsedInput: { connectionId } }) => {
+      const connection = await prisma.mcpConnection.findUnique({
+        where: { id: connectionId, emailAccountId },
+        select: { integration: { select: { name: true } } },
+      });
+      if (!connection) throw new SafeError("Connection not found");
+
+      // Revoke at the provider first so it never keeps tokens we no longer track
+      const provider = findIntegration(connection.integration.name)?.provider;
+      if (provider) {
+        await getIntegrationProvider(provider.id).disconnect({
+          app: provider.app,
+          emailAccountId,
+        });
+      }
+
       await prisma.mcpConnection.delete({
         where: { id: connectionId, emailAccountId },
       });
@@ -51,30 +76,77 @@ export const toggleMcpToolAction = actionClient
     },
   );
 
-export const testMcpAction = actionClient
-  .metadata({ name: "mcpAgent" })
-  .inputSchema(testMcpSchema)
+export const createCustomMcpServerAction = actionClient
+  .metadata({ name: "createCustomMcpServer" })
+  .inputSchema(createCustomMcpServerBody)
   .action(
     async ({
-      ctx: { emailAccountId },
-      parsedInput: { from, subject, content },
+      ctx: { emailAccountId, userId, logger },
+      parsedInput: { displayName, serverUrl, authType, apiKey },
     }) => {
-      const emailAccount = await getEmailAccountWithAi({ emailAccountId });
-      if (!emailAccount) throw new SafeError("Email account not found");
+      await assertIntegrationsTierAccess({ userId, logger });
 
-      const testMessage: EmailForLLM = {
-        id: "test-message-id",
-        to: emailAccount.email,
-        from,
-        subject,
-        content,
-      };
+      const urlError = getCustomMcpServerUrlError(serverUrl);
+      if (urlError) throw new SafeError(urlError);
 
-      const result = await mcpAgent({ emailAccount, messages: [testMessage] });
+      const existingCount = await prisma.mcpIntegration.count({
+        where: { emailAccountId },
+      });
 
-      return {
-        response: result?.response,
-        toolCalls: result?.getToolCalls(),
-      };
+      if (existingCount >= MAX_CUSTOM_SERVERS_PER_ACCOUNT) {
+        throw new SafeError(
+          `You can add up to ${MAX_CUSTOM_SERVERS_PER_ACCOUNT} custom servers.`,
+        );
+      }
+
+      const name = `${CUSTOM_INTEGRATION_PREFIX}${randomUUID().replace(/-/g, "")}`;
+
+      const integration = await prisma.mcpIntegration.create({
+        data: {
+          name,
+          displayName,
+          serverUrl,
+          authType: toDbAuthType(authType),
+          emailAccountId,
+        },
+        select: { id: true },
+      });
+
+      if (authType === "oauth") return { name };
+
+      try {
+        await prisma.mcpConnection.create({
+          data: {
+            name: displayName,
+            emailAccountId,
+            integrationId: integration.id,
+            apiKey: authType === "api-token" ? apiKey : null,
+            isActive: true,
+          },
+        });
+
+        await syncMcpTools(name, emailAccountId, logger);
+      } catch (error) {
+        logger.error("Failed to connect custom MCP server", { error });
+        await prisma.mcpIntegration.delete({ where: { id: integration.id } });
+        throw new SafeError(
+          authType === "api-token"
+            ? "Could not connect to the server. Check the URL and API key."
+            : "Could not connect to the server. Check the URL, or choose an authentication method if the server requires one.",
+        );
+      }
+
+      return { name };
     },
   );
+
+export const removeCustomMcpServerAction = actionClient
+  .metadata({ name: "removeCustomMcpServer" })
+  .inputSchema(removeCustomMcpServerBody)
+  .action(async ({ ctx: { emailAccountId }, parsedInput: { name } }) => {
+    const { count } = await prisma.mcpIntegration.deleteMany({
+      where: { name, emailAccountId },
+    });
+
+    if (!count) throw new SafeError("Server not found");
+  });

@@ -3,6 +3,11 @@ import path from "node:path";
 import { env } from "@/env";
 import { auth } from "@/utils/auth";
 import { isAdmin } from "@/utils/admin";
+import {
+  hasGoogleOauthConfig,
+  hasMicrosoftOauthConfig,
+} from "@/utils/oauth/provider-config";
+import { getConfiguredRolePrimaryModelEntry } from "@/utils/llms/model";
 import { PageWrapper } from "@/components/PageWrapper";
 import { PageHeader } from "@/components/PageHeader";
 
@@ -12,6 +17,8 @@ export default async function AdminConfigPage() {
   const isUserAdmin = await isAdmin({ email: session?.user.email });
 
   const version = getVersion();
+  const defaultLlm = getConfiguredRolePrimaryModelEntry("default");
+  const economyLlm = getConfiguredRolePrimaryModelEntry("economy");
 
   const info = {
     version,
@@ -20,22 +27,26 @@ export default async function AdminConfigPage() {
     features: {
       emailSendEnabled: env.NEXT_PUBLIC_EMAIL_SEND_ENABLED,
       contactsEnabled: env.NEXT_PUBLIC_CONTACTS_ENABLED,
+      gmailOtherContactsEnabled: env.NEXT_PUBLIC_GMAIL_OTHER_CONTACTS_ENABLED,
+      aiModelSettingsDisabled: env.NEXT_PUBLIC_AI_MODEL_SETTINGS_DISABLED,
       bypassPremiumChecks: env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS ?? false,
     },
     providers: {
-      google: !!env.GOOGLE_CLIENT_ID,
-      microsoft: !!env.MICROSOFT_CLIENT_ID,
+      google: hasGoogleOauthConfig(),
+      microsoft: hasMicrosoftOauthConfig(),
       microsoftTenantConfigured:
-        !!env.MICROSOFT_TENANT_ID && env.MICROSOFT_TENANT_ID !== "common",
+        hasMicrosoftOauthConfig() &&
+        !!env.MICROSOFT_TENANT_ID &&
+        env.MICROSOFT_TENANT_ID !== "common",
     },
     llm: {
-      defaultProvider: env.DEFAULT_LLM_PROVIDER,
-      defaultModel: env.DEFAULT_LLM_MODEL ?? "default",
-      economyProvider: env.ECONOMY_LLM_PROVIDER ?? "not configured",
-      economyModel: env.ECONOMY_LLM_MODEL ?? "not configured",
+      defaultProvider: defaultLlm?.provider ?? "not configured",
+      defaultModel: defaultLlm?.modelName ?? "not configured",
+      economyProvider: economyLlm?.provider ?? "not configured",
+      economyModel: economyLlm?.modelName ?? "not configured",
     },
     integrations: {
-      redis: !!env.UPSTASH_REDIS_URL || !!env.REDIS_URL,
+      redis: !!env.REDIS_HTTP_URL || !!env.REDIS_URL,
       qstash: !!env.QSTASH_TOKEN,
       tinybird: !!env.TINYBIRD_TOKEN,
       sentry: !!env.NEXT_PUBLIC_SENTRY_DSN,
@@ -64,6 +75,18 @@ export default async function AdminConfigPage() {
           <Row
             label="Contacts"
             value={info.features.contactsEnabled ? "Enabled" : "Disabled"}
+          />
+          <Row
+            label="Gmail Other Contacts"
+            value={
+              info.features.gmailOtherContactsEnabled ? "Enabled" : "Disabled"
+            }
+          />
+          <Row
+            label="AI Model Settings"
+            value={
+              info.features.aiModelSettingsDisabled ? "Disabled" : "Enabled"
+            }
           />
           <Row
             label="Bypass Premium"

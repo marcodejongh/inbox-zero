@@ -12,11 +12,11 @@ export function CardContent({ children, className }: CardContentProps) {
 }
 
 interface CardHeaderProps {
-  title?: string;
-  icon?: React.ReactNode;
   addon?: React.ReactNode;
-  description?: string;
   className?: string;
+  description?: string;
+  icon?: React.ReactNode;
+  title?: string;
 }
 
 export function CardHeader({
@@ -35,14 +35,14 @@ export function CardHeader({
         </div>
       ) : null}
       {title ? (
-        <h2
+        <h3
           className={cn(
             "font-title text-xl leading-6",
             title || addon ? "mt-5" : "",
           )}
         >
           {title}
-        </h2>
+        </h3>
       ) : null}
       {description ? (
         <Paragraph size="sm" className="mt-3">
@@ -54,14 +54,14 @@ export function CardHeader({
 }
 
 interface CardProps {
-  children: React.ReactNode;
-  variant?: "default" | "extra-rounding" | "circle";
-  icon?: React.ReactNode;
   addon?: React.ReactNode;
-  title?: string;
-  description?: string;
-  className?: string;
   cardHeaderClassName?: string;
+  children: React.ReactNode;
+  className?: string;
+  description?: string;
+  icon?: React.ReactNode;
+  title?: string;
+  variant?: "default" | "extra-rounding" | "circle";
 }
 
 export function Card({

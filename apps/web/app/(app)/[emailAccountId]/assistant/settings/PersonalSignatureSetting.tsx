@@ -1,5 +1,6 @@
 "use client";
 
+import type { ChangeEvent } from "react";
 import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toastError, toastSuccess, toastInfo } from "@/components/Toast";
@@ -11,6 +12,7 @@ import { useEmailAccountFull } from "@/hooks/useEmailAccountFull";
 import { useAction } from "next-safe-action/hooks";
 import { fetchSignaturesFromProviderAction } from "@/utils/actions/email-account";
 import { saveSignatureAction } from "@/utils/actions/user";
+import { createSettingActionErrorHandler } from "@/utils/actions/error-handling";
 import type { EmailSignature } from "@/utils/email/types";
 import {
   Select,
@@ -29,11 +31,10 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { isGoogleProvider } from "@/utils/email/provider-types";
 
 export function PersonalSignatureSetting() {
   const { data, isLoading, error } = useEmailAccountFull();
-
-  const hasSignature = !!data?.signature;
 
   return (
     <SettingCard
@@ -47,7 +48,7 @@ export function PersonalSignatureSetting() {
         >
           <SignatureDialog currentSignature={data?.signature || ""}>
             <Button variant="outline" size="sm">
-              {hasSignature ? "Edit" : "Set"} Signature
+              Edit
             </Button>
           </SignatureDialog>
         </LoadingContent>
@@ -70,7 +71,7 @@ function SignatureDialog({
   const [selectedSignature, setSelectedSignature] = useState<string>("");
   const [manualSignature, setManualSignature] = useState(currentSignature);
 
-  const isGmail = provider === "google";
+  const isGmail = isGoogleProvider(provider);
 
   const { execute: executeSave, isExecuting: isSaving } = useAction(
     saveSignatureAction.bind(null, emailAccountId),
@@ -81,11 +82,9 @@ function SignatureDialog({
         });
         setOpen(false);
       },
-      onError: (error) => {
-        toastError({
-          description: error.error.serverError || "Failed to save signature",
-        });
-      },
+      onError: createSettingActionErrorHandler({
+        prefix: "Failed to save signature",
+      }),
       onSettled: () => {
         mutate();
       },
@@ -159,7 +158,7 @@ function SignatureDialog({
       <DialogTrigger asChild>{children}</DialogTrigger>
       <DialogContent className="max-w-4xl">
         <DialogHeader>
-          <DialogTitle>Email Signature</DialogTitle>
+          <DialogTitle>Email signature</DialogTitle>
           <DialogDescription>
             Set your email signature to include in all drafted messages.
             {isGmail &&
@@ -206,7 +205,9 @@ function SignatureDialog({
               <Textarea
                 id="signature"
                 value={manualSignature}
-                onChange={(e) => setManualSignature(e.target.value)}
+                onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+                  setManualSignature(e.target.value)
+                }
                 placeholder="Enter your email signature..."
                 className="min-h-[200px] font-mono text-sm"
               />

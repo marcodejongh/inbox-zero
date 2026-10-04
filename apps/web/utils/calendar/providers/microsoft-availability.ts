@@ -12,12 +12,14 @@ async function fetchMicrosoftCalendarBusyPeriods({
   timeMin,
   timeMax,
   logger,
+  failOnCalendarError,
 }: {
   calendarClient: Client;
   calendarIds: string[];
   timeMin: string;
   timeMax: string;
   logger: Logger;
+  failOnCalendarError?: boolean;
 }): Promise<BusyPeriod[]> {
   try {
     const allBusyPeriods: BusyPeriod[] = [];
@@ -37,6 +39,8 @@ async function fetchMicrosoftCalendarBusyPeriods({
                 .api(`/me/calendars/${calendarId}/calendarView`)
                 .query({ startDateTime, endDateTime })
                 .select("subject,start,end,showAs,isAllDay")
+                // Request events in UTC to avoid Windows timezone name conversion issues
+                .header("Prefer", 'outlook.timezone="UTC"')
                 .get()
             : await calendarClient.api(nextLink!).get();
 
@@ -49,9 +53,18 @@ async function fetchMicrosoftCalendarBusyPeriods({
                 event.start?.dateTime &&
                 event.end?.dateTime
               ) {
+                // With Prefer: outlook.timezone="UTC", dateTime is in UTC but without the Z suffix
+                // We need to add it for proper ISO 8601 format
+                const startDatetime = event.start.dateTime.endsWith("Z")
+                  ? event.start.dateTime
+                  : `${event.start.dateTime}Z`;
+                const endDatetime = event.end.dateTime.endsWith("Z")
+                  ? event.end.dateTime
+                  : `${event.end.dateTime}Z`;
+
                 allBusyPeriods.push({
-                  start: event.start.dateTime,
-                  end: event.end.dateTime,
+                  start: startDatetime,
+                  end: endDatetime,
                 });
               }
             }
@@ -61,10 +74,19 @@ async function fetchMicrosoftCalendarBusyPeriods({
           nextLink = response["@odata.nextLink"];
         } while (nextLink);
       } catch (calendarError) {
-        logger.error("Error fetching calendar events", {
-          calendarId,
-          error: calendarError,
-        });
+        const calendarIsMissing = isMissingCalendarError(calendarError);
+        if (calendarIsMissing) {
+          logger.warn("Skipping unavailable Microsoft calendar", {
+            calendarIdIsPrimary: calendarId === "primary",
+          });
+        } else {
+          logger.error("Error fetching calendar events", {
+            calendarId,
+            error: calendarError,
+          });
+        }
+
+        if (failOnCalendarError && !calendarIsMissing) throw calendarError;
       }
     }
 
@@ -89,6 +111,7 @@ export function createMicrosoftAvailabilityProvider(
       calendarIds,
       timeMin,
       timeMax,
+      failOnCalendarError,
     }) {
       const calendarClient = await getCalendarClientWithRefresh({
         accessToken,
@@ -104,7 +127,17 @@ export function createMicrosoftAvailabilityProvider(
         timeMin,
         timeMax,
         logger,
+        failOnCalendarError,
       });
     },
   };
+}
+
+function isMissingCalendarError(error: unknown) {
+  if (typeof error !== "object" || error === null) return false;
+
+  return (
+    ("statusCode" in error && error.statusCode === 404) ||
+    ("code" in error && error.code === "ErrorItemNotFound")
+  );
 }

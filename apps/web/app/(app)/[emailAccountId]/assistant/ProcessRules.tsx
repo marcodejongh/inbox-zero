@@ -2,7 +2,6 @@
 
 import { useCallback, useState, useRef, useMemo } from "react";
 import useSWR from "swr";
-import useSWRInfinite from "swr/infinite";
 import { parseAsBoolean, useQueryState } from "nuqs";
 import PQueue from "p-queue";
 import {
@@ -17,25 +16,42 @@ import { Button } from "@/components/ui/button";
 import { toastError } from "@/components/Toast";
 import { LoadingContent } from "@/components/LoadingContent";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { MessagesResponse } from "@/app/api/messages/route";
 import { EmailMessageCell } from "@/components/EmailMessageCell";
 import { runRulesAction } from "@/utils/actions/ai-rule";
-import type { RulesResponse } from "@/app/api/user/rules/route";
 import { Table, TableBody, TableRow, TableCell } from "@/components/ui/table";
 import { Card } from "@/components/ui/card";
 import type { RunRulesResult } from "@/utils/ai/choose-rule/run-rules";
 import { SearchForm } from "@/components/SearchForm";
 import type { BatchExecutedRulesResponse } from "@/app/api/user/executed-rules/batch/route";
 import { isAIRule, isGroupRule, isStaticRule } from "@/utils/condition";
-import { BulkRunRules } from "@/app/(app)/[emailAccountId]/assistant/BulkRunRules";
 import { cn } from "@/utils";
 import { TestCustomEmailForm } from "@/app/(app)/[emailAccountId]/assistant/TestCustomEmailForm";
 import { ResultsDisplay } from "@/app/(app)/[emailAccountId]/assistant/ResultDisplay";
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { FixWithChat } from "@/app/(app)/[emailAccountId]/assistant/FixWithChat";
 import { useChat } from "@/providers/ChatProvider";
+import { MutedText } from "@/components/Typography";
+import { createClientLogger } from "@/utils/logger-client";
+import { isDefined } from "@/utils/types";
+import {
+  getSelectionMetadataTraceDetails,
+  summarizeSelectionMetadata,
+} from "@/utils/ai/choose-rule/selection-metadata-summary";
+import { useRules } from "@/hooks/useRules";
+import { useInfiniteMessages } from "@/hooks/useMessages";
+import { usePremium } from "@/hooks/usePremium";
+import { hasTierAccess } from "@/utils/premium";
+import {
+  RERUN_MINIMUM_TIER,
+  RERUN_UPGRADE_MESSAGE,
+} from "@/utils/premium/rerun";
+import { Tooltip } from "@/components/Tooltip";
 
 type Message = MessagesResponse["messages"][number];
+
+const logger = createClientLogger("automation-test");
 
 export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
   const [searchQuery, setSearchQuery] = useQueryState("search");
@@ -45,32 +61,7 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
   );
 
   const { data, isLoading, isValidating, error, setSize, mutate, size } =
-    useSWRInfinite<MessagesResponse>(
-      (index, previousPageData) => {
-        // Always return the URL for the first page
-        if (index === 0) {
-          const params = new URLSearchParams();
-          if (searchQuery) params.set("q", searchQuery);
-          const paramsString = params.toString();
-
-          return `/api/messages${paramsString ? `?${paramsString}` : ""}`;
-        }
-
-        // For subsequent pages, check if we have a next page token
-        const pageToken = previousPageData?.nextPageToken;
-        if (!pageToken) return null;
-
-        const params = new URLSearchParams();
-        if (searchQuery) params.set("q", searchQuery);
-        params.set("pageToken", pageToken);
-        const paramsString = params.toString();
-
-        return `/api/messages${paramsString ? `?${paramsString}` : ""}`;
-      },
-      {
-        revalidateFirstPage: false,
-      },
-    );
+    useInfiniteMessages({ searchQuery });
 
   const onLoadMore = async () => {
     const nextSize = size + 1;
@@ -93,8 +84,15 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
     });
   }, [data]);
 
-  const { data: rules } = useSWR<RulesResponse>("/api/user/rules");
+  const { data: rules } = useRules();
   const { emailAccountId, userEmail } = useAccount();
+  const { tier } = usePremium();
+
+  // Re-applying rules costs a fresh LLM call, so it's gated. Re-testing isn't:
+  // test runs never overwrite a stored result.
+  const canRerun =
+    testMode ||
+    hasTierAccess({ tier: tier || null, minimumTier: RERUN_MINIMUM_TIER });
 
   // Fetch existing executed rules for current messages
   const messageIdsToFetch = useMemo(
@@ -152,13 +150,37 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
         isTest: testMode,
         rerun,
       });
+      const logContext = {
+        emailAccountId,
+        messageId: message.id,
+        threadId: message.threadId,
+        rerun: !!rerun,
+        testMode,
+      };
       if (result?.serverError) {
+        logger.error("runRulesAction returned server error", {
+          ...logContext,
+          serverError: true,
+        });
         toastError({
           title: "There was an error processing the email",
           description: result.serverError,
         });
       } else if (result?.data) {
+        const resultSummary = summarizeRunRulesResult(result.data);
+        logger.info("runRulesAction returned results", {
+          ...logContext,
+          ...resultSummary,
+        });
+        logger.trace("runRulesAction returned result details", {
+          ...logContext,
+          ...getSelectionMetadataTraceDetails(
+            result.data.map((item) => item.selectionMetadata),
+          ),
+        });
         setResultsMap((prev) => ({ ...prev, [message.id]: result.data! }));
+      } else {
+        logger.warn("runRulesAction returned empty response", logContext);
       }
       setIsRunning((prev) => ({ ...prev, [message.id]: false }));
     },
@@ -234,6 +256,13 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
 
   const { setInput } = useChat();
 
+  let loadMoreLabel = "No More Messages";
+  if (isValidating) {
+    loadMoreLabel = "Loading...";
+  } else if (hasMore) {
+    loadMoreLabel = "Load More";
+  }
+
   return (
     <div>
       <div className="flex items-center justify-between gap-2 pb-6">
@@ -249,8 +278,6 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
               {testMode ? "Test All" : "Run on All"}
             </Button>
           )}
-
-          {!testMode && <BulkRunRules />}
         </div>
 
         <div className="flex items-center gap-2">
@@ -285,11 +312,13 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
         </div>
       )}
 
-      <LoadingContent loading={isLoading} error={error}>
+      <LoadingContent
+        loading={isLoading}
+        error={error}
+        loadingComponent={<ProcessRulesLoading />}
+      >
         {messages.length === 0 ? (
-          <div className="p-4 text-center text-sm text-muted-foreground">
-            No emails found
-          </div>
+          <MutedText className="p-4 text-center">No emails found</MutedText>
         ) : (
           <Card>
             <Table>
@@ -303,6 +332,7 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
                     results={allResults[message.id]}
                     onRun={(rerun) => onRun(message, rerun)}
                     testMode={testMode}
+                    canRerun={canRerun}
                     setInput={setInput}
                   />
                 ))}
@@ -318,11 +348,7 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
                 disabled={!hasMore || isValidating}
               >
                 {!isValidating && <ChevronsDownIcon className="mr-2 size-4" />}
-                {isValidating
-                  ? "Loading..."
-                  : hasMore
-                    ? "Load More"
-                    : "No More Messages"}
+                <span>{loadMoreLabel}</span>
               </Button>
             </div>
           </Card>
@@ -332,6 +358,47 @@ export function ProcessRulesContent({ testMode }: { testMode: boolean }) {
   );
 }
 
+function ProcessRulesLoading() {
+  return (
+    <Card>
+      <Table>
+        <TableBody>
+          {Array.from({ length: 5 }).map((_, index) => (
+            <TableRow key={index} className="hover:bg-transparent">
+              <TableCell>
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <Skeleton className="h-4 w-40" />
+                    <Skeleton className="h-4 w-full max-w-xl" />
+                    <Skeleton className="h-3 w-full max-w-md" />
+                  </div>
+                  <Skeleton className="h-9 w-16 shrink-0" />
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </Card>
+  );
+}
+
+function summarizeRunRulesResult(results: RunRulesResult[]) {
+  const selectionMetadataSummary = summarizeSelectionMetadata(
+    results.map((result) => result.selectionMetadata),
+  );
+
+  return {
+    resultCount: results.length,
+    matchedRuleNames: results
+      .map((result) => result.rule?.name)
+      .filter(isDefined)
+      .join(", "),
+    statuses: results.map((result) => result.status).join(", "),
+    ...selectionMetadataSummary,
+  };
+}
+
 function ProcessRulesRow({
   message,
   userEmail,
@@ -339,6 +406,7 @@ function ProcessRulesRow({
   results,
   onRun,
   testMode,
+  canRerun,
   setInput,
 }: {
   message: Message;
@@ -347,6 +415,7 @@ function ProcessRulesRow({
   results: RunRulesResult[];
   onRun: (rerun?: boolean) => void;
   testMode: boolean;
+  canRerun: boolean;
   setInput: (input: string) => void;
 }) {
   return (
@@ -356,17 +425,21 @@ function ProcessRulesRow({
       }
     >
       <TableCell>
-        <div className="flex items-center justify-between">
-          <EmailMessageCell
-            sender={message.headers.from}
-            subject={message.headers.subject}
-            snippet={message.snippet}
-            userEmail={userEmail}
-            threadId={message.threadId}
-            messageId={message.id}
-            labelIds={message.labelIds}
-          />
-          <div className="ml-4 flex items-center gap-1">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <EmailMessageCell
+              sender={message.headers.from}
+              subject={message.headers.subject}
+              snippet={message.snippet}
+              userEmail={userEmail}
+              threadId={message.threadId}
+              messageId={message.id}
+              externalUrl={message.externalUrl}
+              labelIds={message.labelIds}
+              collapseLabels={testMode}
+            />
+          </div>
+          <div className="ml-4 flex shrink-0 items-center gap-1">
             {results ? (
               <>
                 <ResultsDisplay results={results} />
@@ -375,17 +448,12 @@ function ProcessRulesRow({
                   message={message}
                   results={results}
                 />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={isRunning}
-                  onClick={() => onRun(true)}
-                >
-                  <RefreshCcwIcon
-                    className={cn("mr-2 size-4", isRunning && "animate-spin")}
-                  />
-                  <span>{testMode ? "Retest" : "Rerun"}</span>
-                </Button>
+                <RerunButton
+                  isRunning={isRunning}
+                  canRerun={canRerun}
+                  testMode={testMode}
+                  onRun={onRun}
+                />
               </>
             ) : (
               <Button
@@ -395,12 +463,46 @@ function ProcessRulesRow({
                 onClick={() => onRun()}
               >
                 {!isRunning && <SparklesIcon className="mr-2 size-4" />}
-                {testMode ? "Test" : "Run"}
+                <span>{testMode ? "Test" : "Run"}</span>
               </Button>
             )}
           </div>
         </div>
       </TableCell>
     </TableRow>
+  );
+}
+
+function RerunButton({
+  isRunning,
+  canRerun,
+  testMode,
+  onRun,
+}: {
+  isRunning: boolean;
+  canRerun: boolean;
+  testMode: boolean;
+  onRun: (rerun?: boolean) => void;
+}) {
+  const button = (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={isRunning || !canRerun}
+      onClick={() => onRun(true)}
+    >
+      <RefreshCcwIcon
+        className={cn("mr-2 size-4", isRunning && "animate-spin")}
+      />
+      <span>{testMode ? "Retest" : "Rerun"}</span>
+    </Button>
+  );
+
+  if (canRerun) return button;
+
+  return (
+    <Tooltip content={RERUN_UPGRADE_MESSAGE}>
+      <span className="inline-flex cursor-not-allowed">{button}</span>
+    </Tooltip>
   );
 }

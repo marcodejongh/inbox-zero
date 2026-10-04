@@ -2,13 +2,13 @@
 
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { Markdown } from "tiptap-markdown";
+import { Markdown } from "@tiptap/markdown";
+import { Placeholder } from "@tiptap/extension-placeholder";
 import { useCallback, forwardRef, useImperativeHandle } from "react";
 import { cn } from "@/utils";
 import { EnterHandler } from "@/components/editor/extensions";
 
 export type TiptapHandle = {
-  appendContent: (content: string) => void;
   getMarkdown: () => string | null;
 };
 
@@ -16,16 +16,31 @@ export const Tiptap = forwardRef<
   TiptapHandle,
   {
     initialContent?: string;
-    onChange?: (html: string) => void;
+    onChange?: (content: string) => void;
     className?: string;
     autofocus?: boolean;
     onMoreClick?: () => void;
+    preservePastedLineBreaks?: boolean;
+    placeholder?: string;
+    input?: "html" | "markdown";
+    output?: "html" | "markdown";
   }
 >(function Tiptap(
-  { initialContent = "", onChange, className, autofocus = true, onMoreClick },
+  {
+    initialContent = "",
+    onChange,
+    className,
+    autofocus = true,
+    onMoreClick,
+    preservePastedLineBreaks = false,
+    placeholder,
+    output = "html",
+    input = output === "markdown" ? "markdown" : "html",
+  },
   ref,
 ) {
   const editor = useEditor({
+    immediatelyRender: false,
     extensions: [
       StarterKit.configure({
         // Configure lists to preserve formatting
@@ -39,15 +54,23 @@ export const Tiptap = forwardRef<
         },
       }),
       EnterHandler,
-      Markdown,
+      Markdown.configure({
+        markedOptions: { breaks: preservePastedLineBreaks },
+      }),
+      Placeholder.configure({
+        placeholder: placeholder || "",
+        showOnlyWhenEditable: true,
+      }),
     ],
     content: initialContent,
+    contentType: input,
     onUpdate: useCallback(
       ({ editor }: { editor: Editor }) => {
-        const html = editor.getHTML();
-        onChange?.(html);
+        const content =
+          output === "markdown" ? editor.getMarkdown() : editor.getHTML();
+        onChange?.(content);
       },
-      [onChange],
+      [onChange, output],
     ),
     autofocus,
     editorProps: {
@@ -56,23 +79,15 @@ export const Tiptap = forwardRef<
           "px-3 py-2 max-w-none focus:outline-none min-h-[120px]",
           className,
         ),
+        ...(placeholder && { "data-placeholder": placeholder }),
       },
     },
   });
 
   useImperativeHandle(ref, () => ({
-    appendContent: (content: string) => {
-      if (!editor) return;
-
-      // Get the document end position
-      const endPosition = editor.state.doc.content.size;
-
-      // Insert content at the end
-      editor.commands.insertContentAt(endPosition, content);
-    },
     getMarkdown: () => {
       if (!editor) return null;
-      return editor.storage.markdown.getMarkdown();
+      return editor.getMarkdown();
     },
   }));
 

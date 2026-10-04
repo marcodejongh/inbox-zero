@@ -19,6 +19,9 @@ import { Button } from "@/components/ui/button";
 import { findCtaLink } from "@/utils/parse/parseHtml.client";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { internalDateToDate } from "@/utils/date";
+import { useEmailLabels } from "@/providers/EmailLabelsProvider";
+import { getEmailMessageCellLabels } from "@/components/EmailMessageCellLabels";
+import { LabelBadges } from "@/components/LabelBadges";
 
 export const EmailListItem = forwardRef(
   (
@@ -42,9 +45,22 @@ export const EmailListItem = forwardRef(
 
     const lastMessage = thread.messages?.[thread.messages.length - 1];
 
-    const isUnread = useMemo(() => {
-      return lastMessage?.labelIds?.includes("UNREAD");
-    }, [lastMessage?.labelIds]);
+    const isUnread = useMemo(
+      () => lastMessage?.labelIds?.includes("UNREAD"),
+      [lastMessage?.labelIds],
+    );
+
+    const { userLabels } = useEmailLabels();
+    const labels = useMemo(
+      () =>
+        // No provider: the current folder already conveys archived state, so
+        // skip the synthetic Archived chip here
+        getEmailMessageCellLabels({
+          labelIds: lastMessage?.labelIds,
+          userLabels,
+        }) ?? [],
+      [lastMessage?.labelIds, userLabels],
+    );
 
     const preventPropagation = useCallback(
       (e: React.MouseEvent | React.KeyboardEvent) => e.stopPropagation(),
@@ -80,16 +96,17 @@ export const EmailListItem = forwardRef(
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
+              // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
               props.onClick(e as any);
             }
           }}
         >
           <div className="px-4">
-            <div className="mx-auto flex">
+            <div className="mx-auto flex min-w-0 w-full">
               {/* left */}
               <div
                 className={clsx(
-                  "flex flex-1 items-center overflow-hidden whitespace-nowrap text-sm leading-6",
+                  "flex min-w-0 flex-1 items-center overflow-hidden whitespace-nowrap text-sm leading-6",
                   {
                     "font-semibold": isUnread,
                   },
@@ -101,12 +118,13 @@ export const EmailListItem = forwardRef(
                   onKeyDown={preventPropagation}
                 >
                   <Checkbox
+                    label={`Select email: ${lastMessage.headers.subject || "No subject"}`}
                     checked={!!props.selected}
                     onChange={onRowSelected}
                   />
                 </div>
 
-                <div className="ml-4 w-48 min-w-0 overflow-hidden truncate text-foreground">
+                <div className="ml-4 w-28 shrink-0 overflow-hidden truncate text-foreground sm:w-36 xl:w-48">
                   {extractNameFromEmail(
                     participant(lastMessage, props.userEmail),
                   )}{" "}
@@ -118,11 +136,15 @@ export const EmailListItem = forwardRef(
                 </div>
                 {!splitView && (
                   <>
+                    <LabelBadges
+                      labels={labels}
+                      className="ml-2 hidden md:flex"
+                    />
                     {cta && (
                       <Button
                         variant="outline"
                         size="xs"
-                        className="ml-2"
+                        className="ml-2 hidden shrink-0 md:inline-flex"
                         asChild
                       >
                         <Link href={cta.ctaLink} target="_blank">
@@ -130,10 +152,10 @@ export const EmailListItem = forwardRef(
                         </Link>
                       </Button>
                     )}
-                    <div className="ml-2 min-w-0 overflow-hidden text-foreground">
+                    <div className="ml-2 min-w-0 overflow-hidden truncate text-foreground">
                       {lastMessage.headers.subject}
                     </div>
-                    <div className="ml-4 mr-6 flex flex-1 items-center overflow-hidden truncate font-normal leading-5 text-muted-foreground">
+                    <div className="ml-4 mr-6 min-w-0 flex-1 overflow-hidden truncate font-normal leading-5 text-muted-foreground">
                       {decodedSnippet}
                     </div>
                   </>
@@ -141,7 +163,7 @@ export const EmailListItem = forwardRef(
               </div>
 
               {/* right */}
-              <div className="flex items-center justify-between">
+              <div className="flex shrink-0 items-center justify-between">
                 <div className="relative flex items-center">
                   <div
                     className="absolute right-0 z-20 hidden group-hover:block"
@@ -175,11 +197,14 @@ export const EmailListItem = forwardRef(
             </div>
 
             {splitView && (
-              <div className="mt-1.5 whitespace-nowrap text-sm leading-6">
-                <div className="min-w-0 overflow-hidden font-medium text-foreground">
-                  {lastMessage.headers.subject}
+              <div className="mt-1.5 min-w-0 overflow-hidden text-sm leading-6">
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className="min-w-0 overflow-hidden truncate font-medium text-foreground">
+                    {lastMessage.headers.subject}
+                  </div>
+                  <LabelBadges labels={labels} />
                 </div>
-                <div className="mr-6 mt-0.5 flex flex-1 items-center overflow-hidden truncate pl-1 font-normal leading-5 text-muted-foreground">
+                <div className="mr-6 mt-0.5 min-w-0 overflow-hidden truncate pl-1 font-normal leading-5 text-muted-foreground">
                   {decodedSnippet}
                 </div>
                 {cta && (

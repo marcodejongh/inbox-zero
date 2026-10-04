@@ -19,6 +19,7 @@ export async function handleLoopsEvents({
     users: { email: string; name: string | null }[];
     admins: { email: string; name: string | null }[];
   } | null;
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   newSubscription: any;
   newTier: string | null;
   logger: Logger;
@@ -53,6 +54,9 @@ export async function handleLoopsEvents({
 
         throw error;
       });
+
+      // Sets the Loops tier so signup nudges stop targeting trial users
+      if (newTier) await startedTrial(email, newTier);
     }
 
     // 2. Payment scenarios - distinguish between trial completion and direct purchase

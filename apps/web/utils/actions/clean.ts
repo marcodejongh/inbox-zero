@@ -7,21 +7,20 @@ import {
   changeKeepToDoneSchema,
 } from "@/utils/actions/clean.validation";
 import { bulkPublishToQstash } from "@/utils/upstash";
-import { getInternalApiUrl } from "@/utils/internal-api";
 import {
   getLabel,
   getOrCreateInboxZeroLabel,
   GmailLabel,
   labelThread,
 } from "@/utils/gmail/label";
-import type { CleanThreadBody } from "@/app/api/clean/route";
+import type { CleanThreadBody } from "@/app/api/clean/controller";
 import { isDefined } from "@/utils/types";
 import { inboxZeroLabels } from "@/utils/label";
 import prisma from "@/utils/prisma";
 import { CleanAction } from "@/generated/prisma/enums";
 import { updateThread } from "@/utils/redis/clean";
 import { getUnhandledCount } from "@/utils/assess";
-import { getGmailClientForEmail } from "@/utils/account";
+import { getGmailClientForEmail } from "@/utils/email-account-client";
 import { actionClient } from "@/utils/actions/safe-action";
 import { SafeError } from "@/utils/error";
 import { createEmailProvider } from "@/utils/email/provider";
@@ -46,7 +45,11 @@ export const cleanInboxAction = actionClient
 
       const premium = await getUserPremium({ userId });
       if (!premium) throw new SafeError("User not premium");
-      if (!isActivePremium(premium)) throw new SafeError("Premium not active");
+      if (!isActivePremium(premium)) {
+        throw new SafeError(
+          "Deep Clean requires an active paid subscription. It isn't available during the free trial.",
+        );
+      }
 
       const emailProvider = await createEmailProvider({
         emailAccountId,
@@ -85,29 +88,8 @@ export const cleanInboxAction = actionClient
         },
       });
 
-      // const getLabels = async (instructions?: string) => {
-      //   if (!instructions) return [];
-      //   let labels: { id: string; name: string }[] | undefined;
-      //   const labelNames = await aiCleanSelectLabels({ user, instructions });
-      //   if (labelNames) {
-      //     const gmailLabels = await getOrCreateLabels({
-      //       names: labelNames,
-      //       gmail,
-      //     });
-      //     labels = gmailLabels
-      //       .map((label) => ({
-      //         id: label.id || "",
-      //         name: label.name || "",
-      //       }))
-      //       .filter((label) => label.id && label.name);
-      //   }
-      //   return labels;
-      // };
-
       const process = async () => {
         const { type } = await getUnhandledCount(emailProvider);
-
-        // const labels = await getLabels(data.instructions);
 
         let nextPageToken: string | undefined | null;
 
@@ -139,8 +121,6 @@ export const cleanInboxAction = actionClient
 
           if (threads.length === 0) break;
 
-          const url = `${getInternalApiUrl()}/api/clean`;
-
           logger.info("Pushing to Qstash", {
             threadCount: threads.length,
             nextPageToken,
@@ -150,7 +130,7 @@ export const cleanInboxAction = actionClient
             .map((thread) => {
               if (!thread.id) return;
               return {
-                url,
+                path: "/api/clean",
                 body: {
                   emailAccountId,
                   threadId: thread.id,
@@ -293,12 +273,6 @@ export const changeKeepToDoneAction = actionClient
         });
 
         if (thread) {
-          // await updateThread(userId, thread.jobId, threadId, {
-          //   archive: action === CleanAction.ARCHIVE,
-          //   status: "completed",
-          //   undone: true,
-          // });
-
           await updateThread({
             emailAccountId,
             jobId: thread.jobId,

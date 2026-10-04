@@ -1,8 +1,7 @@
 "use server";
 
 import prisma from "@/utils/prisma";
-import { ColdEmailStatus, SystemType } from "@/generated/prisma/enums";
-import { emailToContent } from "@/utils/mail";
+import { GroupItemSource } from "@/generated/prisma/enums";
 import { isColdEmail } from "@/utils/cold-email/is-cold-email";
 import {
   coldEmailBlockerBody,
@@ -13,7 +12,9 @@ import { SafeError } from "@/utils/error";
 import { createEmailProvider } from "@/utils/email/provider";
 import type { EmailProvider } from "@/utils/email/types";
 import { getColdEmailRule } from "@/utils/cold-email/cold-email-rule";
-import { getRuleLabel } from "@/utils/rule/consts";
+import { internalDateToDate } from "@/utils/date";
+import { saveLearnedPattern } from "@/utils/rule/learned-patterns";
+import { emailToContentForAI } from "@/utils/ai/content-sanitizer";
 
 export const markNotColdEmailAction = actionClient
   .metadata({ name: "markNotColdEmail" })
@@ -23,74 +24,52 @@ export const markNotColdEmailAction = actionClient
       ctx: { emailAccountId, provider, logger },
       parsedInput: { sender },
     }) => {
-      const emailProvider = await createEmailProvider({
-        emailAccountId,
-        provider,
-        logger,
-      });
+      const [emailProvider, coldEmailRule] = await Promise.all([
+        createEmailProvider({
+          emailAccountId,
+          provider,
+          logger,
+        }),
+        getColdEmailRule(emailAccountId),
+      ]);
+
+      if (!coldEmailRule) {
+        throw new SafeError("Cold email rule not found");
+      }
 
       await Promise.all([
-        prisma.coldEmail.update({
-          where: {
-            emailAccountId_fromEmail: {
-              emailAccountId,
-              fromEmail: sender,
-            },
-          },
-          data: {
-            status: ColdEmailStatus.USER_REJECTED_COLD,
-          },
+        // Mark as excluded so AI doesn't match it again
+        saveLearnedPattern({
+          emailAccountId,
+          from: sender,
+          ruleId: coldEmailRule.id,
+          exclude: true,
+          logger,
+          source: GroupItemSource.USER,
         }),
-        removeColdEmailLabelFromSender(emailAccountId, emailProvider, sender),
+        removeColdEmailLabelFromSender(emailProvider, sender, coldEmailRule),
       ]);
     },
   );
 
-/**
- * Helper function to get threads from a specific sender using the email provider
- */
-async function getThreadsFromSender(
+async function removeColdEmailLabelFromSender(
   emailProvider: EmailProvider,
   sender: string,
-  labelId?: string,
-): Promise<{ id: string }[]> {
+  coldEmailRule: { actions: { labelId: string | null }[] },
+) {
+  const labelIds = coldEmailRule.actions
+    .map((action) => action.labelId)
+    .filter((id): id is string => Boolean(id));
+
+  if (labelIds.length === 0) return;
+
   const { threads } = await emailProvider.getThreadsWithQuery({
-    query: {
-      fromEmail: sender,
-      labelId,
-    },
+    query: { fromEmail: sender },
     maxResults: 100,
   });
 
-  return threads.map((thread) => ({ id: thread.id }));
-}
-
-async function removeColdEmailLabelFromSender(
-  emailAccountId: string,
-  emailProvider: EmailProvider,
-  sender: string,
-) {
-  // 1. find cold email label
-  // 2. find emails from sender
-  // 3. remove cold email label from emails
-
-  const coldEmailRule = await getColdEmailRule(emailAccountId);
-  if (!coldEmailRule) return;
-
-  const labels = await emailProvider.getLabels();
-
-  // NOTE: this doesn't work completely if the user set 2 labels:
-  const label =
-    labels.find((label) => label.id === coldEmailRule.actions?.[0]?.labelId) ||
-    labels.find((label) => label.name === getRuleLabel(SystemType.COLD_EMAIL));
-
-  if (!label?.id) return;
-
-  const threads = await getThreadsFromSender(emailProvider, sender, label.id);
-
   for (const thread of threads) {
-    if (!thread.id) continue;
-    await emailProvider.removeThreadLabel(thread.id, label.id);
+    await emailProvider.removeThreadLabels(thread.id, labelIds);
   }
 }
 
@@ -131,7 +110,7 @@ export const testColdEmailAction = actionClient
         logger,
       });
 
-      const content = emailToContent({
+      const content = emailToContentForAI({
         textHtml: textHtml || undefined,
         textPlain: textPlain || undefined,
         snippet: snippet || "",
@@ -143,7 +122,7 @@ export const testColdEmailAction = actionClient
           to: "",
           subject,
           content,
-          date: date ? new Date(date) : undefined,
+          date: date ? internalDateToDate(String(date)) : undefined,
           threadId: threadId || undefined,
           id: messageId || "",
         },
@@ -151,6 +130,7 @@ export const testColdEmailAction = actionClient
         provider: emailProvider,
         modelType: "chat",
         coldEmailRule,
+        logger,
       });
 
       return response;

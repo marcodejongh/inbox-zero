@@ -2,6 +2,10 @@
 
 import { useState } from "react";
 import {
+  ShortcutTooltipContent,
+  type ShortcutTooltipItem,
+} from "@/components/ShortcutTooltipContent";
+import {
   Tooltip as ShadcnTooltip,
   TooltipContent,
   TooltipProvider,
@@ -9,17 +13,22 @@ import {
 } from "@/components/ui/tooltip";
 
 interface TooltipProps {
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   children: React.ReactElement<any>;
   content?: string;
   contentComponent?: React.ReactNode;
   hide?: boolean;
+  shortcuts?: readonly ShortcutTooltipItem[];
+  side?: "top" | "right" | "bottom" | "left";
 }
 
 export const Tooltip = ({
   children,
   content,
   contentComponent,
+  shortcuts,
   hide,
+  side,
 }: TooltipProps) => {
   // Make tooltip work on mobile with a click
   const [isOpen, setIsOpen] = useState(false);
@@ -32,8 +41,13 @@ export const Tooltip = ({
         <TooltipTrigger asChild onClick={() => setIsOpen(!isOpen)}>
           {children}
         </TooltipTrigger>
-        <TooltipContent>
-          {contentComponent || <p className="max-w-xs">{content}</p>}
+        <TooltipContent side={side}>
+          {contentComponent ||
+            (shortcuts ? (
+              <ShortcutTooltipContent shortcuts={shortcuts} />
+            ) : (
+              <p className="max-w-xs">{content}</p>
+            ))}
         </TooltipContent>
       </ShadcnTooltip>
     </TooltipProvider>

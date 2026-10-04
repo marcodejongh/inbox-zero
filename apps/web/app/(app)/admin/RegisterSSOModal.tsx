@@ -17,7 +17,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import TextareaAutosize from "react-textarea-autosize";
+import { AutosizeTextarea } from "@/components/ui/textarea";
 import { registerSSOProviderAction } from "@/utils/actions/sso";
 import {
   type SsoRegistrationBody,
@@ -52,7 +52,8 @@ export function RegisterSSOModal() {
         });
       } else {
         toastSuccess({
-          description: "SSO registration initiated successfully!",
+          title: "SSO registered successfully",
+          description: `ACS URL: ${result?.data?.callbackUrl}`,
         });
         reset();
         onClose();
@@ -89,6 +90,17 @@ export function RegisterSSOModal() {
 
             <Input
               type="text"
+              name="organizationId"
+              label="Existing Organization ID (optional)"
+              placeholder="Required when attaching SSO to an existing organization"
+              registerProps={register("organizationId", {
+                setValueAs: (value) => value || undefined,
+              })}
+              error={errors.organizationId}
+            />
+
+            <Input
+              type="text"
               name="providerId"
               label="Provider ID"
               placeholder="e.g., your-company-saml"
@@ -107,9 +119,8 @@ export function RegisterSSOModal() {
 
             <div className="space-y-2">
               <Label name="idpMetadata" label="IDP Metadata (XML)" />
-              <TextareaAutosize
+              <AutosizeTextarea
                 id="idpMetadata"
-                className="block w-full flex-1 whitespace-pre-wrap rounded-md border border-border bg-background shadow-sm focus:border-black focus:ring-black sm:text-sm"
                 minRows={3}
                 rows={3}
                 {...register("idpMetadata")}

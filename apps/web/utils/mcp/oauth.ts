@@ -12,16 +12,23 @@ import type {
   OAuthClientInformation,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
+import {
+  InvalidClientError,
+  InvalidGrantError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import prisma from "@/utils/prisma";
 import { createScopedLogger } from "@/utils/logger";
-import { getIntegration, getStaticCredentials } from "./integrations";
-import type { IntegrationKey } from "./integrations";
+import { getMcpFetch } from "@/utils/mcp/safe-fetch";
+import type { ResolvedMcpIntegration } from "@/utils/mcp/resolve-integration";
 
 const logger = createScopedLogger("mcp-oauth");
 
 // Conservative default expiration window when OAuth provider doesn't return expires_in
 // Set to 1 hour to ensure tokens are refreshed proactively
 const DEFAULT_TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
+
+// Refresh slightly early so a token doesn't expire mid-agent-run
+const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Start OAuth flow - generate authorization URL with PKCE
@@ -32,28 +39,23 @@ export async function generateOAuthUrl({
   redirectUri,
   state,
 }: {
-  integration: IntegrationKey;
+  integration: ResolvedMcpIntegration;
   redirectUri: string;
   state: string;
 }): Promise<{
   url: string;
   codeVerifier: string;
 }> {
-  const integrationConfig = getIntegration(integration);
-
-  if (!integrationConfig.serverUrl) {
-    throw new Error(`No server URL configured for ${integration}`);
+  if (!integration.serverUrl) {
+    throw new Error(`No server URL configured for ${integration.name}`);
   }
 
   const clientInfo = await getOAuthClient(integration, redirectUri);
-  const metadata = await getMetadataForIntegration(
-    integrationConfig,
-    integration,
-  );
+  const metadata = await discoverMetadata(integration);
 
   if (!metadata.authorization_endpoint) {
     throw new Error(
-      `No authorization endpoint found for ${integration}. OAuth discovery may have failed.`,
+      `No authorization endpoint found for ${integration.name}. OAuth discovery may have failed.`,
     );
   }
 
@@ -61,12 +63,12 @@ export async function generateOAuthUrl({
     metadata,
     clientInformation: clientInfo,
     redirectUrl: redirectUri,
-    scope: integrationConfig.scopes.join(" "),
+    scope: integration.scopes.join(" "),
     state,
-    resource: new URL(integrationConfig.serverUrl),
+    ...getResourceParam(integration),
   });
 
-  logger.info("OAuth flow started", { integration });
+  logger.info("OAuth flow started", { integration: integration.name });
 
   return {
     url: result.authorizationUrl.toString(),
@@ -85,23 +87,18 @@ export async function handleOAuthCallback({
   redirectUri,
   emailAccountId,
 }: {
-  integration: IntegrationKey;
+  integration: ResolvedMcpIntegration;
   code: string;
   codeVerifier: string;
   redirectUri: string;
   emailAccountId: string;
 }): Promise<OAuthTokens> {
-  const integrationConfig = getIntegration(integration);
-
-  if (!integrationConfig.serverUrl) {
-    throw new Error(`No server URL configured for ${integration}`);
+  if (!integration.serverUrl) {
+    throw new Error(`No server URL configured for ${integration.name}`);
   }
 
   const clientInfo = await getOAuthClient(integration, redirectUri);
-  const metadata = await getMetadataForIntegration(
-    integrationConfig,
-    integration,
-  );
+  const metadata = await discoverMetadata(integration);
 
   const tokens = await exchangeAuthorization(metadata.token_endpoint, {
     metadata,
@@ -109,17 +106,32 @@ export async function handleOAuthCallback({
     authorizationCode: code,
     codeVerifier,
     redirectUri,
-    resource: new URL(integrationConfig.serverUrl),
+    fetchFn: getMcpFetch(integration),
+    ...getResourceParam(integration),
   });
 
-  const dbIntegration = await prisma.mcpIntegration.upsert({
-    where: { name: integration },
-    update: {},
-    create: { name: integration },
-  });
+  // A custom server row is owned by the account and may have been removed while
+  // the user was on the provider's consent screen; never recreate it here
+  const dbIntegration = integration.isCustom
+    ? await prisma.mcpIntegration.findFirst({
+        where: { name: integration.name, emailAccountId },
+        select: { id: true },
+      })
+    : await prisma.mcpIntegration.upsert({
+        where: { name: integration.name },
+        update: {},
+        create: { name: integration.name },
+        select: { id: true },
+      });
+
+  if (!dbIntegration) {
+    throw new Error(
+      `Custom MCP server ${integration.name} was removed before the connection completed`,
+    );
+  }
 
   const expiresAt = calculateTokenExpiration(tokens.expires_in, {
-    integration,
+    integration: integration.name,
     isRefresh: false,
   });
 
@@ -132,12 +144,12 @@ export async function handleOAuthCallback({
     },
     update: {
       accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token || undefined,
+      refreshToken: tokens.refresh_token || null,
       expiresAt,
       isActive: true,
     },
     create: {
-      name: integration,
+      name: integration.name,
       emailAccountId,
       integrationId: dbIntegration.id,
       accessToken: tokens.access_token,
@@ -148,7 +160,7 @@ export async function handleOAuthCallback({
   });
 
   logger.info("OAuth callback completed", {
-    integration,
+    integration: integration.name,
     emailAccountId,
     hasRefreshToken: !!tokens.refresh_token,
   });
@@ -164,16 +176,16 @@ export async function getAuthToken({
   integration,
   emailAccountId,
 }: {
-  integration: IntegrationKey;
+  integration: ResolvedMcpIntegration;
   emailAccountId: string;
-}): Promise<string> {
-  const integrationConfig = getIntegration(integration);
+}): Promise<string | null> {
+  if (integration.authType === "none") return null;
 
-  if (integrationConfig.authType === "api-token") {
+  if (integration.authType === "api-token") {
     const connection = await prisma.mcpConnection.findFirst({
       where: {
         emailAccountId,
-        integration: { name: integration },
+        integration: { name: integration.name },
         isActive: true,
       },
       select: {
@@ -183,7 +195,7 @@ export async function getAuthToken({
 
     if (!connection?.apiKey) {
       throw new Error(
-        `No API key found for ${integration}. Please configure the integration first.`,
+        `No API key found for ${integration.name}. Please configure the integration first.`,
       );
     }
 
@@ -202,29 +214,30 @@ async function getValidAccessToken({
   integration,
   emailAccountId,
 }: {
-  integration: IntegrationKey;
+  integration: ResolvedMcpIntegration;
   emailAccountId: string;
 }): Promise<string> {
   const connection = await prisma.mcpConnection.findFirst({
     where: {
       emailAccountId,
-      integration: { name: integration },
+      integration: { name: integration.name },
       isActive: true,
     },
   });
 
   if (!connection?.accessToken) {
     throw new Error(
-      `No access token found for ${integration}. Please connect the integration first.`,
+      `No access token found for ${integration.name}. Please connect the integration first.`,
     );
   }
 
-  const now = new Date();
-  const isExpired = connection.expiresAt && connection.expiresAt < now;
+  const isExpired =
+    connection.expiresAt &&
+    connection.expiresAt.getTime() - TOKEN_EXPIRY_BUFFER_MS < Date.now();
 
   if (isExpired && connection.refreshToken) {
     logger.info("Access token expired, refreshing", {
-      integration,
+      integration: integration.name,
       emailAccountId,
     });
 
@@ -233,8 +246,10 @@ async function getValidAccessToken({
   }
 
   if (isExpired) {
+    // Without a refresh token the connection is permanently dead
+    await deactivateConnection({ connectionId: connection.id, emailAccountId });
     throw new Error(
-      `Access token for ${integration} has expired and no refresh token is available. Please reconnect.`,
+      `Access token for ${integration.name} has expired and no refresh token is available. Please reconnect.`,
     );
   }
 
@@ -249,19 +264,17 @@ async function refreshOAuthTokens({
   integration,
   emailAccountId,
 }: {
-  integration: IntegrationKey;
+  integration: ResolvedMcpIntegration;
   emailAccountId: string;
 }): Promise<OAuthTokens> {
-  const integrationConfig = getIntegration(integration);
-
-  if (!integrationConfig.serverUrl) {
-    throw new Error(`No server URL configured for ${integration}`);
+  if (!integration.serverUrl) {
+    throw new Error(`No server URL configured for ${integration.name}`);
   }
 
   const connection = await prisma.mcpConnection.findFirst({
     where: {
       emailAccountId,
-      integration: { name: integration },
+      integration: { name: integration.name },
       isActive: true,
     },
     include: {
@@ -271,25 +284,52 @@ async function refreshOAuthTokens({
 
   if (!connection?.refreshToken) {
     throw new Error(
-      `No refresh token found for ${integration} connection ${emailAccountId}`,
+      `No refresh token found for ${integration.name} connection ${emailAccountId}`,
     );
   }
 
   const clientInfo = await getOAuthClient(integration);
-  const metadata = await getMetadataForIntegration(
-    integrationConfig,
-    integration,
-  );
+  const metadata = await discoverMetadata(integration);
 
-  const tokens = await refreshAuthorization(metadata.token_endpoint, {
-    metadata,
-    clientInformation: clientInfo,
-    refreshToken: connection.refreshToken,
-    resource: new URL(integrationConfig.serverUrl),
-  });
+  let tokens: OAuthTokens;
+  try {
+    tokens = await refreshAuthorization(metadata.token_endpoint, {
+      metadata,
+      clientInformation: clientInfo,
+      refreshToken: connection.refreshToken,
+      fetchFn: getMcpFetch(integration),
+      ...getResourceParam(integration),
+    });
+  } catch (error) {
+    // The grant was revoked or the client is no longer valid - retrying will
+    // never succeed, so deactivate the connection until the user reconnects
+    if (
+      error instanceof InvalidGrantError ||
+      error instanceof InvalidClientError
+    ) {
+      logger.warn("OAuth grant no longer valid, deactivating connection", {
+        error,
+        integration: integration.name,
+        emailAccountId,
+      });
+      await deactivateConnection({
+        connectionId: connection.id,
+        emailAccountId,
+      });
+      if (error instanceof InvalidClientError) {
+        // The registered OAuth client itself was rejected - clear it so the
+        // next connect attempt re-registers instead of reusing the bad client
+        await clearRegisteredClient(integration.name);
+      }
+      throw new Error(
+        `The ${integration.displayName} connection is no longer authorized. Please reconnect.`,
+      );
+    }
+    throw error;
+  }
 
   const expiresAt = calculateTokenExpiration(tokens.expires_in, {
-    integration,
+    integration: integration.name,
     isRefresh: true,
   });
 
@@ -303,7 +343,7 @@ async function refreshOAuthTokens({
   });
 
   logger.info("OAuth tokens refreshed", {
-    integration,
+    integration: integration.name,
     emailAccountId,
   });
 
@@ -316,28 +356,31 @@ async function refreshOAuthTokens({
  * Falls back to static oauthConfig if auto-discovery fails
  */
 async function discoverMetadata(
-  serverUrl: string,
-  integration: string,
+  integration: ResolvedMcpIntegration,
 ): Promise<AuthorizationServerMetadata> {
-  const integrationConfig = getIntegration(integration);
+  const name = integration.name;
+  const fetchFn = getMcpFetch(integration);
+  const serverUrl = getOAuthServerUrl(integration);
 
   // Check cache first
   const stored = await prisma.mcpIntegration.findUnique({
-    where: { name: integration },
+    where: { name },
     select: {
+      oauthClientId: true,
       registeredAuthorizationUrl: true,
       registeredTokenUrl: true,
       registeredServerUrl: true,
     },
   });
 
-  // Use cached endpoints if we have them AND they match the current serverUrl
+  // Cached endpoints omit registration metadata, so only reuse them after registration succeeds.
   if (
-    stored?.registeredAuthorizationUrl &&
+    stored?.oauthClientId &&
+    stored.registeredAuthorizationUrl &&
     stored?.registeredTokenUrl &&
     stored.registeredServerUrl === serverUrl
   ) {
-    logger.info("Using cached OAuth metadata", { integration });
+    logger.info("Using cached OAuth metadata", { integration: name });
 
     return createAuthServerMetadata(
       serverUrl,
@@ -348,7 +391,7 @@ async function discoverMetadata(
 
   // Discover via RFC 8414/9728
   logger.info("Discovering OAuth metadata from server", {
-    integration,
+    integration: name,
     serverUrl,
   });
 
@@ -357,12 +400,15 @@ async function discoverMetadata(
 
     // First try protected resource metadata (RFC 9728) - optional
     try {
-      const resourceMetadata =
-        await discoverOAuthProtectedResourceMetadata(serverUrl);
+      const resourceMetadata = await discoverOAuthProtectedResourceMetadata(
+        serverUrl,
+        undefined,
+        fetchFn,
+      );
       if (resourceMetadata?.authorization_servers?.[0]) {
         authServerUrl = resourceMetadata.authorization_servers[0];
         logger.info("Found auth server via protected resource metadata", {
-          integration,
+          integration: name,
           authServerUrl,
         });
       }
@@ -370,12 +416,14 @@ async function discoverMetadata(
       // Protected resource metadata is optional - many servers don't implement it
       logger.info(
         "Protected resource metadata not available, using server URL directly",
-        { integration, serverUrl },
+        { integration: name, serverUrl },
       );
     }
 
     // Then discover authorization server metadata (RFC 8414) - required
-    const metadata = await discoverAuthorizationServerMetadata(authServerUrl);
+    const metadata = await discoverAuthorizationServerMetadata(authServerUrl, {
+      fetchFn,
+    });
 
     if (!metadata) {
       throw new Error("OAuth metadata discovery returned no results");
@@ -389,7 +437,7 @@ async function discoverMetadata(
     });
 
     logger.info("OAuth metadata discovered and cached", {
-      integration,
+      integration: name,
       authEndpoint: metadata.authorization_endpoint,
       tokenEndpoint: metadata.token_endpoint,
       registrationEndpoint: metadata.registration_endpoint,
@@ -399,21 +447,21 @@ async function discoverMetadata(
   } catch (error) {
     logger.warn("Failed to discover OAuth metadata, trying fallback config", {
       error,
-      integration,
+      integration: name,
     });
 
     // Fallback to static oauthConfig if discovery fails
-    if (integrationConfig.oauthConfig) {
+    if (integration.oauthConfig) {
       logger.info("Using static OAuth config fallback", {
-        integration,
-        authEndpoint: integrationConfig.oauthConfig.authorization_endpoint,
+        integration: name,
+        authEndpoint: integration.oauthConfig.authorization_endpoint,
       });
 
       const metadata = createAuthServerMetadata(
         serverUrl,
-        integrationConfig.oauthConfig.authorization_endpoint,
-        integrationConfig.oauthConfig.token_endpoint,
-        integrationConfig.oauthConfig.registration_endpoint,
+        integration.oauthConfig.authorization_endpoint,
+        integration.oauthConfig.token_endpoint,
+        integration.oauthConfig.registration_endpoint,
       );
 
       await upsertMcpIntegration(integration, {
@@ -425,36 +473,29 @@ async function discoverMetadata(
       return metadata;
     }
 
-    logger.error("No fallback OAuth config available", { error, integration });
+    logger.error("No fallback OAuth config available", {
+      error,
+      integration: name,
+    });
     throw new Error(
-      `Could not discover OAuth endpoints for ${integration}. Server may not support OAuth discovery and no fallback config is available.`,
+      `Could not discover OAuth endpoints for ${name}. Server may not support OAuth discovery and no fallback config is available.`,
     );
   }
 }
 
 /**
  * Get OAuth client credentials for an integration
- * Uses static credentials if available, otherwise dynamically registers
+ * Uses stored credentials if available, otherwise dynamically registers
  */
 async function getOAuthClient(
-  integration: IntegrationKey,
+  integration: ResolvedMcpIntegration,
   redirectUri?: string,
 ): Promise<OAuthClientInformation> {
-  const integrationConfig = getIntegration(integration);
-  const staticCreds = getStaticCredentials(integration);
-
-  // Use static credentials if available
-  if (staticCreds?.clientId) {
-    logger.info("Using static OAuth credentials", { integration });
-    return {
-      client_id: staticCreds.clientId,
-      client_secret: staticCreds.clientSecret,
-    };
-  }
+  const name = integration.name;
 
   // Check if we have dynamically registered credentials in DB
   const stored = await prisma.mcpIntegration.findUnique({
-    where: { name: integration },
+    where: { name },
     select: {
       oauthClientId: true,
       oauthClientSecret: true,
@@ -462,33 +503,34 @@ async function getOAuthClient(
   });
 
   if (stored?.oauthClientId) {
-    logger.info("Using stored OAuth credentials", { integration });
+    logger.info("Using stored OAuth credentials", { integration: name });
     return {
       client_id: stored.oauthClientId,
       client_secret: stored.oauthClientSecret || undefined,
     };
   }
 
-  if (!integrationConfig.serverUrl) {
-    throw new Error(`No server URL configured for ${integration}`);
+  if (!integration.serverUrl) {
+    throw new Error(`No server URL configured for ${name}`);
   }
 
   if (!redirectUri) {
     throw new Error(
-      `redirectUri is required for dynamic client registration for ${integration}`,
+      `redirectUri is required for dynamic client registration for ${name}`,
     );
   }
 
-  logger.info("Performing dynamic client registration", { integration });
+  logger.info("Performing dynamic client registration", { integration: name });
 
-  const oauthServerUrl = getOAuthServerUrl(integrationConfig);
-  const metadata = await discoverMetadata(oauthServerUrl, integration);
+  const metadata = await discoverMetadata(integration);
 
   if (!metadata.registration_endpoint) {
     throw new Error(
-      `Dynamic registration not supported for ${integration}. Please configure static OAuth credentials.`,
+      `Dynamic registration not supported for ${name}. Please configure static OAuth credentials.`,
     );
   }
+
+  const scope = integration.scopes.join(" ");
 
   const clientMetadata: OAuthClientMetadata = {
     client_name: "Inbox Zero",
@@ -496,7 +538,9 @@ async function getOAuthClient(
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
     token_endpoint_auth_method: "none", // Public client with PKCE
-    scope: integrationConfig.scopes.join(" "),
+    // Omit rather than send an empty string: some servers reject `scope: ""`
+    // with invalid_scope instead of falling back to their defaults
+    ...(scope && { scope }),
     logo_uri: "https://getinboxzero.com/icon.png",
     tos_uri: "https://getinboxzero.com/terms",
   };
@@ -504,6 +548,7 @@ async function getOAuthClient(
   const registered = await registerClient(metadata.registration_endpoint, {
     metadata,
     clientMetadata,
+    fetchFn: getMcpFetch(integration),
   });
 
   await upsertMcpIntegration(integration, {
@@ -512,7 +557,7 @@ async function getOAuthClient(
   });
 
   logger.info("Dynamic client registration successful", {
-    integration,
+    integration: name,
     clientId: registered.client_id,
   });
 
@@ -523,7 +568,7 @@ async function getOAuthClient(
 }
 
 async function upsertMcpIntegration(
-  integration: string,
+  integration: ResolvedMcpIntegration,
   data: {
     registeredAuthorizationUrl?: string;
     registeredTokenUrl?: string;
@@ -532,10 +577,19 @@ async function upsertMcpIntegration(
     oauthClientSecret?: string | null;
   },
 ) {
+  // A custom server row is created by its owner; if it was removed mid-flow,
+  // caching metadata must not resurrect it as an ownerless row
+  if (integration.isCustom) {
+    return prisma.mcpIntegration.updateMany({
+      where: { name: integration.name },
+      data,
+    });
+  }
+
   return prisma.mcpIntegration.upsert({
-    where: { name: integration },
+    where: { name: integration.name },
     update: data,
-    create: { name: integration, ...data },
+    create: { name: integration.name, ...data },
   });
 }
 
@@ -580,18 +634,8 @@ function calculateTokenExpiration(
   return new Date(Date.now() + DEFAULT_TOKEN_EXPIRY_MS);
 }
 
-async function getMetadataForIntegration(
-  integrationConfig: ReturnType<typeof getIntegration>,
-  integration: string,
-) {
-  const oauthServerUrl = getOAuthServerUrl(integrationConfig);
-  return await discoverMetadata(oauthServerUrl, integration);
-}
-
-function getOAuthServerUrl(
-  integrationConfig: ReturnType<typeof getIntegration>,
-): string {
-  const serverUrl = integrationConfig.serverUrl || "";
+function getOAuthServerUrl(integration: ResolvedMcpIntegration): string {
+  const serverUrl = integration.serverUrl || "";
 
   // If serverUrl ends with /mcp, OAuth discovery is at the base URL
   // This is the standard pattern: OAuth at https://mcp.example.com, MCP protocol at https://mcp.example.com/mcp
@@ -600,4 +644,60 @@ function getOAuthServerUrl(
   }
 
   return serverUrl;
+}
+
+/**
+ * Returns the resource parameter for OAuth requests if supported by the integration.
+ * Some OAuth servers (e.g., Pipedream) don't support RFC 8707 resource parameter.
+ */
+function getResourceParam(
+  integration: ResolvedMcpIntegration,
+): { resource: URL } | Record<string, never> {
+  if (integration.skipResourceParam || !integration.serverUrl) {
+    return {};
+  }
+  return { resource: new URL(integration.serverUrl) };
+}
+
+async function deactivateConnection({
+  connectionId,
+  emailAccountId,
+}: {
+  connectionId: string;
+  emailAccountId: string;
+}) {
+  try {
+    await prisma.mcpConnection.update({
+      where: { id: connectionId, emailAccountId },
+      data: { isActive: false },
+    });
+  } catch (error) {
+    logger.error("Failed to deactivate MCP connection", {
+      error,
+      connectionId,
+      emailAccountId,
+    });
+  }
+}
+
+async function clearRegisteredClient(integration: string) {
+  try {
+    // Also clear the cached discovery metadata: the cached variant omits the
+    // registration endpoint, which fresh dynamic registration needs
+    await prisma.mcpIntegration.update({
+      where: { name: integration },
+      data: {
+        oauthClientId: null,
+        oauthClientSecret: null,
+        registeredAuthorizationUrl: null,
+        registeredTokenUrl: null,
+        registeredServerUrl: null,
+      },
+    });
+  } catch (error) {
+    logger.error("Failed to clear registered OAuth client", {
+      error,
+      integration,
+    });
+  }
 }

@@ -1,16 +1,27 @@
 import { Client, type FlowControl, type HeadersInit } from "@upstash/qstash";
+import { after } from "next/server";
+import { getInternalApiHeaders, getInternalApiUrl } from "@/utils/internal-api";
 import { env } from "@/env";
-import {
-  INTERNAL_API_KEY_HEADER,
-  getInternalApiUrl,
-} from "@/utils/internal-api";
-import { sleep } from "@/utils/sleep";
 import { createScopedLogger } from "@/utils/logger";
+import { isSafeExternalHttpUrl } from "@inboxzero/network/safe-url";
 
 const logger = createScopedLogger("upstash");
 
-function getQstashClient() {
+type PublishToQstashOptions = {
+  destinationUrl?: string;
+};
+
+function getQstashClient(callbackUrl: string = getQstashCallbackBaseUrl()) {
   if (!env.QSTASH_TOKEN) return null;
+  if (!isSafeExternalHttpUrl(callbackUrl)) {
+    logger.warn(
+      "Qstash callback URL is not externally reachable; using fallback",
+      {
+        qstashCallbackUrl: callbackUrl,
+      },
+    );
+    return null;
+  }
   return new Client({ token: env.QSTASH_TOKEN });
 }
 
@@ -18,83 +29,180 @@ export async function publishToQstash<T>(
   path: string,
   body: T,
   flowControl?: FlowControl,
+  headers?: HeadersInit,
+  options?: PublishToQstashOptions,
 ) {
-  const client = getQstashClient();
-  const url = `${getInternalApiUrl()}${path}`;
+  const requestHeaders = createHeaders(headers);
+  requestHeaders.set("Retry-After", "10");
 
+  const qstashUrl =
+    options?.destinationUrl ?? `${getQstashCallbackBaseUrl()}${path}`;
+  const client = getQstashClient(qstashUrl);
   if (client) {
     return client.publishJSON({
-      url,
+      url: qstashUrl,
       body,
       flowControl,
       retries: 3,
-      headers: {
-        "Retry-After": "10", // 10 seconds
-      },
+      headers: requestHeaders,
     });
   }
 
-  return fallbackPublishToQstash(url, body);
+  const fallbackUrl =
+    options?.destinationUrl ?? `${getInternalApiUrl()}${path}`;
+  return fallbackPublishToQstash(
+    fallbackUrl,
+    body,
+    requestHeaders,
+    !options?.destinationUrl,
+  );
+}
+
+/**
+ * Delivers `body` to `path` no earlier than `notBefore`. Resolves `false` when
+ * QStash is unavailable, so callers keep their own fallback, such as the cron.
+ */
+export async function publishToQstashAt<T>({
+  path,
+  body,
+  notBefore,
+  deduplicationId,
+}: {
+  path: string;
+  body: T;
+  notBefore: Date;
+  deduplicationId: string;
+}) {
+  const url = `${getQstashCallbackBaseUrl()}${path}`;
+  const client = getQstashClient(url);
+  if (!client) return false;
+  await client.publishJSON({
+    url,
+    body,
+    notBefore: Math.ceil(notBefore.getTime() / 1000),
+    deduplicationId,
+    retries: 3,
+  });
+  return true;
 }
 
 export async function bulkPublishToQstash<T>({
   items,
 }: {
   items: {
-    url: string;
+    path: string;
     body: T;
     flowControl?: FlowControl;
   }[];
 }) {
   const client = getQstashClient();
   if (client) {
-    return client.batchJSON(items);
+    const callbackBase = getQstashCallbackBaseUrl();
+    const qstashItems = items.map((item) => ({
+      ...item,
+      url: `${callbackBase}${item.path}`,
+      path: undefined,
+    }));
+
+    await client.batchJSON(qstashItems);
+    return;
   }
 
+  const internalBase = getInternalApiUrl();
   for (const item of items) {
-    await fallbackPublishToQstash(item.url, item.body);
+    await fallbackPublishToQstash(
+      `${internalBase}${item.path}`,
+      item.body,
+      undefined,
+    );
   }
 }
 
 export async function publishToQstashQueue<T>({
   queueName,
   parallelism,
-  url,
+  path,
   body,
   headers,
+  deduplicationId,
 }: {
   queueName: string;
   parallelism: number;
-  url: string;
+  path: string;
+  body: T;
+  headers?: HeadersInit;
+  deduplicationId?: string;
+}) {
+  const client = getQstashClient();
+  if (client) {
+    const qstashUrl = `${getQstashCallbackBaseUrl()}${path}`;
+
+    try {
+      const queue = client.queue({ queueName });
+      await queue.upsert({ parallelism });
+      return await queue.enqueueJSON({
+        url: qstashUrl,
+        body,
+        headers,
+        deduplicationId,
+      });
+    } catch (error) {
+      logger.error("Failed to publish to Qstash queue", {
+        qstashUrl,
+        queueName,
+        error,
+      });
+      throw error;
+    }
+  }
+
+  return publishToInternalApiInBackground<T>({
+    path,
+    body,
+    headers,
+  });
+}
+
+export async function publishToInternalApiInBackground<T>({
+  path,
+  body,
+  headers,
+}: {
+  path: string;
   body: T;
   headers?: HeadersInit;
 }) {
-  const client = getQstashClient();
-
-  if (client) {
-    const queue = client.queue({ queueName });
-    queue.upsert({ parallelism });
-    return await queue.enqueueJSON({ url, body, headers });
-  }
-
-  return fallbackPublishToQstash<T>(url, body);
+  const fallbackUrl = `${getInternalApiUrl()}${path}`;
+  return fallbackPublishToQstash<T>(fallbackUrl, body, headers);
 }
 
-async function fallbackPublishToQstash<T>(url: string, body: T) {
-  // Fallback to fetch if Qstash client is not found
+async function fallbackPublishToQstash<T>(
+  url: string,
+  body: T,
+  headers?: HeadersInit,
+  includeInternalApiHeaders = true,
+) {
   logger.warn("Qstash client not found");
 
-  // Don't await. Run in background
-  fetch(`${url}/simple`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      [INTERNAL_API_KEY_HEADER]: env.INTERNAL_API_KEY,
-    },
-    body: JSON.stringify(body),
+  const internalHeaders = createHeaders(headers);
+  internalHeaders.set("Content-Type", "application/json");
+  if (includeInternalApiHeaders) {
+    for (const [key, value] of Object.entries(getInternalApiHeaders())) {
+      internalHeaders.set(key, value);
+    }
+  }
+
+  after(async () => {
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: internalHeaders,
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      logger.error("Fallback QStash fetch failed", { url, error });
+    }
   });
-  // Wait for 100ms to ensure the request is sent
-  await sleep(100);
 }
 
 export async function listQueues() {
@@ -111,4 +219,31 @@ export async function deleteQueue(queueName: string) {
     logger.info("Deleting queue", { queueName });
     await client.queue({ queueName }).delete();
   }
+}
+
+function normalizeBaseUrl(url: string) {
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
+function getQstashCallbackBaseUrl() {
+  const candidateUrls = [
+    env.INTERNAL_API_URL,
+    env.WEBHOOK_URL,
+    env.NEXT_PUBLIC_BASE_URL,
+  ].filter((value): value is string => Boolean(value));
+
+  const safeExternalUrl = candidateUrls.find((value) =>
+    isSafeExternalHttpUrl(value),
+  );
+  if (safeExternalUrl) return normalizeBaseUrl(safeExternalUrl);
+
+  return normalizeBaseUrl(getInternalApiUrl());
+}
+
+function createHeaders(headers?: HeadersInit) {
+  if (headers && Symbol.iterator in headers) {
+    return new Headers(Array.from(headers));
+  }
+
+  return new Headers(headers);
 }

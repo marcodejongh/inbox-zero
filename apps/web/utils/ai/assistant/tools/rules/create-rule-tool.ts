@@ -1,0 +1,111 @@
+import { type InferUITool, tool } from "ai";
+import type { Logger } from "@/utils/logger";
+import { createRuleSchema } from "@/utils/ai/rule/create-rule-schema";
+import { actionsNeedChatRiskConfirmation, createRule } from "@/utils/rule/rule";
+import {
+  findSenderOnlyOverlapConflict,
+  formatSenderOnlyOverlapError,
+} from "@/utils/rule/sender-scope-overlap";
+import {
+  buildCreateRuleSchemaFromChatToolInput,
+  loadRuleSnapshotAfterWrite,
+  trackRuleToolCall,
+} from "./shared";
+import type { RuleReadState } from "../../chat-rule-state";
+
+export const createRuleTool = ({
+  email,
+  emailAccountId,
+  provider,
+  integrationActionsEnabled,
+  logger,
+  setRuleReadState,
+  onRulesStateExposed,
+}: {
+  email: string;
+  emailAccountId: string;
+  provider: string;
+  integrationActionsEnabled?: boolean;
+  logger: Logger;
+  setRuleReadState?: (state: RuleReadState) => void;
+  onRulesStateExposed?: (rulesRevision: number) => void;
+}) =>
+  tool({
+    description:
+      "Create a new rule. Ask what action to take if the user has not specified one.",
+    inputSchema: createRuleSchema(provider, integrationActionsEnabled),
+    execute: async ({ name, condition, actions }) => {
+      trackRuleToolCall({ tool: "create_rule", email, logger });
+
+      try {
+        const overlapConflict = await findSenderOnlyOverlapConflict({
+          emailAccountId,
+          rule: {
+            instructions: condition.aiInstructions,
+            from: condition.static?.from,
+            to: condition.static?.to,
+            subject: condition.static?.subject,
+          },
+        });
+
+        if (overlapConflict) {
+          return {
+            success: false,
+            error: formatSenderOnlyOverlapError(overlapConflict),
+            conflictingRuleName: overlapConflict.ruleName,
+            overlappingSenders: overlapConflict.overlappingSenders,
+          };
+        }
+
+        const resultPayload = buildCreateRuleSchemaFromChatToolInput(
+          { name, condition, actions },
+          provider,
+        );
+
+        const { needsConfirmation, riskMessages } =
+          actionsNeedChatRiskConfirmation(resultPayload);
+
+        if (needsConfirmation) {
+          return {
+            success: true,
+            actionType: "create_rule" as const,
+            requiresConfirmation: true as const,
+            confirmationState: "pending" as const,
+            riskMessages,
+          };
+        }
+
+        const rule = await createRule({
+          result: resultPayload,
+          emailAccountId,
+          provider,
+          runOnThreads: true,
+          logger,
+        });
+
+        const snapshot = await loadRuleSnapshotAfterWrite({
+          emailAccountId,
+          logger,
+          setRuleReadState,
+          onRulesStateExposed,
+        });
+        const currentRule = snapshot?.rules.find(
+          (snapshotRule) => snapshotRule.name === resultPayload.name,
+        );
+
+        return {
+          success: true,
+          ruleId: rule.id,
+          currentRule,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        logger.error("Failed to create rule", { error });
+
+        return { error: "Failed to create rule", message };
+      }
+    },
+  });
+
+export type CreateRuleTool = InferUITool<ReturnType<typeof createRuleTool>>;

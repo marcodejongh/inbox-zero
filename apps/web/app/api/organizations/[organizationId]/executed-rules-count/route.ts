@@ -33,16 +33,19 @@ async function getExecutedRulesCount({
         members: {
           some: {
             organizationId,
+            allowOrgAdminAnalytics: true,
           },
         },
       },
     },
     _count: true,
+    _max: { createdAt: true },
   });
 
-  const result = memberCounts.map(({ emailAccountId, _count }) => ({
+  const result = memberCounts.map(({ emailAccountId, _count, _max }) => ({
     emailAccountId,
     executedRulesCount: _count,
+    lastProcessedEmailAt: _max.createdAt,
   }));
 
   return { memberCounts: result };

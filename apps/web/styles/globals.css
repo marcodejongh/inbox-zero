@@ -1,3 +1,5 @@
+@import "./scrollbar.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -18,6 +20,9 @@
 
     --border: 214.3 31.8% 91.4%; /* slate-200 */
     --input: 214.3 31.8% 91.4%; /* slate-200 */
+    /* Heavier rule weight than --border. Defined here only so it never resolves
+       to nothing outside the Mail route; the Mail palette overrides it. */
+    --border-strong: 212.7 26.8% 83.9%; /* slate-300 */
 
     --primary: 222.2 47.4% 11.2%; /* slate-900 */
     --primary-foreground: 210 40% 98%; /* slate-50 */
@@ -37,6 +42,7 @@
 
     --sidebar-background: 0 0% 98%;
     --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-muted-foreground: var(--muted-foreground);
     --sidebar-primary: 240 5.9% 10%;
     --sidebar-primary-foreground: 0 0% 98%;
     --sidebar-accent: 240 4.8% 95.9%;
@@ -52,38 +58,122 @@
   }
 
   .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
-    --popover-foreground: 0 0% 98%;
+    /* Charcoal rather than near-black, matching the Mail screen */
+    --background: 220 7% 16%; /* #26282C */
+    --foreground: 220 8% 92%; /* #E9EAEC */
+    --card: 220 7% 19%; /* #2D2F34 */
+    --card-foreground: 220 8% 92%;
+    --popover: 220 7% 19%; /* #2D2F34 */
+    --popover-foreground: 220 8% 92%;
     --primary: 0 0% 98%;
     --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
+    --secondary: 220 7% 24%; /* #393C41 */
+    --secondary-foreground: 220 8% 85%; /* #D6D8DC */
+    --muted: 220 7% 21%; /* #323439 */
+    --muted-foreground: 220 5% 62%; /* #999CA3 */
+    --accent: 220 7% 24%; /* #393C41 */
+    --accent-foreground: 220 8% 95%; /* #F1F2F3 */
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 0 85.7% 97.3%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
+    --border: 220 6% 22%; /* #35373B */
+    --input: 220 6% 22%;
+    --border-strong: 220 6% 28%; /* #43464C */
     --ring: 240 4.9% 83.9%;
     --chart-1: oklch(0.7 0.2 250);
     --chart-2: oklch(0.6 0.22 250);
     --chart-3: oklch(0.5 0.24 250);
     --chart-4: oklch(0.4 0.22 250);
     --chart-5: oklch(0.3 0.18 250);
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-background: 220 7% 14%; /* #212326 */
+    --sidebar-foreground: 220 6% 80%; /* #C9CBCF */
+    --sidebar-muted-foreground: var(--muted-foreground);
     --sidebar-primary: 224.3 76.3% 48%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-accent: 220 7% 21%; /* #323439 */
+    --sidebar-accent-foreground: 220 8% 95%;
+    --sidebar-border: 220 6% 20%; /* #303236 */
     --sidebar-ring: 240 4.9% 83.9%;
+  }
+}
+
+@layer base {
+  /*
+   * Warm-neutral palette for the Mail route, scoped so the rest of the app keeps
+   * today's cool-slate tokens while the new design language is proven out.
+   * Intended to be promoted to `:root` in a follow-up PR, at which point this
+   * block and the `data-theme` attribute go away.
+   *
+   * The dark variant shares the app's charcoal surfaces and only swaps accents.
+   */
+  :root[data-theme="mail"]:not(.dark) {
+    --background: 0 0% 99.2%; /* #FDFDFD */
+    --foreground: 0 0% 14.1%; /* #242424 */
+
+    --muted: 0 0% 96.5%; /* #F6F6F6 */
+    --muted-foreground: 0 0% 51.8%; /* #848484 */
+
+    --popover: 0 0% 100%; /* #FFFFFF */
+    --popover-foreground: 0 0% 14.1%;
+
+    --card: 0 0% 100%; /* #FFFFFF */
+    --card-foreground: 0 0% 14.1%;
+
+    --border: 0 0% 93.7%; /* #EFEFEF */
+    --input: 0 0% 93.7%;
+    /* Second, heavier rule weight used for column dividers and field outlines */
+    --border-strong: 0 0% 90.2%; /* #E6E6E6 */
+
+    --primary: 221.2 83.2% 53.3%; /* #2563EB */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 96.5%;
+    --secondary-foreground: 0 0% 23.9%; /* #3D3D3D */
+
+    --accent: 0 0% 96.5%;
+    --accent-foreground: 0 0% 14.1%;
+
+    --ring: 221.2 83.2% 53.3%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 0 0% 98.4%; /* #FBFBFB */
+    --sidebar-foreground: 0 0% 32.2%; /* #525252 */
+    /* Counts and other second-rank text sit a step back from the row label */
+    --sidebar-muted-foreground: 0 0% 43.1%; /* #6E6E6E */
+    --sidebar-primary: 221.2 83.2% 53.3%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 0 0% 94.5%; /* #F1F1F1 */
+    --sidebar-accent-foreground: 0 0% 14.1%; /* #242424 */
+    --sidebar-border: 0 0% 93.7%;
+    --sidebar-ring: 221.2 83.2% 53.3%;
+  }
+
+  :root[data-theme="mail"].dark {
+    /* Lighter fills with dark text so both the fill and the tinted text on the
+       charcoal background clear WCAG AA contrast */
+    --primary: 213.1 93.9% 67.8%; /* #60A5FA */
+    --primary-foreground: 220 7% 12%; /* #1C1E21 */
+
+    --destructive: 0 90.6% 70.8%; /* #F87171 */
+    --destructive-foreground: 220 7% 12%;
+
+    --ring: 213.1 93.9% 67.8%;
+
+    --sidebar-primary: 213.1 93.9% 67.8%;
+    --sidebar-primary-foreground: 220 7% 12%;
+    --sidebar-ring: 213.1 93.9% 67.8%;
+  }
+}
+
+@layer base {
+  /*
+   * The gradient button reads identically in every theme, so its values live
+   * outside the theme blocks rather than being redefined per palette.
+   */
+  :root {
+    --button-gradient: linear-gradient(180deg, #2965ec, #5c89f8);
+    --button-gradient-border: 220.9 83.4% 64.5%; /* #5989F0 */
+    --button-gradient-shadow: 221.1 97.8% 64.3%; /* #4B83FD */
   }
 }
 
@@ -102,4 +192,135 @@
 
 * {
   font-variant-ligatures: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Bulk unsubscribe table → card layout on mobile */
+@media (max-width: 640px) {
+  /* Constrain the wrapper div that the Table component adds */
+  :has(> .bulk-unsub-table) {
+    overflow: hidden !important;
+  }
+
+  .bulk-unsub-table,
+  .bulk-unsub-table thead,
+  .bulk-unsub-table tbody,
+  .bulk-unsub-table tbody tr {
+    max-width: 100%;
+  }
+
+  .bulk-unsub-table,
+  .bulk-unsub-table thead,
+  .bulk-unsub-table tbody {
+    display: block;
+  }
+
+  .bulk-unsub-table thead {
+    display: none;
+  }
+
+  .bulk-unsub-table tbody tr {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 12px;
+    margin: 8px 0;
+    border: 1px solid hsl(var(--border)) !important;
+    border-radius: 8px;
+  }
+
+  /* Checkbox: top-right of card */
+  .bulk-unsub-table td[data-cell="checkbox"] {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: auto;
+    padding: 0;
+    border: none;
+  }
+
+  /* From: full width row */
+  .bulk-unsub-table td[data-cell="from"] {
+    width: 100%;
+    min-width: 0;
+    max-width: calc(100vw - 80px);
+    padding: 0 40px 8px 0;
+    overflow: hidden;
+    border: none;
+  }
+
+  /* Stat cells: inline, side by side */
+  .bulk-unsub-table td[data-label] {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    padding: 0;
+    margin-right: 12px;
+    font-size: 0.8125rem;
+    border: none;
+  }
+
+  .bulk-unsub-table td[data-label]::before {
+    color: hsl(var(--muted-foreground));
+    content: attr(data-label) ":";
+  }
+
+  /* Actions: push to the right on the stats row */
+  .bulk-unsub-table td[data-cell="actions"] {
+    width: auto;
+    min-width: 0;
+    padding: 0;
+    margin-left: auto;
+    border: none;
+  }
+
+  .bulk-unsub-table td[data-cell="actions"] > div {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
+/* Mac desktop shell: leave the traffic-light row empty. Height is set on
+   :root by the Electron shell (and by html[data-mac-desktop] before paint).
+   Do not require the html flag here — hydration can remove it. */
+html[data-mac-desktop] {
+  --desktop-traffic-lights-height: 52px;
+}
+
+[data-desktop-mac-titlebar-spacer] {
+  padding-top: var(--desktop-traffic-lights-height, 0px);
+}
+
+html[data-mac-desktop] [data-hide-on-desktop-mac] {
+  display: none !important;
+}
+
+html[data-mac-desktop] [data-desktop-mac-end] {
+  flex: none;
+  margin-left: auto;
+}
+
+/* While a panel edge is being dragged, keep the resize cursor under the pointer
+   even when it outruns the handle, and let widths track it without easing.
+   Descendants need `!important` because interactive elements set their own
+   cursor, and a fast drag regularly carries the pointer across them. */
+body[data-resizing] {
+  user-select: none;
+}
+
+body[data-resizing],
+body[data-resizing] * {
+  cursor: col-resize !important;
+  transition-property: none !important;
 }

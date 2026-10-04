@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/Combobox";
 import { createLabelAction } from "@/utils/actions/mail";
-import type { EmailLabel } from "@/providers/EmailProvider";
+import type { EmailLabel } from "@/providers/email-label-types";
 
 export function LabelCombobox({
   value,
@@ -73,8 +73,12 @@ export function LabelCombobox({
                   {
                     loading: `Creating label "${searchValue}"...`,
                     success: `Created label "${searchValue}"`,
-                    error: (errorMessage) =>
-                      `Error creating label "${searchValue}": ${errorMessage}`,
+                    error: (errorMessage: unknown) =>
+                      `Error creating label "${searchValue}": ${
+                        errorMessage instanceof Error
+                          ? errorMessage.message
+                          : String(errorMessage)
+                      }`,
                   },
                 );
               }}

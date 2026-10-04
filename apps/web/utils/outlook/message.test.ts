@@ -1,0 +1,1157 @@
+import { Client } from "@microsoft/microsoft-graph-client";
+import { describe, it, expect, vi } from "vitest";
+import type { Message } from "@microsoft/microsoft-graph-types";
+import { createTestLogger } from "@/__tests__/helpers";
+import {
+  buildOutlookSearchFallbackQuery,
+  convertMessage,
+  getMessage,
+  queryBatchMessages,
+  queryMessagesWithAttachments,
+  queryMessagesWithFilters,
+  sanitizeOutlookSearchQuery,
+  sanitizeKqlValue,
+  sanitizeKqlFieldQuery,
+  sanitizeKqlTextQuery,
+} from "@/utils/outlook/message";
+import type { OutlookClient } from "@/utils/outlook/client";
+
+describe("convertMessage", () => {
+  it.each([
+    [
+      "text",
+      "Visit service.new/account",
+      "Visit service.new/account",
+      undefined,
+    ],
+    [
+      "html",
+      "<p>Visit service.new/account</p>",
+      undefined,
+      "<p>Visit service.new/account</p>",
+    ],
+  ] as const)("keeps %s bodies in their declared format", (contentType, content, textPlain, textHtml) => {
+    const result = convertMessage({ body: { contentType, content } });
+    expect(result.textPlain).toBe(textPlain);
+    expect(result.textHtml).toBe(textHtml);
+    expect(result.bodyContentType).toBe(contentType);
+  });
+
+  it("preserves Outlook inbox classification", () => {
+    const result = convertMessage({
+      id: "msg-focused",
+      inferenceClassification: "focused",
+    });
+
+    expect(result.inboxSection).toBe("focused");
+  });
+
+  it("preserves draft creation time when there is no received timestamp", () => {
+    const createdDateTime = "2026-01-02T10:00:00.000Z";
+    const result = convertMessage({
+      id: "draft",
+      isDraft: true,
+      createdDateTime,
+    });
+    expect(result.internalDate).toBe(createdDateTime);
+    expect(result.headers.date).toBe(createdDateTime);
+    expect(result.date).toBe(createdDateTime);
+  });
+
+  it("preserves reply headers used by outbound processing", () => {
+    const result = convertMessage(
+      {
+        id: "msg-123",
+        conversationId: "thread-456",
+        internetMessageHeaders: [
+          { name: "In-Reply-To", value: "<source@example.com>" },
+        ],
+      },
+      {},
+    );
+
+    expect(result.headers).toMatchObject({
+      "in-reply-to": "<source@example.com>",
+    });
+  });
+
+  it("maps list-unsubscribe headers from internet message headers", () => {
+    const result = convertMessage(
+      {
+        id: "msg-123",
+        conversationId: "thread-456",
+        internetMessageHeaders: [
+          {
+            name: "List-Unsubscribe",
+            value: "<https://example.com/unsubscribe>",
+          },
+          {
+            name: "List-Unsubscribe-Post",
+            value: "List-Unsubscribe=One-Click",
+          },
+        ],
+      },
+      {},
+    );
+
+    expect(result.headers).toMatchObject({
+      "list-unsubscribe": "<https://example.com/unsubscribe>",
+      "list-unsubscribe-post": "List-Unsubscribe=One-Click",
+    });
+  });
+
+  it("normalizes null reply headers", () => {
+    const result = convertMessage(
+      {
+        id: "msg-123",
+        conversationId: "thread-456",
+        internetMessageHeaders: [{ name: "In-Reply-To", value: null }],
+      },
+      {},
+    );
+
+    expect(result.headers["in-reply-to"]).toBeUndefined();
+  });
+
+  it("excludes inline images embedded in the email body from attachments", () => {
+    const message: Message = {
+      id: "msg-123",
+      conversationId: "thread-456",
+      attachments: [
+        {
+          id: "inline-attachment",
+          name: "signature-logo.png",
+          contentType: "image/png",
+          contentId: "signature-logo",
+          size: 128,
+          isInline: true,
+        },
+        {
+          id: "document-attachment",
+          name: "receipt.pdf",
+          contentType: "application/pdf",
+          size: 1024,
+          isInline: false,
+        },
+      ],
+    };
+
+    const result = convertMessage(message, {});
+
+    expect(result.attachments).toEqual([
+      expect.objectContaining({
+        attachmentId: "document-attachment",
+        filename: "receipt.pdf",
+      }),
+    ]);
+    expect(result.inline).toEqual([
+      expect.objectContaining({
+        attachmentId: "inline-attachment",
+        filename: "signature-logo.png",
+        headers: expect.objectContaining({
+          "content-id": "signature-logo",
+        }),
+      }),
+    ]);
+  });
+
+  describe("category ID mapping", () => {
+    it("should return category IDs when categoryMap is provided", () => {
+      const message: Message = {
+        id: "msg-123",
+        conversationId: "thread-456",
+        categories: ["Urgent", "To Reply"],
+        isRead: true,
+      };
+
+      const categoryMap = new Map([
+        ["Urgent", "uuid-urgent-123"],
+        ["To Reply", "uuid-to-reply-456"],
+      ]);
+
+      const result = convertMessage(message, {}, categoryMap);
+
+      expect(result.labelIds).toContain("uuid-urgent-123");
+      expect(result.labelIds).toContain("uuid-to-reply-456");
+      expect(result.labelIds).not.toContain("Urgent");
+      expect(result.labelIds).not.toContain("To Reply");
+    });
+
+    it("should fall back to category name when not in categoryMap", () => {
+      const message: Message = {
+        id: "msg-123",
+        conversationId: "thread-456",
+        categories: ["Urgent", "Unknown Category"],
+        isRead: true,
+      };
+
+      const categoryMap = new Map([["Urgent", "uuid-urgent-123"]]);
+
+      const result = convertMessage(message, {}, categoryMap);
+
+      expect(result.labelIds).toContain("uuid-urgent-123");
+      expect(result.labelIds).toContain("Unknown Category");
+    });
+
+    it("should return category names when no categoryMap provided", () => {
+      const message: Message = {
+        id: "msg-123",
+        conversationId: "thread-456",
+        categories: ["Urgent", "To Reply"],
+        isRead: true,
+      };
+
+      const result = convertMessage(message, {});
+
+      expect(result.labelIds).toContain("Urgent");
+      expect(result.labelIds).toContain("To Reply");
+    });
+
+    it("should handle empty categories array", () => {
+      const message: Message = {
+        id: "msg-123",
+        conversationId: "thread-456",
+        categories: [],
+        isRead: true,
+      };
+
+      const categoryMap = new Map([["Urgent", "uuid-urgent-123"]]);
+
+      const result = convertMessage(message, {}, categoryMap);
+
+      expect(result.labelIds).not.toContain("uuid-urgent-123");
+      expect(result.labelIds).not.toContain("Urgent");
+    });
+
+    it("should handle undefined categories", () => {
+      const message: Message = {
+        id: "msg-123",
+        conversationId: "thread-456",
+        isRead: true,
+      };
+
+      const categoryMap = new Map([["Urgent", "uuid-urgent-123"]]);
+
+      const result = convertMessage(message, {}, categoryMap);
+
+      expect(result.labelIds).toBeDefined();
+    });
+
+    it("should include system labels alongside category IDs", () => {
+      const message: Message = {
+        id: "msg-123",
+        conversationId: "thread-456",
+        categories: ["Urgent"],
+        isRead: false,
+        parentFolderId: "inbox-folder-id",
+      };
+
+      const folderIds = { inbox: "inbox-folder-id" };
+      const categoryMap = new Map([["Urgent", "uuid-urgent-123"]]);
+
+      const result = convertMessage(message, folderIds, categoryMap);
+
+      expect(result.labelIds).toContain("UNREAD");
+      expect(result.labelIds).toContain("INBOX");
+      expect(result.labelIds).toContain("uuid-urgent-123");
+    });
+
+    it("preserves the Outlook web link for opening the exact message", () => {
+      const message: Message = {
+        id: "msg-123",
+        conversationId: "thread-456",
+        webLink:
+          "https://outlook.office.com/mail/deeplink/read/msg-123?ispopout=0",
+        isRead: true,
+      };
+
+      const result = convertMessage(message, {});
+
+      expect(result.externalUrl).toBe(
+        "https://outlook.office.com/mail/deeplink/read/msg-123?ispopout=0",
+      );
+    });
+  });
+});
+
+describe("queryBatchMessages", () => {
+  it("sends one correctly quoted and URL-encoded expression through the real Graph SDK", async () => {
+    const request = createMockMessagesRequest();
+    await queryBatchMessages(
+      createCachedOutlookClient(vi.fn().mockReturnValue(request)),
+      {
+        mailboxSearch: {
+          mailbox: "all",
+          text: {
+            kind: "text",
+            field: "any",
+            value: "report & C# 50%",
+            match: "phrase",
+          },
+        },
+      },
+      createTestLogger(),
+    );
+    const search = request.search.mock.calls[0]?.[0] as string;
+    const graph = Client.init({ authProvider: (done) => done(null, "unused") });
+    const actual = graph.api("/me/messages").search(search) as unknown as {
+      buildFullUrl(): string;
+    };
+    const url = new URL(actual.buildFullUrl());
+    expect([...url.searchParams.keys()]).toEqual(["$search"]);
+    expect(url.hash).toBe("");
+    expect(url.searchParams.get("$search")).toBe(
+      JSON.stringify('"report & C# 50%"'),
+    );
+  });
+
+  it.each([
+    [
+      "term",
+      "any",
+      "Native scheduled attachment",
+      '"Native" AND "scheduled" AND "attachment"',
+    ],
+    [
+      "phrase",
+      "any",
+      "Native scheduled attachment",
+      '"Native scheduled attachment"',
+    ],
+    [
+      "phrase",
+      "subject",
+      "Native scheduled attachment",
+      'subject:"Native scheduled attachment"',
+    ],
+  ] as const)("wraps %s %s searches as one Graph expression", async (match, field, value, expression) => {
+    const request = createMockMessagesRequest();
+    await queryBatchMessages(
+      createCachedOutlookClient(vi.fn().mockReturnValue(request)),
+      {
+        mailboxSearch: {
+          mailbox: "all",
+          text: { kind: "text", field, value, match },
+        },
+      },
+      createTestLogger(),
+    );
+    expect(request.search).toHaveBeenCalledWith(
+      encodeURIComponent(JSON.stringify(expression)),
+    );
+    expect(request.filter).not.toHaveBeenCalled();
+    expect(request.orderby).not.toHaveBeenCalled();
+  });
+
+  it("uses literal Graph search with local metadata filtering, retaining empty-page cursors", async () => {
+    const request = createMockMessagesRequest();
+    request.get.mockResolvedValue({
+      value: [{ id: "read", isRead: true }],
+      "@odata.nextLink":
+        "https://graph.microsoft.com/v1.0/me/messages?$skip=20",
+    });
+    const api = vi.fn().mockReturnValue(request);
+    const result = await queryBatchMessages(
+      createCachedOutlookClient(api),
+      {
+        mailboxSearch: {
+          mailbox: "all",
+          read: false,
+          text: {
+            kind: "text",
+            field: "any",
+            value: "in:sent read",
+            match: "term",
+          },
+        },
+      },
+      createTestLogger(),
+    );
+    expect(request.search).toHaveBeenCalledWith(
+      encodeURIComponent(JSON.stringify('"in:sent" AND "read"')),
+    );
+    expect(request.filter).not.toHaveBeenCalled();
+    expect(request.orderby).not.toHaveBeenCalled();
+    expect(result.messages).toEqual([]);
+    expect(result.nextPageToken).toContain("$skip=20");
+  });
+
+  it("keeps matching unread messages when applying metadata to text search", async () => {
+    const request = createMockMessagesRequest();
+    request.get.mockResolvedValue({
+      value: [
+        { id: "read", isRead: true },
+        { id: "unread", isRead: false },
+      ],
+    });
+    const result = await queryBatchMessages(
+      createCachedOutlookClient(vi.fn().mockReturnValue(request)),
+      {
+        mailboxSearch: {
+          mailbox: "all",
+          read: false,
+          text: { kind: "text", field: "any", value: "report", match: "term" },
+        },
+      },
+      createTestLogger(),
+    );
+    expect(result.messages?.map((message) => message.id)).toEqual(["unread"]);
+  });
+
+  it.each([
+    "term",
+    "phrase",
+  ] as const)("omits whitespace-only %s search literals", async (match) => {
+    const request = createMockMessagesRequest();
+    await queryBatchMessages(
+      createCachedOutlookClient(vi.fn().mockReturnValue(request)),
+      {
+        mailboxSearch: {
+          mailbox: "all",
+          text: { kind: "text", field: "any", value: "   ", match },
+        },
+      },
+      createTestLogger(),
+    );
+    expect(request.search).not.toHaveBeenCalled();
+  });
+
+  it("rejects full URL page tokens outside Microsoft Graph", async () => {
+    const api = vi.fn().mockReturnValue({ get: vi.fn() });
+    const client = createCachedOutlookClient(api);
+
+    await expect(
+      queryBatchMessages(
+        client,
+        { pageToken: "http://169.254.169.254/latest/meta-data" },
+        createTestLogger(),
+      ),
+    ).rejects.toThrow("Invalid Outlook page token");
+
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("queries the requested folder directly for folder-only cleanup", async () => {
+    const request = createMockMessagesRequest();
+    const api = vi.fn().mockReturnValue(request);
+    await queryBatchMessages(
+      createCachedOutlookClient(api),
+      { folderId: "folder/id", searchQuery: "" },
+      createTestLogger(),
+    );
+    expect(api).toHaveBeenCalledWith("/me/mailFolders/folder%2Fid/messages");
+    expect(request.search).not.toHaveBeenCalled();
+    expect(request.filter).not.toHaveBeenCalled();
+  });
+
+  it("preserves folder scope on continuation pages", async () => {
+    const request = createMockMessagesRequest();
+    request.get.mockResolvedValue({
+      value: [
+        {
+          id: "inside",
+          conversationId: "thread-1",
+          parentFolderId: "folder-1",
+        },
+        {
+          id: "outside",
+          conversationId: "thread-2",
+          parentFolderId: "folder-2",
+        },
+      ],
+      "@odata.nextLink":
+        "https://graph.microsoft.com/v1.0/me/messages?$skip=40",
+    });
+    const api = vi.fn().mockReturnValue(request);
+    const result = await queryBatchMessages(
+      createCachedOutlookClient(api),
+      {
+        folderId: "folder-1",
+        pageToken: "https://graph.microsoft.com/v1.0/me/messages?$skip=20",
+      },
+      createTestLogger(),
+    );
+    expect(result.messages.map((message) => message.id)).toEqual(["inside"]);
+    expect(result.nextPageToken).toBe(
+      "https://graph.microsoft.com/v1.0/me/messages?$skip=40",
+    );
+  });
+
+  it("resolves well-known folder names on continuation pages", async () => {
+    const request = createMockMessagesRequest();
+    request.get.mockResolvedValue({
+      value: [
+        {
+          id: "inside",
+          conversationId: "thread-1",
+          parentFolderId: "inbox-folder-id",
+        },
+        {
+          id: "outside",
+          conversationId: "thread-2",
+          parentFolderId: "archive-folder-id",
+        },
+      ],
+      "@odata.nextLink":
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skip=40",
+    });
+    const api = vi.fn().mockReturnValue(request);
+    const result = await queryBatchMessages(
+      createCachedOutlookClient(api),
+      {
+        folderId: "inbox",
+        pageToken:
+          "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skip=20",
+      },
+      createTestLogger(),
+    );
+    expect(result.messages.map((message) => message.id)).toEqual(["inside"]);
+  });
+
+  it("uses metadata filters for unread category searches", async () => {
+    const request = createMockMessagesRequest();
+    const api = vi.fn().mockReturnValue(request);
+    const client = createCachedOutlookClient(
+      api,
+      new Map([["Newsletter", "category-newsletter"]]),
+    );
+
+    await queryBatchMessages(
+      client,
+      {
+        searchQuery: "",
+        readState: "unread",
+        categoryNames: ["Newsletter"],
+        maxResults: 20,
+      },
+      createTestLogger(),
+    );
+
+    expect(request.search).not.toHaveBeenCalled();
+    expect(request.filter).toHaveBeenCalledWith(
+      "isRead eq false and categories/any(category: category eq 'Newsletter')",
+    );
+    expect(request.orderby).not.toHaveBeenCalled();
+  });
+
+  it("uses standalone unread query terms as metadata filters", async () => {
+    const request = createMockMessagesRequest();
+    const api = vi.fn().mockReturnValue(request);
+    const client = createCachedOutlookClient(api);
+
+    await queryBatchMessages(
+      client,
+      {
+        searchQuery: "unread",
+        maxResults: 20,
+      },
+      createTestLogger(),
+    );
+
+    expect(request.search).not.toHaveBeenCalled();
+    expect(request.filter).toHaveBeenCalledWith("isRead eq false");
+    expect(request.orderby).not.toHaveBeenCalled();
+  });
+
+  it("strips standalone unread from text search and filters the page", async () => {
+    const request = createMockMessagesRequest();
+    request.get.mockResolvedValue({
+      value: [
+        {
+          id: "message-unread",
+          conversationId: "thread-unread",
+          isRead: false,
+        },
+        {
+          id: "message-read",
+          conversationId: "thread-read",
+          isRead: true,
+        },
+      ],
+    });
+    const api = vi.fn().mockReturnValue(request);
+    const client = createCachedOutlookClient(api);
+
+    const result = await queryBatchMessages(
+      client,
+      {
+        searchQuery: "unread newsletter",
+        maxResults: 20,
+      },
+      createTestLogger(),
+    );
+
+    expect(request.search).toHaveBeenCalledWith('"newsletter"');
+    expect(request.filter).not.toHaveBeenCalled();
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.id).toBe("message-unread");
+  });
+
+  it("keeps category-looking words as text search without structured filters", async () => {
+    const request = createMockMessagesRequest();
+    const api = vi.fn().mockReturnValue(request);
+    const client = createCachedOutlookClient(api);
+
+    await queryBatchMessages(
+      client,
+      {
+        searchQuery: "newsletter",
+        maxResults: 20,
+      },
+      createTestLogger(),
+    );
+
+    expect(request.search).toHaveBeenCalledWith('"newsletter"');
+    expect(request.filter).not.toHaveBeenCalled();
+  });
+
+  it("escapes exact sender filters and omits incompatible ordering", async () => {
+    const request = createMockMessagesRequest();
+    const api = vi.fn().mockReturnValue(request);
+    const client = createCachedOutlookClient(api);
+
+    await queryBatchMessages(
+      client,
+      {
+        fromEmail: "o'connor@example.com",
+        maxResults: 20,
+      },
+      createTestLogger(),
+    );
+
+    expect(request.filter).toHaveBeenCalledWith(
+      "from/emailAddress/address eq 'o''connor@example.com'",
+    );
+    expect(request.orderby).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    undefined,
+    "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=next-page",
+  ])("filters Outlook search pages to the exact sender (page: %s)", async (pageToken) => {
+    const request = createMockMessagesRequest();
+    request.get.mockResolvedValue({
+      value: [
+        {
+          id: "matching-message",
+          conversationId: "matching-thread",
+          from: { emailAddress: { address: "Sender@Example.com" } },
+        },
+        {
+          id: "non-matching-message",
+          conversationId: "non-matching-thread",
+          from: { emailAddress: { address: "other@example.com" } },
+        },
+      ],
+    });
+    const api = vi.fn().mockReturnValue(request);
+    const client = createCachedOutlookClient(api);
+
+    const result = await queryBatchMessages(
+      client,
+      {
+        searchQuery: "invoice",
+        pageToken,
+        fromEmail: "sender@example.com",
+        maxResults: 20,
+      },
+      createTestLogger(),
+    );
+
+    if (pageToken) {
+      expect(api).toHaveBeenCalledWith(pageToken);
+      expect(request.search).not.toHaveBeenCalled();
+    } else {
+      expect(request.search).toHaveBeenCalledWith('"invoice"');
+    }
+    expect(result.messages.map((message) => message.id)).toEqual([
+      "matching-message",
+    ]);
+  });
+});
+
+describe("queryMessagesWithFilters", () => {
+  it("rejects full URL page tokens outside Microsoft Graph", async () => {
+    const api = vi.fn().mockReturnValue({ get: vi.fn() });
+    const client = createCachedOutlookClient(api);
+
+    await expect(
+      queryMessagesWithFilters(
+        client,
+        { pageToken: "http://169.254.169.254/latest/meta-data" },
+        createTestLogger(),
+      ),
+    ).rejects.toThrow("Invalid Outlook page token");
+
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("queryMessagesWithAttachments", () => {
+  it("rejects full URL page tokens outside Microsoft Graph", async () => {
+    const api = vi.fn().mockReturnValue({ get: vi.fn() });
+    const client = createCachedOutlookClient(api);
+
+    await expect(
+      queryMessagesWithAttachments(
+        client,
+        { pageToken: "http://169.254.169.254/latest/meta-data" },
+        createTestLogger(),
+      ),
+    ).rejects.toThrow("Invalid Outlook page token");
+
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("sanitizeKqlValue", () => {
+  it.each([
+    ["empty input", "", ""],
+    ["whitespace-only input", "   ", ""],
+    ["question marks", "hello?world", "hello world"],
+    ["backslashes", "path\\to\\file", "path\\\\to\\\\file"],
+    ["double quotes", 'say "hello"', 'say \\"hello\\"'],
+    ["multiple spaces", "hello   world", "hello world"],
+    ["email addresses", "user@example.com", "user@example.com"],
+  ])("handles %s", (_name, input, expected) => {
+    expect(sanitizeKqlValue(input)).toBe(expected);
+  });
+});
+
+describe("sanitizeKqlFieldQuery", () => {
+  it.each([
+    [
+      "field:value without outer quotes",
+      "participants:user@example.com",
+      "participants:user@example.com",
+    ],
+    ["value with spaces", "subject:meeting notes", 'subject:"meeting notes"'],
+    ["question mark in value", "from:user?name", 'from:"user name"'],
+    ["backslashes in value", "subject:path\\file", "subject:path\\\\file"],
+    ["quotes in value", 'subject:say "hi"', 'subject:"say \\"hi\\""'],
+    ["empty value", "field:", "field:"],
+    ["query without colon", "nofield", "nofield"],
+  ])("handles %s", (_name, input, expected) => {
+    expect(sanitizeKqlFieldQuery(input)).toBe(expected);
+  });
+});
+
+describe("sanitizeKqlTextQuery", () => {
+  it.each([
+    ["text", "hello world", '"hello world"'],
+    ["internal quotes", 'say "hello"', '"say hello"'],
+    ["question marks", "hello?world", '"hello world"'],
+    ["backslashes", "path\\to", '"path\\\\to"'],
+    ["multiple spaces", "hello    world", '"hello world"'],
+  ])("handles %s", (_name, input, expected) => {
+    expect(sanitizeKqlTextQuery(input)).toBe(expected);
+  });
+});
+
+describe("sanitizeOutlookSearchQuery", () => {
+  describe("empty and whitespace inputs", () => {
+    it.each([
+      ["empty input", ""],
+      ["whitespace-only input", "   "],
+    ])("returns empty string for %s", (_name, input) => {
+      expectSanitizedSearchQuery(input, "", false);
+    });
+  });
+
+  describe("KQL field queries (field:value syntax)", () => {
+    it.each([
+      [
+        "participants email",
+        "participants:user@example.com",
+        "participants:user@example.com",
+      ],
+      ["subject field", "subject:meeting", "subject:meeting"],
+      [
+        "field query value with spaces",
+        "subject:meeting notes",
+        'subject:"meeting notes"',
+      ],
+      [
+        "question mark in field query value",
+        "participants:user?name",
+        'participants:"user name"',
+      ],
+      ["empty value after colon", "field:", '"field:"'],
+      [
+        "backslashes in field value",
+        "subject:path\\file",
+        "subject:path\\\\file",
+      ],
+      [
+        "quotes in field value",
+        'subject:say "hello"',
+        'subject:"say \\"hello\\""',
+      ],
+    ])("handles %s", (_name, input, expected) => {
+      expectSanitizedSearchQuery(input, expected);
+    });
+  });
+
+  describe("regular text queries (no field:value syntax)", () => {
+    it.each([
+      ["simple query", "simple query", '"simple query"'],
+      [
+        "internal double quotes",
+        'Reinstatement of "Universal policy" for "5161 Collins Ave"',
+        '"Reinstatement of Universal policy for 5161 Collins Ave"',
+      ],
+      ["question mark in text query", "hello? world", '"hello world"'],
+      ["backslashes in text query", "test\\path", '"test\\\\path"'],
+      ["multiple spaces", "hello    world", '"hello world"'],
+      ["single word query", "hello", '"hello"'],
+    ])("handles %s", (_name, input, expected) => {
+      expectSanitizedSearchQuery(input, expected);
+    });
+  });
+
+  describe("edge cases", () => {
+    it.each([
+      ["colon in middle of text", "meeting at 10:30am", '"meeting at 10:30am"'],
+      ["URL-like string", "https://example.com", '"https://example.com"'],
+      ["http: prefix", "http://test.com", '"http://test.com"'],
+    ])("handles %s", (_name, input, expected) => {
+      expectSanitizedSearchQuery(input, expected);
+    });
+  });
+
+  describe("real-world error cases", () => {
+    it("should handle queries with internal quotes that caused unterminated string literal error", () => {
+      const query =
+        'Reinstatement of "Universal policy" for "123 Main St Apt #100"';
+      const result = sanitizeOutlookSearchQuery(query);
+      expect(result.sanitized).not.toContain('\\"');
+      expect(result.sanitized).toBe(
+        '"Reinstatement of Universal policy for 123 Main St Apt #100"',
+      );
+    });
+
+    it("should handle the participants query that caused colon error", () => {
+      const query = "participants:john.doe@company.example.com";
+      const result = sanitizeOutlookSearchQuery(query);
+      expect(result.sanitized).not.toMatch(/^"participants:/);
+      expect(result.sanitized).toBe(
+        "participants:john.doe@company.example.com",
+      );
+    });
+
+    it("falls back to plain text when a field query also includes extra terms", () => {
+      const query = 'from:"Loren Rock" RockMedical "user list" OR userlist';
+      const result = sanitizeOutlookSearchQuery(query);
+
+      expect(result.sanitized).toBe(
+        '"Loren Rock RockMedical user list userlist"',
+      );
+      expect(result.wasSanitized).toBe(true);
+    });
+
+    it("drops helper-only boolean field filters when collapsing complex queries", () => {
+      const query =
+        'from:"Loren Rock" (RockMedical OR "Rock Medical") hasattachments:true';
+      const result = sanitizeOutlookSearchQuery(query);
+
+      expect(result.sanitized).toBe('"Loren Rock RockMedical Rock Medical"');
+      expect(result.wasSanitized).toBe(true);
+    });
+  });
+});
+
+describe("buildOutlookSearchFallbackQuery", () => {
+  it.each([
+    [
+      "fielded sender lookup",
+      "from:sender@example.com",
+      '"sender@example.com"',
+    ],
+    [
+      "Outlook sender query with trailing helper filters",
+      "from:sender@example.com received>=2026-04-20 unread",
+      '"sender@example.com"',
+    ],
+    [
+      "subject field query",
+      'subject:"Quarterly planning notes"',
+      '"Quarterly planning notes"',
+    ],
+  ])("falls back from %s", (_name, query, expected) => {
+    expect(buildOutlookSearchFallbackQuery(query)).toBe(expected);
+  });
+
+  it("preserves read-state words when they are part of the quoted subject text", () => {
+    expect(
+      sanitizeOutlookSearchQuery('subject:"Unread weekly report" unread')
+        .sanitized,
+    ).toBe('"Unread weekly report"');
+  });
+
+  it("does not strip plain keyword text that happens to contain a comparison", () => {
+    expect(sanitizeOutlookSearchQuery('"price < 5"').sanitized).toBe(
+      '"price < 5"',
+    );
+  });
+
+  it.each([
+    ["plain keyword text with comparison", '"price < 5"'],
+    ["unchanged sender query", "sender@example.com"],
+  ])("returns null for %s", (_name, query) => {
+    expect(buildOutlookSearchFallbackQuery(query)).toBeNull();
+  });
+});
+
+function expectSanitizedSearchQuery(
+  query: string,
+  sanitized: string,
+  wasSanitized = true,
+) {
+  const result = sanitizeOutlookSearchQuery(query);
+  expect(result.sanitized).toBe(sanitized);
+  expect(result.wasSanitized).toBe(wasSanitized);
+}
+
+function createCachedOutlookClient(
+  api: ReturnType<typeof vi.fn>,
+  categoryMap = new Map<string, string>(),
+): OutlookClient {
+  return {
+    getClient: () => ({ api }),
+    getFolderIdCache: () => ({ inbox: "inbox-folder-id" }),
+    setFolderIdCache: vi.fn(),
+    getCategoryMapCache: () => categoryMap,
+    setCategoryMapCache: vi.fn(),
+  } as unknown as OutlookClient;
+}
+
+function createMockMessagesRequest() {
+  const request = {
+    select: vi.fn().mockReturnThis(),
+    expand: vi.fn().mockReturnThis(),
+    top: vi.fn().mockReturnThis(),
+    filter: vi.fn().mockReturnThis(),
+    orderby: vi.fn().mockReturnThis(),
+    search: vi.fn().mockReturnThis(),
+    get: vi.fn().mockResolvedValue({ value: [] }),
+  };
+
+  return request;
+}
+
+describe("calendar MIME enrichment", () => {
+  it("keeps invitation attachments when the optional MIME fetch fails", async () => {
+    const rawGet = vi
+      .fn()
+      .mockRejectedValue({ statusCode: 400, message: "MIME unavailable" });
+    const client = calendarMessageClient(rawGet);
+    const message = await getMessage("message", client, createTestLogger(), {
+      includeCalendarContent: true,
+    });
+    expect(message.isMeetingInvitation).toBe(true);
+    expect(message.attachments?.[0].attachmentId).toBe("attachment");
+    expect(message.calendarContent).toBeUndefined();
+  });
+
+  it("extracts calendar data from a native Outlook meeting message", async () => {
+    const content = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR";
+    const rawGet = vi
+      .fn()
+      .mockResolvedValue(
+        "MIME-Version: 1.0\r\nContent-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n" +
+          content,
+      );
+    const message = await getMessage(
+      "message",
+      calendarMessageClient(rawGet),
+      createTestLogger(),
+      { includeCalendarContent: true },
+    );
+    expect(message.calendarContent?.trim()).toBe(
+      content.replaceAll("\r\n", "\n"),
+    );
+  });
+
+  it.each([
+    ["text/calendar", false],
+    ["application/ics", false],
+    ["text/calendar", true],
+    ["application/ics", true],
+  ])("checks duplicate MIME calendars (%s, conflicting: %s)", async (mimeType, conflicting) => {
+    const content = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR";
+    const second = conflicting ? content.replace("REQUEST", "CANCEL") : content;
+    const rawGet = vi
+      .fn()
+      .mockResolvedValue(
+        [
+          "MIME-Version: 1.0",
+          'Content-Type: multipart/mixed; boundary="calendar-boundary"',
+          "",
+          "--calendar-boundary",
+          "Content-Type: text/calendar; method=REQUEST",
+          "",
+          content,
+          "--calendar-boundary",
+          `Content-Type: ${mimeType}`,
+          'Content-Disposition: attachment; filename="invite.ics"',
+          "Content-Transfer-Encoding: base64",
+          "",
+          Buffer.from(second).toString("base64"),
+          "--calendar-boundary--",
+        ].join("\r\n"),
+      );
+    const message = await getMessage(
+      "message",
+      calendarMessageClient(rawGet),
+      createTestLogger(),
+      { includeCalendarContent: true },
+    );
+    expect(message.isMeetingInvitation).toBe(!conflicting);
+    if (!conflicting) expect(message.calendarContent).toBeTruthy();
+  });
+
+  it("keeps Exchange-regenerated calendars that match the sender's .ics", async () => {
+    const google = [
+      "BEGIN:VCALENDAR",
+      "PRODID:-//Google Inc//Google Calendar 70.9054//EN",
+      "METHOD:REQUEST",
+      "BEGIN:VEVENT",
+      "UID:meeting@google.com",
+      "SEQUENCE:0",
+      "ORGANIZER;CN=Organizer:mailto:organizer@example.com",
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+    const exchange = google
+      .replace(
+        "-//Google Inc//Google Calendar 70.9054//EN",
+        "Microsoft Exchange Server 2010",
+      )
+      .replace("ORGANIZER;CN=Organizer:mailto:", "ORGANIZER:MAILTO:");
+    const rawGet = vi
+      .fn()
+      .mockResolvedValue(
+        [
+          "MIME-Version: 1.0",
+          'Content-Type: multipart/mixed; boundary="calendar-boundary"',
+          "",
+          "--calendar-boundary",
+          "Content-Type: text/calendar; method=REQUEST",
+          "",
+          exchange,
+          "--calendar-boundary",
+          "Content-Type: application/ics",
+          'Content-Disposition: attachment; filename="invite.ics"',
+          "Content-Transfer-Encoding: base64",
+          "",
+          Buffer.from(google).toString("base64"),
+          "--calendar-boundary--",
+        ].join("\r\n"),
+      );
+    const message = await getMessage(
+      "message",
+      calendarMessageClient(rawGet),
+      createTestLogger(),
+      { includeCalendarContent: true },
+    );
+    expect(message.isMeetingInvitation).toBe(true);
+    expect(message.calendarContent).toContain("Microsoft Exchange");
+  });
+
+  it.each([
+    3, 4,
+  ])("rejects %s MIME calendar copies even when identical", async (count) => {
+    const part = [
+      "--calendar-boundary",
+      "Content-Type: text/calendar",
+      "",
+      "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR",
+    ].join("\r\n");
+    const rawGet = vi
+      .fn()
+      .mockResolvedValue(
+        [
+          "MIME-Version: 1.0",
+          'Content-Type: multipart/mixed; boundary="calendar-boundary"',
+          "",
+          ...Array.from({ length: count }, () => part),
+          "--calendar-boundary--",
+        ].join("\r\n"),
+      );
+    const message = await getMessage(
+      "message",
+      calendarMessageClient(rawGet),
+      createTestLogger(),
+      {
+        includeCalendarContent: true,
+      },
+    );
+    expect(message.isMeetingInvitation).toBe(false);
+    expect(message.calendarContent).toBeUndefined();
+  });
+
+  it("does not fetch raw MIME for ordinary message reads", async () => {
+    const rawGet = vi.fn();
+    await getMessage(
+      "message",
+      calendarMessageClient(rawGet),
+      createTestLogger(),
+    );
+    expect(rawGet).not.toHaveBeenCalled();
+  });
+
+  it("reads the calendar event the mailbox linked to the invitation", async () => {
+    const rawGet = vi
+      .fn()
+      .mockResolvedValue(
+        "MIME-Version: 1.0\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR",
+      );
+    const message = await getMessage(
+      "message",
+      calendarMessageClient(rawGet, "linked-event"),
+      createTestLogger(),
+      { includeCalendarContent: true },
+    );
+    expect(message.calendarEventId).toBe("linked-event");
+  });
+
+  it("does not look up a linked calendar event for ordinary message reads", async () => {
+    const message = await getMessage(
+      "message",
+      calendarMessageClient(vi.fn(), "linked-event"),
+      createTestLogger(),
+    );
+    expect(message.calendarEventId).toBeUndefined();
+  });
+});
+
+function calendarMessageClient(
+  rawGet: ReturnType<typeof vi.fn>,
+  linkedEventId?: string,
+) {
+  const request = {
+    select: vi.fn().mockReturnThis(),
+    expand: vi.fn().mockReturnThis(),
+    get: vi.fn().mockResolvedValue({
+      id: "message",
+      "@odata.type": "#microsoft.graph.eventMessageRequest",
+      attachments: [
+        {
+          id: "attachment",
+          name: "invite.ics",
+          contentType: "text/calendar",
+          size: 100,
+        },
+      ],
+      ...(linkedEventId ? { event: { id: linkedEventId } } : {}),
+    }),
+  };
+  const rawRequest = { responseType: vi.fn().mockReturnThis(), get: rawGet };
+  return {
+    getFolderIdCache: () => ({}),
+    getCategoryMapCache: () => new Map(),
+    getClient: () => ({
+      api: (path: string) => (path.endsWith("/$value") ? rawRequest : request),
+    }),
+  } as unknown as OutlookClient;
+}

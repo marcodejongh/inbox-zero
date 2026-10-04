@@ -20,7 +20,7 @@ import { LoadingContent } from "@/components/LoadingContent";
 export function LearnedPatternsSetting() {
   return (
     <SettingCard
-      title="Learned Patterns"
+      title="Learned patterns"
       description="View the patterns the assistant has learned from your email history."
       right={
         <Dialog>
@@ -29,9 +29,10 @@ export function LearnedPatternsSetting() {
               View
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-4xl">
+          {/* Scroll inside the content row (not DialogContent itself) so the close button stays visible */}
+          <DialogContent className="max-w-4xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
             <DialogHeader>
-              <DialogTitle>Learned Patterns</DialogTitle>
+              <DialogTitle>Learned patterns</DialogTitle>
               <DialogDescription>
                 When the AI processes your emails, it learns which senders or
                 email types consistently match the same rules. For example, it
@@ -41,7 +42,9 @@ export function LearnedPatternsSetting() {
                 or remove patterns that have been learned.
               </DialogDescription>
             </DialogHeader>
-            <Content />
+            <div className="min-w-0 overflow-y-auto">
+              <Content />
+            </div>
           </DialogContent>
         </Dialog>
       }

@@ -2,20 +2,23 @@ import { PageWrapper } from "@/components/PageWrapper";
 import { PageHeader } from "@/components/PageHeader";
 import { CalendarConnections } from "./CalendarConnections";
 import { CalendarSettings } from "./CalendarSettings";
-import { ConnectCalendar } from "@/app/(app)/[emailAccountId]/calendars/ConnectCalendar";
-import { TimezoneDetector } from "./TimezoneDetector";
+import { BookingLinksSection } from "./BookingLinksSection";
+import { AvailabilitySection } from "./AvailabilitySection";
+import { TimezoneDetector } from "@/components/TimezoneDetector";
 
-export default function CalendarsPage() {
+export default async function CalendarsPage() {
   return (
     <PageWrapper>
       <TimezoneDetector />
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 lg:gap-4">
-        <PageHeader title="Calendars" />
-        <ConnectCalendar />
-      </div>
-      <div className="mt-6 space-y-4">
-        <CalendarSettings />
+      <PageHeader
+        title="Calendars"
+        description="Powering AI scheduling and meeting briefs."
+      />
+      <div className="mt-6 max-w-4xl space-y-4">
         <CalendarConnections />
+        <BookingLinksSection />
+        <AvailabilitySection />
+        <CalendarSettings />
       </div>
     </PageWrapper>
   );

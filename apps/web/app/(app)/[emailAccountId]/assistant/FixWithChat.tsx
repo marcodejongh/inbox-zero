@@ -1,4 +1,5 @@
 import { MessageCircleIcon } from "lucide-react";
+import type { ChangeEvent } from "react";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { ParsedMessage } from "@/utils/types";
@@ -27,7 +28,15 @@ import {
   NEW_RULE_ID as CONST_NEW_RULE_ID,
   NONE_RULE_ID as CONST_NONE_RULE_ID,
 } from "@/app/(app)/[emailAccountId]/assistant/consts";
-import type { MessageContext } from "@/app/api/chat/validation";
+import type { MessageContext } from "@/utils/ai/assistant/chat-context-validation";
+import {
+  serializeMatchReasons,
+  type SerializedMatchReason,
+} from "@/utils/ai/choose-rule/types";
+
+type FixWithChatResult = RunRulesResult & {
+  matchMetadata?: SerializedMatchReason[] | null;
+};
 
 export function FixWithChat({
   setInput,
@@ -36,7 +45,7 @@ export function FixWithChat({
 }: {
   setInput: (input: string) => void;
   message: ParsedMessage;
-  results: RunRulesResult[];
+  results: FixWithChatResult[];
 }) {
   const { data, isLoading, error } = useRules();
   const { isModalOpen, setIsModalOpen } = useModal();
@@ -101,14 +110,19 @@ export function FixWithChat({
       },
       results: results.map((r) => ({
         ruleName: r.rule?.name ?? null,
+        systemType: r.rule?.systemType ?? null,
         reason: r.reason ?? "",
+        matchMetadata: r.matchMetadata ?? serializeMatchReasons(r.matchReasons),
       })),
       expected:
         selectedRuleId === CONST_NEW_RULE_ID
           ? "new"
           : selectedRuleId === CONST_NONE_RULE_ID
             ? "none"
-            : { name: selectedRuleName || "Unknown" },
+            : {
+                id: selectedRuleId,
+                name: selectedRuleName || "Unknown",
+              },
     };
     setContext(context);
 
@@ -178,7 +192,9 @@ export function FixWithChat({
                   className="mt-1"
                   rows={2}
                   value={explanation}
-                  onChange={(e) => setExplanation(e.target.value)}
+                  onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+                    setExplanation(e.target.value)
+                  }
                   aria-describedby="explanation-help"
                   autoFocus
                 />
@@ -214,7 +230,7 @@ function RuleMismatch({
   rules,
   onSelectExpectedRuleId,
 }: {
-  results: RunRulesResult[];
+  results: FixWithChatResult[];
   rules: RulesResponse;
   onSelectExpectedRuleId: (ruleId: string | null) => void;
 }) {
@@ -238,6 +254,7 @@ function RuleMismatch({
             ...rules,
           ]}
           onSelect={onSelectExpectedRuleId}
+          itemClassName="h-auto min-h-10 justify-start whitespace-normal text-wrap py-2 text-left"
         />
       </div>
     </div>

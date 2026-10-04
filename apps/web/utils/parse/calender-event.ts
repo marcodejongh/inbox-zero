@@ -1,14 +1,14 @@
-import type { ParsedMessage } from "@/utils/types";
+import type { Attachment, ParsedMessage } from "@/utils/types";
 
 interface CalendarEventInfo {
-  isCalendarEvent: boolean;
+  endDate?: Date | null;
   eventDate?: Date | null;
   eventDateString?: string;
+  eventTitle?: string;
+  isCalendarEvent: boolean;
+  organizer?: string;
   recurringEvent?: boolean;
   startDate?: Date | null;
-  endDate?: Date | null;
-  eventTitle?: string;
-  organizer?: string;
 }
 
 export type CalendarEventStatus = {
@@ -275,4 +275,38 @@ export function getCalendarEventStatus(
     isEvent: true,
     timing: calendarEvent.eventDate < new Date() ? "past" : "future",
   };
+}
+
+/** High-confidence calendar detection for preset rule matching (bypasses AI). */
+export function isCalendarInvite(email: ParsedMessage): boolean {
+  return (
+    email.attachments?.some(isCalendarInviteAttachment) === true ||
+    hasICalendarContent(email)
+  );
+}
+
+export function isCalendarInviteAttachment(attachment: Attachment): boolean {
+  const filename = attachment.filename?.toLowerCase() ?? "";
+  if (filename.endsWith(".ics")) return true;
+
+  const mimeType = attachment.mimeType?.toLowerCase() ?? "";
+  if (mimeType === "text/calendar" || mimeType === "application/ics")
+    return true;
+
+  const contentType = attachment.headers?.["content-type"]?.toLowerCase() ?? "";
+  return (
+    contentType.startsWith("text/calendar") ||
+    contentType.startsWith("application/ics")
+  );
+}
+
+function hasICalendarContent(email: ParsedMessage): boolean {
+  const body = email.textHtml || email.textPlain || "";
+
+  if (!body.includes("BEGIN:VCALENDAR")) {
+    return false;
+  }
+
+  // Require DTSTART or METHOD to avoid false positives
+  return body.includes("DTSTART") || body.includes("METHOD:");
 }

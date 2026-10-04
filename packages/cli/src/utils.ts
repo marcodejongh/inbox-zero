@@ -1,11 +1,40 @@
-import { randomBytes } from "node:crypto";
+import {
+  copyFileSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { relative, resolve } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { parseEnv } from "node:util";
 
 // Environment variable builder
 export type EnvConfig = Record<string, string | undefined>;
 
+const CONFIG_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+const CONFIG_NAME_ERROR =
+  "Configuration name may only contain letters, numbers, underscores, and hyphens.";
+
 // Secret generation
 export function generateSecret(bytes: number): string {
   return randomBytes(bytes).toString("hex");
+}
+
+export function validateConfigName(name: string): string {
+  if (!CONFIG_NAME_PATTERN.test(name)) {
+    throw new Error(CONFIG_NAME_ERROR);
+  }
+  return name;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+export function getEnvFileName(name?: string): string {
+  return name ? `.env.${validateConfigName(name)}` : ".env";
 }
 
 export function generateEnvFile(config: {
@@ -13,6 +42,7 @@ export function generateEnvFile(config: {
   useDockerInfra: boolean;
   llmProvider: string;
   template: string;
+  composeEnvFile?: string;
 }): string {
   const { env, useDockerInfra, llmProvider, template } = config;
 
@@ -20,25 +50,28 @@ export function generateEnvFile(config: {
 
   // Helper to wrap a value in quotes if defined (prevents "undefined" string bug)
   const wrapInQuotes = (value: string | undefined): string | undefined =>
-    value !== undefined ? `"${value}"` : undefined;
+    value !== undefined ? `"${escapeEnvQuotedValue(value)}"` : undefined;
 
   // Helper to set a value (handles both commented and uncommented lines)
   const setValue = (key: string, value: string | undefined) => {
     if (value === undefined) return;
+    const escapedKey = escapeRegExp(key);
     // Match both commented (# KEY=) and uncommented (KEY=) forms
     const patterns = [
-      new RegExp(`^${key}=.*$`, "m"),
-      new RegExp(`^# ${key}=.*$`, "m"),
+      new RegExp(`^${escapedKey}=.*$`, "m"),
+      new RegExp(`^# ${escapedKey}=.*$`, "m"),
     ];
     for (const pattern of patterns) {
       if (pattern.test(content)) {
-        content = content.replace(pattern, `${key}=${value}`);
+        content = content.replace(pattern, () => `${key}=${value}`);
         return;
       }
     }
     // If not found, append to end
     content += `\n${key}=${value}`;
   };
+
+  setValue("INBOX_ZERO_ENV_FILE", wrapInQuotes(config.composeEnvFile));
 
   // ─────────────────────────────────────────────────────────────────────────
   // Database & Redis
@@ -49,16 +82,24 @@ export function generateEnvFile(config: {
     setValue("POSTGRES_USER", env.POSTGRES_USER);
     setValue("POSTGRES_PASSWORD", env.POSTGRES_PASSWORD);
     setValue("POSTGRES_DB", env.POSTGRES_DB);
+    setValue("POSTGRES_PORT", env.POSTGRES_PORT);
+    setValue("REDIS_PORT", env.REDIS_PORT);
+    setValue("REDIS_HTTP_PORT", env.REDIS_HTTP_PORT);
+    setValue("WEB_PORT", env.WEB_PORT);
     setValue("DATABASE_URL", wrapInQuotes(env.DATABASE_URL));
     setValue("DIRECT_URL", wrapInQuotes(env.DIRECT_URL));
-    setValue("UPSTASH_REDIS_URL", wrapInQuotes(env.UPSTASH_REDIS_URL));
-    setValue("UPSTASH_REDIS_TOKEN", env.UPSTASH_REDIS_TOKEN);
+    setValue("REDIS_HTTP_URL", wrapInQuotes(env.REDIS_HTTP_URL));
+    setValue("REDIS_HTTP_TOKEN", env.REDIS_HTTP_TOKEN);
+    setValue("REDIS_URL", wrapInQuotes(env.REDIS_URL));
+    setValue("QUEUE_BACKEND", env.QUEUE_BACKEND);
   } else {
     // External infra - set placeholders
     setValue("DATABASE_URL", wrapInQuotes(env.DATABASE_URL));
     setValue("DIRECT_URL", wrapInQuotes(env.DIRECT_URL));
-    setValue("UPSTASH_REDIS_URL", wrapInQuotes(env.UPSTASH_REDIS_URL));
-    setValue("UPSTASH_REDIS_TOKEN", env.UPSTASH_REDIS_TOKEN);
+    setValue("REDIS_HTTP_URL", wrapInQuotes(env.REDIS_HTTP_URL));
+    setValue("REDIS_HTTP_TOKEN", env.REDIS_HTTP_TOKEN);
+    setValue("REDIS_URL", wrapInQuotes(env.REDIS_URL));
+    setValue("QUEUE_BACKEND", env.QUEUE_BACKEND);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -110,31 +151,287 @@ export function generateEnvFile(config: {
   // LLM Configuration
   // ─────────────────────────────────────────────────────────────────────────
 
-  // Set the active LLM provider
-  setValue("DEFAULT_LLM_PROVIDER", env.DEFAULT_LLM_PROVIDER);
-  setValue("DEFAULT_LLM_MODEL", env.DEFAULT_LLM_MODEL);
-  setValue("ECONOMY_LLM_PROVIDER", env.ECONOMY_LLM_PROVIDER);
-  setValue("ECONOMY_LLM_MODEL", env.ECONOMY_LLM_MODEL);
+  setValue("DEFAULT_LLMS", env.DEFAULT_LLMS);
+  setValue("ECONOMY_LLMS", env.ECONOMY_LLMS);
+  setValue("CHAT_LLMS", env.CHAT_LLMS);
+  setValue("NANO_LLMS", env.NANO_LLMS);
+  setValue("DRAFT_LLMS", env.DRAFT_LLMS);
+
+  // Shared fallback key for cloud LLM providers.
+  const legacyProviderApiKeyMap: Record<string, string> = {
+    anthropic: "ANTHROPIC_API_KEY",
+    openai: "OPENAI_API_KEY",
+    google: "GOOGLE_API_KEY",
+    openrouter: "OPENROUTER_API_KEY",
+    aigateway: "AI_GATEWAY_API_KEY",
+    groq: "GROQ_API_KEY",
+    cerebras: "CEREBRAS_API_KEY",
+  };
+  const legacyApiKeyName = legacyProviderApiKeyMap[llmProvider];
+  setValue(
+    "LLM_API_KEY",
+    env.LLM_API_KEY || (legacyApiKeyName && env[legacyApiKeyName]),
+  );
 
   // Set the API key for the selected provider
   if (llmProvider === "bedrock") {
     setValue("BEDROCK_ACCESS_KEY", env.BEDROCK_ACCESS_KEY);
     setValue("BEDROCK_SECRET_KEY", env.BEDROCK_SECRET_KEY);
     setValue("BEDROCK_REGION", env.BEDROCK_REGION);
-  } else {
-    const apiKeyMap: Record<string, string> = {
-      anthropic: "ANTHROPIC_API_KEY",
-      openai: "OPENAI_API_KEY",
-      google: "GOOGLE_API_KEY",
-      openrouter: "OPENROUTER_API_KEY",
-      aigateway: "AI_GATEWAY_API_KEY",
-      groq: "GROQ_API_KEY",
-    };
-    const apiKeyName = apiKeyMap[llmProvider];
-    if (apiKeyName && env[apiKeyName]) {
-      setValue(apiKeyName, env[apiKeyName]);
-    }
+  } else if (llmProvider === "ollama") {
+    setValue("OLLAMA_BASE_URL", env.OLLAMA_BASE_URL);
+    setValue("OLLAMA_MODEL", env.OLLAMA_MODEL);
+  } else if (llmProvider === "openai-compatible") {
+    setValue("OPENAI_COMPATIBLE_BASE_URL", env.OPENAI_COMPATIBLE_BASE_URL);
+    setValue("OPENAI_COMPATIBLE_MODEL", env.OPENAI_COMPATIBLE_MODEL);
+  } else if (llmProvider === "cerebras") {
+    setValue("CEREBRAS_API_KEY", env.CEREBRAS_API_KEY || env.LLM_API_KEY);
   }
 
   return content;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Env file reading and updating (used by `config` command)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SENSITIVE_KEYS = new Set([
+  "GOOGLE_CLIENT_SECRET",
+  "GOOGLE_PUBSUB_VERIFICATION_TOKEN",
+  "MICROSOFT_CLIENT_SECRET",
+  "MICROSOFT_WEBHOOK_CLIENT_STATE",
+  "LLM_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "GOOGLE_API_KEY",
+  "OPENROUTER_API_KEY",
+  "AI_GATEWAY_API_KEY",
+  "GROQ_API_KEY",
+  "CEREBRAS_API_KEY",
+  "BEDROCK_ACCESS_KEY",
+  "BEDROCK_SECRET_KEY",
+  "AUTH_SECRET",
+  "EMAIL_ENCRYPT_SECRET",
+  "EMAIL_ENCRYPT_SALT",
+  "INTERNAL_API_KEY",
+  "API_KEY_SALT",
+  "CRON_SECRET",
+  "REDIS_HTTP_TOKEN",
+  "UPSTASH_REDIS_TOKEN",
+  "POSTGRES_PASSWORD",
+]);
+
+export function isSensitiveKey(key: string): boolean {
+  return (
+    SENSITIVE_KEYS.has(key) ||
+    key.toLowerCase().includes("secret") ||
+    key.toLowerCase().includes("password")
+  );
+}
+
+export function parseEnvFile(content: string): Record<string, string> {
+  const env = parseEnv(content);
+  // Compose treats unspaced hashes in unquoted database passwords as literal.
+  const password = [
+    ...content.matchAll(/^[ \t]*POSTGRES_PASSWORD[ \t]*=(.*)$/gm),
+  ].at(-1)?.[1];
+  if (
+    password &&
+    !password.trim().startsWith('"') &&
+    !password.trim().startsWith("'")
+  ) {
+    env.POSTGRES_PASSWORD = password.replace(/\s+#.*$/, "").trim();
+  }
+  return env;
+}
+
+export function updateEnvValue(
+  content: string,
+  key: string,
+  value: string,
+): string {
+  const needsQuotes = /[\s"'#]/.test(value) || value.includes("://");
+  const formatted = needsQuotes ? `"${escapeEnvQuotedValue(value)}"` : value;
+
+  const escapedKey = escapeRegExp(key);
+  const uncommented = new RegExp(`^${escapedKey}=.*$`, "m");
+  if (uncommented.test(content)) {
+    return content.replace(uncommented, () => `${key}=${formatted}`);
+  }
+
+  const commented = new RegExp(`^# ${escapedKey}=.*$`, "m");
+  if (commented.test(content)) {
+    return content.replace(commented, () => `${key}=${formatted}`);
+  }
+
+  return `${content.trimEnd()}\n${key}=${formatted}\n`;
+}
+
+export function redactValue(key: string, value: string): string {
+  if (value.startsWith("your-") || value === "skipped") {
+    return "(not configured)";
+  }
+
+  if ((key === "DATABASE_URL" || key === "DIRECT_URL") && value.includes("@")) {
+    return value.replace(/:([^@]+)@/, ":****@");
+  }
+
+  if (isSensitiveKey(key)) {
+    if (value.length <= 4) return "****";
+    return `${value.slice(0, 4)}****`;
+  }
+
+  return value;
+}
+
+export function parsePortConflict(stderr: string): string | null {
+  const match = stderr.match(
+    /Bind for \S+:(\d+) failed: port is already allocated/,
+  );
+  if (match) {
+    return `Port ${match[1]} is already in use by another process.`;
+  }
+
+  const addrMatch = stderr.match(/:(\d+):\s*address already in use/);
+  if (addrMatch) {
+    return `Port ${addrMatch[1]} is already in use by another process.`;
+  }
+
+  return null;
+}
+
+function escapeEnvQuotedValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+export function generateEncryptionSecrets(existing: EnvConfig): EnvConfig {
+  return {
+    EMAIL_ENCRYPT_SECRET: existing.EMAIL_ENCRYPT_SECRET || generateSecret(32),
+    EMAIL_ENCRYPT_SALT: existing.EMAIL_ENCRYPT_SALT || generateSecret(16),
+  };
+}
+
+const MANAGED_COMPOSE_ENV_MARKER_SUFFIX = ".inbox-zero-managed";
+
+export function syncManagedComposeEnv({
+  envFile,
+  repoRoot,
+}: {
+  envFile: string;
+  repoRoot: string | null;
+}) {
+  if (!repoRoot) return;
+  if (resolve(envFile) !== resolve(repoRoot, "apps/web/.env")) return;
+
+  const rootEnvFile = resolve(repoRoot, ".env");
+  const markerFile = `${rootEnvFile}${MANAGED_COMPOSE_ENV_MARKER_SUFFIX}`;
+  const linkTarget = relative(repoRoot, envFile);
+  const sourceContent = readFileSync(envFile, "utf-8");
+  const conflictWarning =
+    `Preserved user-managed ${rootEnvFile}. Docker Compose may use different settings. ` +
+    `Align it with ${envFile} or pass --env-file pointing to that app configuration when running Docker Compose.`;
+  // lstat also detects dangling links, which must never be followed by the copy fallback.
+  const rootEnvStat = lstatSync(rootEnvFile, { throwIfNoEntry: false });
+
+  if (!rootEnvStat) {
+    createManagedComposeEnv({
+      linkTarget,
+      markerFile,
+      rootEnvFile,
+      sourceContent,
+    });
+    return;
+  }
+
+  if (rootEnvStat.isSymbolicLink()) {
+    const currentTarget = resolve(repoRoot, readlinkSync(rootEnvFile));
+    if (currentTarget !== resolve(envFile)) return conflictWarning;
+    return;
+  }
+
+  if (!rootEnvStat.isFile()) return conflictWarning;
+  const currentContent = readFileSync(rootEnvFile, "utf-8");
+  if (currentContent === sourceContent) return;
+
+  if (!isUnchangedManagedCopy(markerFile, linkTarget, currentContent)) {
+    return conflictWarning;
+  }
+
+  copyFileSync(envFile, rootEnvFile);
+  writeManagedCopyMarker(markerFile, linkTarget, sourceContent);
+}
+
+export function fixComposeEnvPaths(composeContent: string): string {
+  return composeContent.replaceAll("./apps/web/.env", "./.env");
+}
+
+export function getComposeCommand(
+  envFile: string,
+  composeFile: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return `docker compose --env-file ${quoteShellArgument(envFile, platform)} -f ${quoteShellArgument(composeFile, platform)}`;
+}
+
+function quoteShellArgument(value: string, platform: NodeJS.Platform): string {
+  if (platform === "win32") return `'${value.replaceAll("'", "''")}'`;
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
+function isUnchangedManagedCopy(
+  markerFile: string,
+  source: string,
+  content: string,
+): boolean {
+  try {
+    const marker: unknown = JSON.parse(readFileSync(markerFile, "utf-8"));
+    return (
+      typeof marker === "object" &&
+      marker !== null &&
+      "kind" in marker &&
+      marker.kind === "copy" &&
+      "source" in marker &&
+      marker.source === source &&
+      "sha256" in marker &&
+      marker.sha256 === createHash("sha256").update(content).digest("hex")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function writeManagedCopyMarker(
+  markerFile: string,
+  source: string,
+  content: string,
+) {
+  writeFileSync(
+    markerFile,
+    JSON.stringify({
+      kind: "copy",
+      source,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    }),
+  );
+}
+
+function createManagedComposeEnv({
+  linkTarget,
+  markerFile,
+  rootEnvFile,
+  sourceContent,
+}: {
+  linkTarget: string;
+  markerFile: string;
+  rootEnvFile: string;
+  sourceContent: string;
+}) {
+  try {
+    symlinkSync(linkTarget, rootEnvFile);
+    return;
+  } catch {
+    writeFileSync(rootEnvFile, sourceContent, { flag: "wx", mode: 0o600 });
+  }
+
+  writeManagedCopyMarker(markerFile, linkTarget, sourceContent);
 }

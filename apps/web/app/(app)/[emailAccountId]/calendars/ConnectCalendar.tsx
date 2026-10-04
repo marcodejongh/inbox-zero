@@ -1,21 +1,54 @@
 "use client";
 
+import useSWR from "swr";
+import { LoadingContent } from "@/components/LoadingContent";
+import { FastmailCalendarForm } from "./FastmailCalendarForm";
 import { useState } from "react";
+import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { toastError } from "@/components/Toast";
+import { captureException } from "@/utils/error";
 import type { GetCalendarAuthUrlResponse } from "@/app/api/google/calendar/auth-url/route";
 import { fetchWithAccount } from "@/utils/fetch";
-import { createScopedLogger } from "@/utils/logger";
-import Image from "next/image";
+import { CALENDAR_ONBOARDING_RETURN_COOKIE } from "@/utils/calendar/constants";
+import { useProductAnalytics } from "@/hooks/useProductAnalytics";
+import type { AppPage } from "@/utils/analytics/product";
+import { redirectToSafeUrl } from "@/utils/redirect";
 
-export function ConnectCalendar() {
+export function ConnectCalendar({
+  analyticsPage,
+  onboardingReturnPath,
+}: {
+  analyticsPage?: AppPage;
+  onboardingReturnPath?: string;
+}) {
   const { emailAccountId } = useAccount();
+  const {
+    data: providers,
+    error,
+    isLoading,
+    mutate,
+  } = useSWR<{
+    google: boolean;
+    microsoft: boolean;
+    fastmail: boolean;
+  }>("/api/user/mail-providers");
+  const analytics = useProductAnalytics(analyticsPage);
   const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
   const [isConnectingMicrosoft, setIsConnectingMicrosoft] = useState(false);
-  const logger = createScopedLogger("calendar-connection");
+
+  const setOnboardingReturnCookie = () => {
+    if (onboardingReturnPath) {
+      document.cookie = `${CALENDAR_ONBOARDING_RETURN_COOKIE}=${encodeURIComponent(onboardingReturnPath)}; path=/; max-age=180; SameSite=Lax; Secure`;
+    }
+  };
 
   const handleConnectGoogle = async () => {
+    analytics.captureAction("calendar_connect_started", {
+      provider: "google",
+      has_onboarding_return_path: Boolean(onboardingReturnPath),
+    });
     setIsConnectingGoogle(true);
     try {
       const response = await fetchWithAccount({
@@ -29,12 +62,14 @@ export function ConnectCalendar() {
       }
 
       const data: GetCalendarAuthUrlResponse = await response.json();
-      window.location.href = data.url;
+      setOnboardingReturnCookie();
+      redirectToSafeUrl(data.url, { allowExternal: true });
     } catch (error) {
-      logger.error("Error initiating Google calendar connection", {
-        error,
-        emailAccountId,
+      analytics.captureAction("calendar_connect_start_failed", {
         provider: "google",
+      });
+      captureException(error, {
+        extra: { context: "Google Calendar OAuth initiation" },
       });
       toastError({
         title: "Error initiating Google calendar connection",
@@ -45,6 +80,10 @@ export function ConnectCalendar() {
   };
 
   const handleConnectMicrosoft = async () => {
+    analytics.captureAction("calendar_connect_started", {
+      provider: "microsoft",
+      has_onboarding_return_path: Boolean(onboardingReturnPath),
+    });
     setIsConnectingMicrosoft(true);
     try {
       const response = await fetchWithAccount({
@@ -58,12 +97,14 @@ export function ConnectCalendar() {
       }
 
       const data: GetCalendarAuthUrlResponse = await response.json();
-      window.location.href = data.url;
+      setOnboardingReturnCookie();
+      redirectToSafeUrl(data.url, { allowExternal: true });
     } catch (error) {
-      logger.error("Error initiating Microsoft calendar connection", {
-        error,
-        emailAccountId,
+      analytics.captureAction("calendar_connect_start_failed", {
         provider: "microsoft",
+      });
+      captureException(error, {
+        extra: { context: "Microsoft Calendar OAuth initiation" },
       });
       toastError({
         title: "Error initiating Microsoft calendar connection",
@@ -74,38 +115,59 @@ export function ConnectCalendar() {
   };
 
   return (
-    <div className="flex gap-2 flex-wrap md:flex-nowrap">
-      <Button
-        onClick={handleConnectGoogle}
-        disabled={isConnectingGoogle || isConnectingMicrosoft}
-        variant="outline"
-        className="flex items-center gap-2 w-full md:w-auto"
-      >
-        <Image
-          src="/images/google.svg"
-          alt="Google"
-          width={16}
-          height={16}
-          unoptimized
-        />
-        {isConnectingGoogle ? "Connecting..." : "Add Google Calendar"}
-      </Button>
+    <LoadingContent
+      loading={isLoading}
+      error={error}
+      errorComponent={
+        <div role="alert" className="flex flex-col items-center gap-2">
+          <p>Unable to load connection options.</p>
+          <Button
+            variant="outline"
+            onClick={() => mutate().catch(() => undefined)}
+          >
+            Try again
+          </Button>
+        </div>
+      }
+    >
+      <div className="flex gap-2 flex-wrap md:flex-nowrap">
+        {providers?.fastmail && <FastmailCalendarForm />}
+        {providers?.google && (
+          <Button
+            onClick={handleConnectGoogle}
+            disabled={isConnectingGoogle || isConnectingMicrosoft}
+            variant="outline"
+            className="flex items-center gap-2 w-full md:w-auto"
+          >
+            <Image
+              src="/images/google.svg"
+              alt="Google"
+              width={16}
+              height={16}
+              unoptimized
+            />
+            {isConnectingGoogle ? "Connecting..." : "Add Google Calendar"}
+          </Button>
+        )}
 
-      <Button
-        onClick={handleConnectMicrosoft}
-        disabled={isConnectingGoogle || isConnectingMicrosoft}
-        variant="outline"
-        className="flex items-center gap-2 w-full md:w-auto"
-      >
-        <Image
-          src="/images/microsoft.svg"
-          alt="Microsoft"
-          width={16}
-          height={16}
-          unoptimized
-        />
-        {isConnectingMicrosoft ? "Connecting..." : "Add Outlook Calendar"}
-      </Button>
-    </div>
+        {providers?.microsoft && (
+          <Button
+            onClick={handleConnectMicrosoft}
+            disabled={isConnectingGoogle || isConnectingMicrosoft}
+            variant="outline"
+            className="flex items-center gap-2 w-full md:w-auto"
+          >
+            <Image
+              src="/images/microsoft.svg"
+              alt="Microsoft"
+              width={16}
+              height={16}
+              unoptimized
+            />
+            {isConnectingMicrosoft ? "Connecting..." : "Add Outlook Calendar"}
+          </Button>
+        )}
+      </div>
+    </LoadingContent>
   );
 }

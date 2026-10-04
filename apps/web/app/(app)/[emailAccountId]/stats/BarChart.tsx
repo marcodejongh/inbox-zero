@@ -3,6 +3,7 @@ import {
   ChartContainer,
   ChartTooltip,
 } from "@/components/ui/chart";
+import type { ComponentType, ReactNode } from "react";
 import {
   Bar,
   BarChart as RechartsBarChart,
@@ -11,17 +12,51 @@ import {
   YAxis,
 } from "recharts";
 
+const ChartBar = Bar as unknown as ComponentType<{
+  animationBegin?: number;
+  animationDuration?: number;
+  color?: string;
+  dataKey: string;
+  fill?: string;
+  hide?: boolean;
+  radius?: [number, number, number, number];
+}>;
+const ChartXAxis = XAxis as unknown as ComponentType<{
+  axisLine?: boolean;
+  dataKey: string;
+  minTickGap?: number;
+  tickFormatter: (value: string) => string;
+  tickLine?: boolean;
+  tickMargin?: number;
+}>;
+const ChartYAxis = YAxis as unknown as ComponentType<{
+  axisLine?: boolean;
+  tickFormatter?: (value: number) => string;
+  tickLine?: boolean;
+  tickMargin?: number;
+}>;
+const ChartTooltipComponent = ChartTooltip as unknown as ComponentType<{
+  content: (props: {
+    active?: boolean;
+    payload?: {
+      dataKey: string;
+      payload: Record<string, string | number>;
+      value: number;
+    }[];
+  }) => ReactNode;
+}>;
+
 interface BarChartProps {
-  data: { [key: string]: string | number }[];
+  activeCharts?: string[];
   config: ChartConfig;
+  data: { [key: string]: string | number }[];
   dataKeys?: string[];
-  xAxisKey?: string;
-  xAxisFormatter?: (value: string) => string;
-  yAxisFormatter?: (value: number) => string;
+  period?: "day" | "week" | "month" | "year";
   tooltipLabelFormatter?: (value: string | number) => string;
   tooltipValueFormatter?: (value: number) => string;
-  activeCharts?: string[];
-  period?: "day" | "week" | "month" | "year";
+  xAxisFormatter?: (value: string) => string;
+  xAxisKey?: string;
+  yAxisFormatter?: (value: number) => string;
 }
 
 export function BarChart({
@@ -99,7 +134,7 @@ export function BarChart({
           ))}
         </defs>
         <CartesianGrid vertical={false} />
-        <XAxis
+        <ChartXAxis
           dataKey={xAxisKey}
           tickLine={false}
           axisLine={false}
@@ -107,13 +142,13 @@ export function BarChart({
           minTickGap={32}
           tickFormatter={formatter}
         />
-        <YAxis
+        <ChartYAxis
           tickLine={false}
           axisLine={false}
           tickMargin={8}
           tickFormatter={yAxisFormatter}
         />
-        <ChartTooltip
+        <ChartTooltipComponent
           content={({ active, payload }) => {
             if (!active || !payload?.length) return null;
             const data = payload[0];
@@ -175,7 +210,7 @@ export function BarChart({
           }}
         />
         {keys.map((key) => (
-          <Bar
+          <ChartBar
             key={key}
             dataKey={key}
             fill={`url(#${key}Gradient)`}

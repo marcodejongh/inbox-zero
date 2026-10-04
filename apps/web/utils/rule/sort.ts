@@ -1,0 +1,68 @@
+import { SystemType } from "@/generated/prisma/enums";
+import { isOptInSystemType } from "@/utils/rule/consts";
+
+export const SYSTEM_RULE_ORDER: SystemType[] = [
+  SystemType.TO_REPLY,
+  SystemType.AWAITING_REPLY,
+  SystemType.FYI,
+  SystemType.ACTIONED,
+  SystemType.NEWSLETTER,
+  SystemType.MARKETING,
+  SystemType.CALENDAR,
+  SystemType.RECEIPT,
+  SystemType.NOTIFICATION,
+  SystemType.OTP,
+  SystemType.COLD_EMAIL,
+];
+
+type SortableRule = {
+  enabled?: boolean | null;
+  systemType?: string | null;
+  name: string;
+  instructions?: string | null;
+};
+
+/** Opt-in system rules stay off the Rules list until the user turns them on. */
+export function shouldShowSystemRule(
+  systemType: SystemType,
+  existing?: { enabled?: boolean | null } | null,
+) {
+  if (!isOptInSystemType(systemType)) return true;
+  return existing?.enabled === true;
+}
+
+export function sortRulesByCanonicalOrder<T extends SortableRule>(
+  rules: T[],
+): T[] {
+  return [...rules].sort((a, b) => {
+    const enabledCompare =
+      Number(Boolean(b.enabled)) - Number(Boolean(a.enabled));
+    if (enabledCompare !== 0) return enabledCompare;
+
+    const systemOrderCompare =
+      getSystemRuleOrderIndex(a.systemType) -
+      getSystemRuleOrderIndex(b.systemType);
+    if (systemOrderCompare !== 0) return systemOrderCompare;
+
+    const nameCompare = a.name.localeCompare(b.name, undefined, {
+      sensitivity: "base",
+    });
+    if (nameCompare !== 0) return nameCompare;
+
+    return (a.instructions ?? "").localeCompare(
+      b.instructions ?? "",
+      undefined,
+      {
+        sensitivity: "base",
+      },
+    );
+  });
+}
+
+function getSystemRuleOrderIndex(systemType?: string | null) {
+  if (!systemType) return SYSTEM_RULE_ORDER.length;
+  const index = SYSTEM_RULE_ORDER.indexOf(
+    systemType as (typeof SYSTEM_RULE_ORDER)[number],
+  );
+  return index === -1 ? SYSTEM_RULE_ORDER.length : index;
+}

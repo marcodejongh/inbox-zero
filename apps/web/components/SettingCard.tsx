@@ -1,3 +1,4 @@
+import { MutedText } from "@/components/Typography";
 import { Card, CardContent } from "@/components/ui/card";
 
 export function SettingCard({
@@ -6,7 +7,7 @@ export function SettingCard({
   right,
   collapseOnMobile = false,
 }: {
-  title: string;
+  title: React.ReactNode;
   description: string;
   right: React.ReactNode;
   collapseOnMobile?: boolean;
@@ -23,7 +24,7 @@ export function SettingCard({
         >
           <div className="flex-1">
             <h3 className="font-medium">{title}</h3>
-            <p className="text-sm text-muted-foreground">{description}</p>
+            <MutedText>{description}</MutedText>
           </div>
 
           {right}

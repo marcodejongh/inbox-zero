@@ -1,0 +1,186 @@
+import { describe, expect, it } from "vitest";
+import {
+  getEmailMessageCellLabels,
+  getEmailThreadLabels,
+} from "./EmailMessageCellLabels";
+
+describe("getEmailMessageCellLabels", () => {
+  it("hides Gmail system categories while keeping user labels", () => {
+    const labels = getEmailMessageCellLabels({
+      labelIds: ["CATEGORY_PERSONAL", "label-calendar"],
+      userLabels: {
+        CATEGORY_PERSONAL: {
+          id: "CATEGORY_PERSONAL",
+          name: "CATEGORY_PERSONAL",
+        },
+        "label-calendar": {
+          id: "label-calendar",
+          name: "Calendar",
+        },
+      },
+    });
+
+    expect(labels).toEqual([{ id: "label-calendar", name: "Calendar" }]);
+  });
+
+  it("hides labels the user set to hide in the message list", () => {
+    const labels = getEmailMessageCellLabels({
+      labelIds: ["label-receipts", "label-calendar"],
+      userLabels: {
+        "label-receipts": {
+          id: "label-receipts",
+          name: "Receipts",
+          messageListVisibility: "hide",
+        },
+        "label-calendar": {
+          id: "label-calendar",
+          name: "Calendar",
+          messageListVisibility: "show",
+        },
+      },
+    });
+
+    expect(labels).toEqual([{ id: "label-calendar", name: "Calendar" }]);
+  });
+
+  it("does not infer Outlook sent mail as archived just because it is outside the inbox", () => {
+    const labels = getEmailMessageCellLabels({
+      labelIds: ["SENT", "Awaiting Reply"],
+      userLabels: {
+        awaitingReply: {
+          id: "awaitingReply",
+          name: "Awaiting Reply",
+        },
+      },
+      provider: "microsoft",
+    });
+
+    expect(labels).toEqual([{ id: "awaitingReply", name: "Awaiting Reply" }]);
+  });
+
+  it("shows archived for Outlook messages in the archive folder", () => {
+    const labels = getEmailMessageCellLabels({
+      labelIds: ["ARCHIVE", "label-newsletter"],
+      userLabels: {
+        "label-newsletter": {
+          id: "label-newsletter",
+          name: "Newsletter",
+        },
+      },
+      provider: "microsoft",
+    });
+
+    expect(labels).toEqual([
+      { id: "ARCHIVE", name: "Archived" },
+      { id: "label-newsletter", name: "Newsletter" },
+    ]);
+  });
+
+  it("keeps Gmail archive inference for messages without the inbox label", () => {
+    const labels = getEmailMessageCellLabels({
+      labelIds: ["label-newsletter"],
+      userLabels: {
+        "label-newsletter": {
+          id: "label-newsletter",
+          name: "Newsletter",
+        },
+      },
+      provider: "google",
+    });
+
+    expect(labels).toEqual([
+      { id: "ARCHIVE", name: "Archived" },
+      { id: "label-newsletter", name: "Newsletter" },
+    ]);
+  });
+});
+
+describe("getEmailThreadLabels", () => {
+  it("orders the same labels consistently regardless of provider order", () => {
+    const userLabels = {
+      "label-actioned": {
+        id: "label-actioned",
+        name: "Actioned",
+      },
+      "label-receipt": {
+        id: "label-receipt",
+        name: "Receipt",
+      },
+    };
+
+    const actionedFirst = getEmailThreadLabels({
+      messages: [{ labelIds: ["label-actioned", "label-receipt"] }],
+      userLabels,
+    });
+    const receiptFirst = getEmailThreadLabels({
+      messages: [{ labelIds: ["label-receipt", "label-actioned"] }],
+      userLabels,
+    });
+
+    expect(actionedFirst).toEqual([
+      { id: "label-actioned", name: "Actioned" },
+      { id: "label-receipt", name: "Receipt" },
+    ]);
+    expect(receiptFirst).toEqual(actionedFirst);
+  });
+
+  it("hides Gmail system categories while keeping user labels", () => {
+    const categoryIds = [
+      "CATEGORY_PERSONAL",
+      "CATEGORY_SOCIAL",
+      "CATEGORY_PROMOTIONS",
+      "CATEGORY_FORUMS",
+      "CATEGORY_UPDATES",
+    ];
+    const labels = getEmailThreadLabels({
+      messages: [{ labelIds: ["label-calendar", ...categoryIds] }],
+      userLabels: Object.fromEntries([
+        ["label-calendar", { id: "label-calendar", name: "Calendar" }],
+        ...categoryIds.map((id) => [id, { id, name: id }]),
+      ]),
+    });
+
+    expect(labels).toEqual([{ id: "label-calendar", name: "Calendar" }]);
+  });
+
+  it("keeps a thread label when the newest message is a draft without it", () => {
+    const labels = getEmailThreadLabels({
+      messages: [
+        { labelIds: ["INBOX", "label-actioned"] },
+        { labelIds: ["DRAFT"] },
+      ],
+      userLabels: {
+        "label-actioned": {
+          id: "label-actioned",
+          name: "Actioned",
+        },
+      },
+    });
+
+    expect(labels).toEqual([{ id: "label-actioned", name: "Actioned" }]);
+  });
+
+  it("keeps older message labels in the consistent display order", () => {
+    const labels = getEmailThreadLabels({
+      messages: [
+        { labelIds: ["label-alpha"] },
+        { labelIds: ["DRAFT", "label-zulu"] },
+      ],
+      userLabels: {
+        "label-alpha": {
+          id: "label-alpha",
+          name: "Alpha",
+        },
+        "label-zulu": {
+          id: "label-zulu",
+          name: "Zulu",
+        },
+      },
+    });
+
+    expect(labels).toEqual([
+      { id: "label-alpha", name: "Alpha" },
+      { id: "label-zulu", name: "Zulu" },
+    ]);
+  });
+});

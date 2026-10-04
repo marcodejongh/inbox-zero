@@ -1,14 +1,14 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { getDefaultMailSplitDrafts } from "@/utils/split-inbox/default-splits";
 import { ONBOARDING_PROCESS_EMAILS_COUNT } from "@/utils/config";
 import { after } from "next/server";
 import {
   createRuleBody,
   updateRuleBody,
-  updateRuleSettingsBody,
   enableDraftRepliesBody,
   enableMultiRuleSelectionBody,
+  updateDraftReplyConfidenceBody,
   deleteRuleBody,
   createRulesOnboardingBody,
   type CategoryConfig,
@@ -16,27 +16,37 @@ import {
   toggleRuleBody,
   toggleAllRulesBody,
   copyRulesFromAccountBody,
+  importRulesBody,
 } from "@/utils/actions/rule.validation";
 import prisma from "@/utils/prisma";
 import { isDuplicateError, isNotFoundError } from "@/utils/prisma-helpers";
 import { flattenConditions } from "@/utils/condition";
 import { ActionType, SystemType } from "@/generated/prisma/enums";
-import type { Prisma } from "@/generated/prisma/client";
 import { sanitizeActionFields } from "@/utils/action-item";
 import {
   deleteRule,
   upsertSystemRule,
   createRule,
   updateRule,
+  createRuleWithResolvedActions,
+  replaceRuleWithResolvedActions,
+  setRuleEnabled,
+  type RuleActionCreateData,
+  addActionOwnershipToInput,
+  assertIntegrationActionsConnected,
 } from "@/utils/rule/rule";
 import { SafeError } from "@/utils/error";
 import {
   getRuleConfig,
   getSystemRuleActionTypes,
   getCategoryAction,
+  getActionTypesForCategoryAction,
+  isOptInSystemType,
+  STANDARD_CATEGORY_SYSTEM_TYPES,
 } from "@/utils/rule/consts";
 import { actionClient, actionClientUser } from "@/utils/actions/safe-action";
-import { prefixPath } from "@/utils/path";
+import { assertRuleIsNotOrgManaged } from "@/utils/organizations/rules";
+import { env } from "@/env";
 import { ONE_WEEK_MINUTES } from "@/utils/date";
 import { createEmailProvider } from "@/utils/email/provider";
 import { resolveLabelNameAndId } from "@/utils/label/resolve-label";
@@ -44,14 +54,18 @@ import type { Logger } from "@/utils/logger";
 import { validateGmailLabelName } from "@/utils/gmail/label-validation";
 import { isGoogleProvider } from "@/utils/email/provider-types";
 import { bulkProcessInboxEmails } from "@/utils/ai/choose-rule/bulk-process-emails";
-import { getEmailAccountWithAi } from "@/utils/user/get";
+import { getEmailAccountForRuleExecution } from "@/utils/user/get";
+import type { AttachmentSourceInput } from "@/utils/attachments/source-schema";
+import { assertCanUseDigestsIfNeeded } from "@/utils/premium/server";
+import { toCreateOrUpdateRuleCondition } from "@/utils/rule/create-rule-condition";
+import { setDefaultMailSplits } from "@/utils/split-inbox/default-splits.server";
 
 export const createRuleAction = actionClient
   .metadata({ name: "createRule" })
   .inputSchema(createRuleBody)
   .action(
     async ({
-      ctx: { emailAccountId, logger, provider },
+      ctx: { emailAccountId, userId, logger, provider },
       parsedInput: {
         name,
         runOnThreads,
@@ -60,6 +74,8 @@ export const createRuleAction = actionClient
         conditionalOperator,
       },
     }) => {
+      await assertCanUseDigestsIfNeeded(userId, actions ?? []);
+
       const conditions = flattenConditions(conditionsInput, logger);
 
       const resolvedActions = await resolveActionLabels(
@@ -73,15 +89,15 @@ export const createRuleAction = actionClient
         const rule = await createRule({
           result: {
             name,
-            condition: {
+            condition: toCreateOrUpdateRuleCondition({
               aiInstructions: conditions.instructions,
               conditionalOperator: conditionalOperator || null,
               static: {
-                from: conditions.from || null,
-                to: conditions.to || null,
-                subject: conditions.subject || null,
+                from: conditions.from,
+                to: conditions.to,
+                subject: conditions.subject,
               },
-            },
+            }),
             actions: resolvedActions.map(mapActionToSanitizedFields),
           },
           emailAccountId,
@@ -102,7 +118,7 @@ export const updateRuleAction = actionClient
   .inputSchema(updateRuleBody)
   .action(
     async ({
-      ctx: { emailAccountId, logger, provider },
+      ctx: { emailAccountId, userId, logger, provider },
       parsedInput: {
         id,
         name,
@@ -112,6 +128,15 @@ export const updateRuleAction = actionClient
         conditionalOperator,
       },
     }) => {
+      await assertRuleIsNotOrgManaged({ ruleId: id, emailAccountId });
+
+      const existingRule = await prisma.rule.findFirst({
+        where: { id, emailAccountId },
+        select: { actions: { select: { type: true } } },
+      });
+
+      await assertCanUseDigestsIfNeeded(userId, actions, existingRule?.actions);
+
       const conditions = flattenConditions(conditionsInput, logger);
 
       const resolvedActions = await resolveActionLabels(
@@ -126,15 +151,15 @@ export const updateRuleAction = actionClient
           ruleId: id,
           result: {
             name: name || "",
-            condition: {
+            condition: toCreateOrUpdateRuleCondition({
               aiInstructions: conditions.instructions,
               conditionalOperator: conditionalOperator || null,
               static: {
-                from: conditions.from || null,
-                to: conditions.to || null,
-                subject: conditions.subject || null,
+                from: conditions.from,
+                to: conditions.to,
+                subject: conditions.subject,
               },
-            },
+            }),
             actions: resolvedActions.map(mapActionToSanitizedFields),
           },
           emailAccountId,
@@ -150,25 +175,6 @@ export const updateRuleAction = actionClient
     },
   );
 
-export const updateRuleSettingsAction = actionClient
-  .metadata({ name: "updateRuleSettings" })
-  .inputSchema(updateRuleSettingsBody)
-  .action(
-    async ({ ctx: { emailAccountId }, parsedInput: { id, instructions } }) => {
-      const currentRule = await prisma.rule.findUnique({
-        where: { id, emailAccountId },
-      });
-      if (!currentRule) throw new SafeError("Rule not found");
-
-      await prisma.rule.update({
-        where: { id, emailAccountId },
-        data: { instructions },
-      });
-
-      revalidatePath(prefixPath(emailAccountId, "/reply-zero"));
-    },
-  );
-
 export const enableDraftRepliesAction = actionClient
   .metadata({ name: "enableDraftReplies" })
   .inputSchema(enableDraftRepliesBody)
@@ -177,7 +183,9 @@ export const enableDraftRepliesAction = actionClient
       ctx: { emailAccountId, provider, logger },
       parsedInput: { enable },
     }) => {
-      let rule = await prisma.rule.findUnique({
+      if (env.NEXT_PUBLIC_AUTO_DRAFT_DISABLED && enable) return;
+
+      const existingRule = await prisma.rule.findUnique({
         where: {
           emailAccountId_systemType: {
             emailAccountId,
@@ -187,21 +195,26 @@ export const enableDraftRepliesAction = actionClient
         include: { actions: true },
       });
 
-      if (!rule && !enable) {
+      if (!existingRule && !enable) {
         return;
       }
 
-      // if rule doesn't exist, then toggle will create it
-      rule =
-        rule ||
-        (await toggleRule({
-          emailAccountId,
-          enabled: enable,
-          systemType: SystemType.TO_REPLY,
-          provider,
-          ruleId: undefined,
-          logger,
-        }));
+      const rule = existingRule
+        ? existingRule.enabled === enable
+          ? existingRule
+          : await setRuleEnabled({
+              ruleId: existingRule.id,
+              emailAccountId,
+              enabled: enable,
+            })
+        : await toggleRule({
+            emailAccountId,
+            enabled: enable,
+            systemType: SystemType.TO_REPLY,
+            provider,
+            ruleId: undefined,
+            logger,
+          });
 
       if (enable) {
         const alreadyDraftingReplies = rule.actions.find(
@@ -209,10 +222,13 @@ export const enableDraftRepliesAction = actionClient
         );
         if (!alreadyDraftingReplies) {
           await prisma.action.create({
-            data: {
-              ruleId: rule.id,
-              type: ActionType.DRAFT_EMAIL,
-            },
+            data: addActionOwnershipToInput(
+              {
+                ruleId: rule.id,
+                type: ActionType.DRAFT_EMAIL,
+              },
+              emailAccountId,
+            ),
           });
         }
       } else {
@@ -223,8 +239,6 @@ export const enableDraftRepliesAction = actionClient
           },
         });
       }
-
-      revalidatePath(prefixPath(emailAccountId, "/reply-zero"));
     },
   );
 
@@ -238,17 +252,40 @@ export const enableMultiRuleSelectionAction = actionClient
     });
   });
 
+export const updateDraftReplyConfidenceAction = actionClient
+  .metadata({ name: "updateDraftReplyConfidence" })
+  .inputSchema(updateDraftReplyConfidenceBody)
+  .action(async ({ ctx: { emailAccountId }, parsedInput: { confidence } }) => {
+    await prisma.emailAccount.update({
+      where: { id: emailAccountId },
+      data: { draftReplyConfidence: confidence },
+    });
+  });
+
 export const deleteRuleAction = actionClient
   .metadata({ name: "deleteRule" })
   .inputSchema(deleteRuleBody)
   .action(async ({ ctx: { emailAccountId }, parsedInput: { id } }) => {
     const rule = await prisma.rule.findUnique({
-      where: { id, emailAccountId },
-      include: { actions: true, group: true },
+      where: {
+        id_emailAccountId: {
+          id,
+          emailAccountId,
+        },
+      },
+      select: { systemType: true, groupId: true, organizationRuleId: true },
     });
     if (!rule) return; // already deleted
-    if (rule.emailAccountId !== emailAccountId)
-      throw new SafeError("You don't have permission to delete this rule");
+    if (rule.organizationRuleId) {
+      throw new SafeError(
+        "This rule is managed by your organization and can't be deleted here.",
+      );
+    }
+    if (rule.systemType) {
+      throw new SafeError(
+        "Default rules cannot be deleted. Disable them instead.",
+      );
+    }
 
     try {
       await deleteRule({
@@ -256,8 +293,6 @@ export const deleteRuleAction = actionClient
         emailAccountId,
         groupId: rule.groupId,
       });
-
-      revalidatePath(prefixPath(emailAccountId, `/assistant/rule/${id}`));
     } catch (error) {
       if (isNotFoundError(error)) return;
       throw error;
@@ -280,10 +315,15 @@ export const createRulesOnboardingAction = actionClient
         }
       }
 
-      const emailAccount = await getEmailAccountWithAi({ emailAccountId });
+      const emailAccount = await getEmailAccountForRuleExecution({
+        emailAccountId,
+      });
       if (!emailAccount) throw new SafeError("User not found");
 
       const promises: Promise<unknown>[] = [];
+      const defaultSplitRulePromises: Array<
+        ReturnType<typeof upsertSystemRule>
+      > = [];
 
       const isSet = (
         value: string | undefined | null,
@@ -294,10 +334,14 @@ export const createRulesOnboardingAction = actionClient
         | "move_folder"
         | "move_folder_delayed" => value !== "none" && value !== undefined;
 
-      async function createSystemRuleForOnboarding(systemType: SystemType) {
+      async function createSystemRuleForOnboarding(
+        systemType: SystemType,
+        userSelectedAction?: CategoryAction,
+      ) {
         const ruleConfiguration = getRuleConfig(systemType);
         const { name, instructions, label, runOnThreads } = ruleConfiguration;
-        const categoryAction = getCategoryAction(systemType, provider);
+        const categoryAction =
+          userSelectedAction || getCategoryAction(systemType, provider);
 
         const promise = (async () => {
           const actions = await getActionsFromCategoryAction({
@@ -309,6 +353,7 @@ export const createRulesOnboardingAction = actionClient
             draftReply: !!ruleConfiguration.draftReply,
             provider,
             logger,
+            systemType,
           });
 
           return upsertSystemRule({
@@ -318,11 +363,14 @@ export const createRulesOnboardingAction = actionClient
             emailAccountId,
             systemType,
             runOnThreads,
+            enabled: true,
             logger,
           });
         })();
 
         promises.push(promise);
+
+        return promise;
       }
 
       async function deleteRule(
@@ -342,20 +390,12 @@ export const createRulesOnboardingAction = actionClient
       }
 
       // Process system rules
-      const systemRules = [
-        SystemType.TO_REPLY,
-        SystemType.NEWSLETTER,
-        SystemType.MARKETING,
-        SystemType.CALENDAR,
-        SystemType.RECEIPT,
-        SystemType.NOTIFICATION,
-        SystemType.COLD_EMAIL,
-      ];
-
-      for (const type of systemRules) {
+      for (const type of STANDARD_CATEGORY_SYSTEM_TYPES) {
         const config = systemCategoryMap.get(type);
         if (config && isSet(config.action)) {
-          createSystemRuleForOnboarding(type);
+          defaultSplitRulePromises.push(
+            createSystemRuleForOnboarding(type, config.action),
+          );
         } else {
           deleteRule(type, emailAccountId);
         }
@@ -388,21 +428,21 @@ export const createRulesOnboardingAction = actionClient
             draftReply: false,
             provider,
             logger,
+            systemType: undefined,
           });
 
-          const promise = prisma.rule
-            .create({
-              data: {
-                emailAccountId,
-                name: customCategory.name,
-                instructions:
-                  customCategory.description ||
-                  `Custom category: ${customCategory.name}`,
-                systemType: null,
-                runOnThreads: true,
-                actions: { createMany: { data: actions } },
-              },
-            })
+          const promise = createRuleWithResolvedActions({
+            emailAccountId,
+            data: {
+              name: customCategory.name,
+              instructions:
+                customCategory.description ||
+                `Custom category: ${customCategory.name}`,
+              systemType: null,
+              runOnThreads: true,
+            },
+            actions,
+          })
             .then(() => {})
             .catch((error) => {
               if (isDuplicateError(error, "name")) return;
@@ -415,6 +455,17 @@ export const createRulesOnboardingAction = actionClient
       }
 
       await Promise.allSettled(promises);
+
+      try {
+        const systemRules = await Promise.all(defaultSplitRulePromises);
+        await setDefaultMailSplits({
+          emailAccountId,
+          defaultSplits: getDefaultMailSplitDrafts(systemRules),
+          enabled: true,
+        });
+      } catch (error) {
+        logger.error("Error creating default mail splits", { error });
+      }
 
       after(() =>
         bulkProcessInboxEmails({
@@ -451,10 +502,26 @@ export const toggleAllRulesAction = actionClient
   .metadata({ name: "toggleAllRules" })
   .inputSchema(toggleAllRulesBody)
   .action(async ({ ctx: { emailAccountId }, parsedInput: { enabled } }) => {
-    await prisma.rule.updateMany({
-      where: { emailAccountId },
-      data: { enabled },
-    });
+    if (enabled) {
+      await prisma.rule.updateMany({
+        where: { emailAccountId, organizationRuleId: null },
+        data: { enabled },
+      });
+    } else {
+      await prisma.$transaction([
+        prisma.rule.updateMany({
+          where: { emailAccountId, organizationRuleId: null },
+          data: { enabled },
+        }),
+        prisma.emailAccount.update({
+          where: { id: emailAccountId },
+          data: {
+            followUpAwaitingReplyDays: null,
+            followUpNeedsReplyDays: null,
+          },
+        }),
+      ]);
+    }
 
     return { success: true };
   });
@@ -498,11 +565,11 @@ export const copyRulesFromAccountAction = actionClientUser
         throw new SafeError("Target account not found or unauthorized");
       }
 
-      // Fetch selected rules from source account
       const sourceRules = await prisma.rule.findMany({
         where: {
           emailAccountId: sourceEmailAccountId,
           id: { in: ruleIds },
+          organizationRuleId: null,
         },
         include: { actions: true },
       });
@@ -511,9 +578,16 @@ export const copyRulesFromAccountAction = actionClientUser
         return { copiedCount: 0, replacedCount: 0 };
       }
 
-      // Fetch existing rules in target account to check for duplicates
+      await assertCanUseDigestsIfNeeded(
+        userId,
+        sourceRules.flatMap((rule) => rule.actions),
+      );
+
       const targetRules = await prisma.rule.findMany({
-        where: { emailAccountId: targetEmailAccountId },
+        where: {
+          emailAccountId: targetEmailAccountId,
+          organizationRuleId: null,
+        },
         select: { id: true, name: true, systemType: true },
       });
 
@@ -539,7 +613,7 @@ export const copyRulesFromAccountAction = actionClientUser
         // Map actions - keep label names but clear IDs (they'll be resolved when rule executes)
         const mappedActions = sourceRule.actions.map((action) => ({
           type: action.type,
-          label: action.label, // Keep the label name
+          label: action.label,
           labelId: null, // Clear the ID - it's account-specific
           subject: action.subject,
           content: action.content,
@@ -547,15 +621,15 @@ export const copyRulesFromAccountAction = actionClientUser
           cc: action.cc,
           bcc: action.bcc,
           url: action.url,
-          folderName: action.folderName, // Keep folder name
+          folderName: action.folderName,
           folderId: null, // Clear the ID - it's account-specific
           delayInMinutes: action.delayInMinutes,
         }));
 
         if (existingRuleId) {
-          // Update existing rule
-          await prisma.rule.update({
-            where: { id: existingRuleId },
+          await replaceRuleWithResolvedActions({
+            ruleId: existingRuleId,
+            emailAccountId: targetEmailAccountId,
             data: {
               instructions: sourceRule.instructions,
               enabled: sourceRule.enabled,
@@ -565,36 +639,35 @@ export const copyRulesFromAccountAction = actionClientUser
               to: sourceRule.to,
               subject: sourceRule.subject,
               body: sourceRule.body,
-              // Drop groupId - it's account-specific
               groupId: null,
-              actions: {
-                deleteMany: {},
-                createMany: { data: mappedActions },
-              },
             },
+            actions: mappedActions,
           });
           replacedCount++;
         } else {
-          // Create new rule
-          await prisma.rule.create({
-            data: {
+          try {
+            await createRuleWithResolvedActions({
               emailAccountId: targetEmailAccountId,
-              name: sourceRule.name,
-              systemType: sourceRule.systemType,
-              instructions: sourceRule.instructions,
-              enabled: sourceRule.enabled,
-              runOnThreads: sourceRule.runOnThreads,
-              conditionalOperator: sourceRule.conditionalOperator,
-              from: sourceRule.from,
-              to: sourceRule.to,
-              subject: sourceRule.subject,
-              body: sourceRule.body,
-              // Drop groupId - it's account-specific
-              groupId: null,
-              actions: { createMany: { data: mappedActions } },
-            },
-          });
-          copiedCount++;
+              data: {
+                name: sourceRule.name,
+                systemType: sourceRule.systemType,
+                instructions: sourceRule.instructions,
+                enabled: sourceRule.enabled,
+                runOnThreads: sourceRule.runOnThreads,
+                conditionalOperator: sourceRule.conditionalOperator,
+                from: sourceRule.from,
+                to: sourceRule.to,
+                subject: sourceRule.subject,
+                body: sourceRule.body,
+                groupId: null,
+              },
+              actions: mappedActions,
+            });
+            copiedCount++;
+          } catch (error) {
+            if (!isDuplicateError(error, "name")) throw error;
+            logger.info("Rule already exists in target account, skipping");
+          }
         }
       }
 
@@ -625,11 +698,8 @@ async function toggleRule({
   logger: Logger;
 }) {
   if (ruleId) {
-    return await prisma.rule.update({
-      where: { id: ruleId, emailAccountId },
-      data: { enabled },
-      include: { actions: true },
-    });
+    await assertRuleIsNotOrgManaged({ ruleId, emailAccountId });
+    return await setRuleEnabled({ ruleId, emailAccountId, enabled });
   }
 
   if (!systemType) {
@@ -646,11 +716,26 @@ async function toggleRule({
   });
 
   if (existingRule) {
-    return await prisma.rule.update({
-      where: { id: existingRule.id },
-      data: { enabled },
-      include: { actions: true },
+    const updatedRule = await setRuleEnabled({
+      ruleId: existingRule.id,
+      emailAccountId,
+      enabled,
     });
+    if (enabled) {
+      await ensureDefaultMailSplitForRule({
+        emailAccountId,
+        systemType,
+        logger,
+      });
+    } else if (isOptInSystemType(systemType)) {
+      await ensureDefaultMailSplitForRule({
+        emailAccountId,
+        systemType,
+        enabled: false,
+        logger,
+      });
+    }
+    return updatedRule;
   }
 
   const emailProvider = await createEmailProvider({
@@ -662,11 +747,11 @@ async function toggleRule({
   const ruleConfig = getRuleConfig(systemType);
   const actionTypes = getSystemRuleActionTypes(systemType, provider);
 
-  const actions: Prisma.ActionCreateManyRuleInput[] = [];
+  const actions: RuleActionCreateData[] = [];
 
   for (const actionType of actionTypes) {
     if (actionType.includeFolder) {
-      const folderId = await emailProvider.getOrCreateOutlookFolderIdByName(
+      const folderId = await emailProvider.getOrCreateFolderIdByName(
         ruleConfig.name,
       );
       actions.push({
@@ -699,6 +784,7 @@ async function toggleRule({
     emailAccountId,
     systemType,
     runOnThreads: ruleConfig.runOnThreads,
+    enabled,
     logger,
   });
 
@@ -713,11 +799,20 @@ async function toggleRule({
     systemType: upsertedRule.systemType,
   });
 
+  if (enabled) {
+    await ensureDefaultMailSplitForRule({
+      emailAccountId,
+      systemType,
+      logger,
+    });
+  }
+
   return upsertedRule;
 }
 
 function mapActionToSanitizedFields(action: {
   type: ActionType;
+  messagingChannelId?: string | null;
   labelId?: {
     name?: string | null;
     value?: string | null;
@@ -732,9 +827,22 @@ function mapActionToSanitizedFields(action: {
   folderName?: { value?: string | null } | null;
   folderId?: { value?: string | null } | null;
   delayInMinutes?: number | null;
+  staticAttachments?: AttachmentSourceInput[] | null;
+  integrationName?: string | null;
+  integrationToolName?: string | null;
+  integrationArgs?: Record<string, string | null | undefined> | null;
 }) {
+  const nonEmptyIntegrationArgs = action.integrationArgs
+    ? (Object.fromEntries(
+        Object.entries(action.integrationArgs).filter(
+          ([, value]) => typeof value === "string" && value.trim() !== "",
+        ),
+      ) as Record<string, string>)
+    : undefined;
+
   const sanitized = sanitizeActionFields({
     type: action.type,
+    messagingChannelId: action.messagingChannelId ?? null,
     label: action.labelId?.name,
     labelId: action.labelId?.value,
     subject: action.subject?.value,
@@ -746,6 +854,12 @@ function mapActionToSanitizedFields(action: {
     folderName: action.folderName?.value,
     folderId: action.folderId?.value,
     delayInMinutes: action.delayInMinutes,
+    staticAttachments: action.staticAttachments?.length
+      ? action.staticAttachments
+      : undefined,
+    integrationName: action.integrationName,
+    integrationToolName: action.integrationToolName,
+    integrationArgs: nonEmptyIntegrationArgs,
   });
 
   return {
@@ -760,13 +874,20 @@ function mapActionToSanitizedFields(action: {
       webhookUrl: sanitized.url ?? null,
       folderName: sanitized.folderName ?? null,
     },
+    messagingChannelId: sanitized.messagingChannelId ?? null,
     labelId: sanitized.labelId ?? null,
     folderId: sanitized.folderId ?? null,
     delayInMinutes: sanitized.delayInMinutes ?? null,
+    staticAttachments: sanitized.staticAttachments ?? null,
+    integrationName: sanitized.integrationName ?? null,
+    integrationToolName: sanitized.integrationToolName ?? null,
+    integrationArgs: sanitized.integrationArgs ?? null,
   };
 }
 
 function handleRuleError(error: unknown, logger: Logger) {
+  if (error instanceof SafeError) throw error;
+
   if (isDuplicateError(error, "name")) {
     throw new SafeError("Rule name already exists");
   }
@@ -777,6 +898,36 @@ function handleRuleError(error: unknown, logger: Logger) {
   }
   logger.error("Error creating/updating rule", { error });
   throw new SafeError("Error creating/updating rule");
+}
+
+async function ensureDefaultMailSplitForRule({
+  emailAccountId,
+  systemType,
+  enabled = true,
+  logger,
+}: {
+  emailAccountId: string;
+  systemType: SystemType;
+  enabled?: boolean;
+  logger: Logger;
+}) {
+  try {
+    const rule = await prisma.rule.findUnique({
+      where: { emailAccountId_systemType: { emailAccountId, systemType } },
+      select: {
+        systemType: true,
+        actions: { select: { type: true, labelId: true } },
+      },
+    });
+    if (!rule) return;
+    await setDefaultMailSplits({
+      emailAccountId,
+      defaultSplits: getDefaultMailSplitDrafts([rule]),
+      enabled,
+    });
+  } catch (error) {
+    logger.error("Error creating default mail split", { error });
+  }
 }
 
 async function resolveActionLabels<
@@ -832,7 +983,7 @@ async function resolveActionLabels<
         const folderName = action.folderName?.value;
         if (folderName && !action.folderId?.value) {
           const resolvedFolderId =
-            await emailProvider.getOrCreateOutlookFolderIdByName(folderName);
+            await emailProvider.getOrCreateFolderIdByName(folderName);
           return {
             ...action,
             folderId: {
@@ -858,6 +1009,7 @@ async function getActionsFromCategoryAction({
   hasDigest,
   provider,
   logger,
+  systemType,
 }: {
   emailAccountId: string;
   ruleName: string;
@@ -867,75 +1019,211 @@ async function getActionsFromCategoryAction({
   draftReply: boolean;
   provider: string;
   logger: Logger;
-}): Promise<Prisma.ActionCreateManyRuleInput[]> {
+  systemType?: SystemType;
+}): Promise<RuleActionCreateData[]> {
   const emailProvider = await createEmailProvider({
     emailAccountId,
     provider,
     logger,
   });
 
-  const { label: labelName, labelId } = await resolveLabelNameAndId({
-    emailProvider,
-    label,
-    labelId: null,
-  });
-
-  logger.info("Resolved label ID during onboarding", {
-    requestedLabel: label,
-    resolvedLabelName: labelName,
-    resolvedLabelId: labelId,
-    ruleName,
-  });
-
-  let actions: Prisma.ActionCreateManyRuleInput[] = [
-    { type: ActionType.LABEL, label: labelName, labelId },
-  ];
-
-  switch (categoryAction) {
-    case "label_archive":
-    case "label_archive_delayed": {
-      actions.push({
-        type: ActionType.ARCHIVE,
-        delayInMinutes:
-          categoryAction === "label_archive_delayed"
-            ? ONE_WEEK_MINUTES
-            : undefined,
-      });
-      break;
+  function normalizeCategory(action: CategoryAction) {
+    switch (action) {
+      case "label_archive_delayed":
+        return { base: "label_archive" as const, isDelayed: true };
+      case "move_folder_delayed":
+        return { base: "move_folder" as const, isDelayed: true };
+      default:
+        return {
+          base: action as "label" | "label_archive" | "move_folder",
+          isDelayed: false,
+        };
     }
-    case "move_folder":
-    case "move_folder_delayed": {
-      const folderId =
-        await emailProvider.getOrCreateOutlookFolderIdByName(ruleName);
+  }
 
-      logger.info("Resolved folder ID during onboarding", {
-        folderName: ruleName,
-        resolvedFolderId: folderId,
-        categoryAction,
-      });
+  const { base: baseCategoryAction, isDelayed } =
+    normalizeCategory(categoryAction);
 
-      actions = [
-        {
+  const actionTypes = getActionTypesForCategoryAction({
+    categoryAction: baseCategoryAction,
+    systemType,
+    draftReply,
+    hasDigest,
+  });
+
+  const actions: RuleActionCreateData[] = [];
+
+  for (const actionType of actionTypes) {
+    switch (actionType.type) {
+      case ActionType.LABEL: {
+        const { label: labelName, labelId } = await resolveLabelNameAndId({
+          emailProvider,
+          label,
+          labelId: null,
+        });
+
+        logger.info("Resolved label ID during onboarding", {
+          requestedLabel: label,
+          resolvedLabelName: labelName,
+          resolvedLabelId: labelId,
+          ruleName,
+        });
+
+        actions.push({ type: ActionType.LABEL, label: labelName, labelId });
+        break;
+      }
+      case ActionType.MOVE_FOLDER: {
+        const folderId =
+          await emailProvider.getOrCreateFolderIdByName(ruleName);
+
+        logger.info("Resolved folder ID during onboarding", {
+          folderName: ruleName,
+          resolvedFolderId: folderId,
+          categoryAction,
+        });
+
+        actions.push({
           type: ActionType.MOVE_FOLDER,
           folderId,
           folderName: ruleName,
-          delayInMinutes:
-            categoryAction === "move_folder_delayed"
-              ? ONE_WEEK_MINUTES
-              : undefined,
-        },
-      ];
-      break;
+          delayInMinutes: isDelayed ? ONE_WEEK_MINUTES : undefined,
+        });
+        break;
+      }
+      case ActionType.ARCHIVE: {
+        actions.push({
+          type: ActionType.ARCHIVE,
+          delayInMinutes: isDelayed ? ONE_WEEK_MINUTES : undefined,
+        });
+        break;
+      }
+      default: {
+        actions.push({ type: actionType.type });
+      }
     }
-  }
-
-  if (draftReply) {
-    actions.push({ type: ActionType.DRAFT_EMAIL });
-  }
-
-  if (hasDigest) {
-    actions.push({ type: ActionType.DIGEST });
   }
 
   return actions;
 }
+
+export const importRulesAction = actionClient
+  .metadata({ name: "importRules" })
+  .inputSchema(importRulesBody)
+  .action(
+    async ({
+      ctx: { emailAccountId, userId, logger },
+      parsedInput: { rules },
+    }) => {
+      logger.info("Importing rules", { count: rules.length });
+
+      await assertCanUseDigestsIfNeeded(
+        userId,
+        rules.flatMap((rule) => rule.actions),
+      );
+
+      const existingRules = await prisma.rule.findMany({
+        where: { emailAccountId, organizationRuleId: null },
+        select: { id: true, name: true, systemType: true },
+      });
+
+      const rulesByName = new Map(
+        existingRules.map((r) => [r.name.toLowerCase(), r.id]),
+      );
+      const rulesBySystemType = new Map(
+        existingRules
+          .filter((r) => r.systemType)
+          .map((r) => [r.systemType!, r.id]),
+      );
+
+      let createdCount = 0;
+      let updatedCount = 0;
+      let skippedCount = 0;
+
+      for (const rule of rules) {
+        try {
+          // Match by systemType first, then by name
+          const existingRuleId = rule.systemType
+            ? rulesBySystemType.get(rule.systemType)
+            : rulesByName.get(rule.name.toLowerCase());
+
+          // Map actions - keep label names but clear IDs
+          const mappedActions = rule.actions.map((action) => ({
+            type: action.type,
+            label: action.label,
+            labelId: null,
+            subject: action.subject,
+            content: action.content,
+            to: action.to,
+            cc: action.cc,
+            bcc: action.bcc,
+            folderName: action.folderName,
+            folderId: null,
+            url: action.url,
+            delayInMinutes: action.delayInMinutes,
+            integrationName: action.integrationName,
+            integrationToolName: action.integrationToolName,
+            integrationArgs: action.integrationArgs ?? undefined,
+          }));
+
+          await assertIntegrationActionsConnected(
+            mappedActions,
+            emailAccountId,
+          );
+
+          if (existingRuleId) {
+            await replaceRuleWithResolvedActions({
+              ruleId: existingRuleId,
+              emailAccountId,
+              data: {
+                instructions: rule.instructions,
+                enabled: rule.enabled ?? true,
+                automate: rule.automate ?? true,
+                runOnThreads: rule.runOnThreads ?? false,
+                conditionalOperator: rule.conditionalOperator,
+                categoryFilterType: rule.categoryFilterType,
+                from: rule.from,
+                to: rule.to,
+                subject: rule.subject,
+                body: rule.body,
+                groupId: null,
+              },
+              actions: mappedActions,
+            });
+            updatedCount++;
+          } else {
+            await createRuleWithResolvedActions({
+              emailAccountId,
+              data: {
+                name: rule.name,
+                systemType: rule.systemType,
+                instructions: rule.instructions,
+                enabled: rule.enabled ?? true,
+                automate: rule.automate ?? true,
+                runOnThreads: rule.runOnThreads ?? false,
+                conditionalOperator: rule.conditionalOperator,
+                categoryFilterType: rule.categoryFilterType,
+                from: rule.from,
+                to: rule.to,
+                subject: rule.subject,
+                body: rule.body,
+                groupId: null,
+              },
+              actions: mappedActions,
+            });
+            createdCount++;
+          }
+        } catch (error) {
+          logger.error("Failed to import rule", { ruleName: rule.name, error });
+          skippedCount++;
+        }
+      }
+
+      logger.info("Import complete", {
+        createdCount,
+        updatedCount,
+        skippedCount,
+      });
+
+      return { createdCount, updatedCount, skippedCount };
+    },
+  );

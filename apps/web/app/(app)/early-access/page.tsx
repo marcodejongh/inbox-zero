@@ -11,34 +11,85 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { isGoogleProvider } from "@/utils/email/provider-types";
+import { prefixPath } from "@/utils/path";
 import { useAccount } from "@/providers/EmailAccountProvider";
 
 export default function RequestAccessPage() {
-  const { provider } = useAccount();
+  const { emailAccountId, provider } = useAccount();
 
   return (
     <div className="container px-2 pt-2 sm:px-4 sm:pt-8">
       <div className="mx-auto max-w-2xl space-y-4 sm:space-y-8">
         <EarlyAccessFeatures />
-        {isGoogleProvider(provider) && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Sender Categories</CardTitle>
-              <CardDescription>
-                Sender Categories is a feature that allows you to categorize
-                emails by sender, and take bulk actions or apply rules to them.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
+        <Card>
+          <CardHeader>
+            <CardTitle>Mail</CardTitle>
+            <CardDescription>
+              Open your inbox in the Inbox Zero mail client.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {emailAccountId ? (
               <Button asChild>
-                <Link href="/smart-categories">Sender Categories</Link>
+                <Link href={prefixPath(emailAccountId, "/mail")}>
+                  Open Mail
+                </Link>
               </Button>
-            </CardContent>
-          </Card>
+            ) : (
+              <Button disabled>Open Mail</Button>
+            )}
+          </CardContent>
+        </Card>
+        {isGoogleProvider(provider) && (
+          <>
+            <Card>
+              <CardHeader>
+                <CardTitle>Sender categories</CardTitle>
+                <CardDescription>
+                  Sender Categories is a feature that allows you to categorize
+                  emails by sender, and take bulk actions or apply rules to
+                  them.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button asChild>
+                  <Link href="/smart-categories">Sender Categories</Link>
+                </Button>
+              </CardContent>
+            </Card>
+            {/* <Card>
+              <CardHeader>
+                <CardTitle>Bulk archive</CardTitle>
+                <CardDescription>
+                  Archive emails from multiple senders at once, organized by
+                  category.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button asChild>
+                  <Link href="/bulk-archive">Bulk Archive</Link>
+                </Button>
+              </CardContent>
+            </Card> */}
+            {/* <Card>
+              <CardHeader>
+                <CardTitle>Quick bulk archive</CardTitle>
+                <CardDescription>
+                  Quickly archive emails from multiple senders at once, grouped
+                  by AI confidence level.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button asChild>
+                  <Link href="/quick-bulk-archive">Quick Bulk Archive</Link>
+                </Button>
+              </CardContent>
+            </Card> */}
+          </>
         )}
         <Card>
           <CardHeader>
-            <CardTitle>Early Access</CardTitle>
+            <CardTitle>Early access</CardTitle>
             <CardDescription>
               Give us feedback on what features you want to see.
             </CardDescription>

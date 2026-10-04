@@ -3,10 +3,12 @@ import { useParams } from "next/navigation";
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { EMAIL_ACCOUNT_HEADER } from "@/utils/config";
 
+// Use this only for endpoints that support org-admin access; account-only endpoints should use useSWR.
 // Attempts to build a drop-in replacement for useSWR that handles org permissions
 // Simple implementation that handles the two patterns we use:
 // 1. useOrgSWR(key, options)
 // 2. useOrgSWR(key, fetcher, options)
+// biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
 export function useOrgSWR<Data = any, Error = any>(
   key: string | null,
   fetcherOrOptions?:

@@ -1,10 +1,14 @@
 name: CLI Release
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
+  id-token: write
+  pull-requests: write
 
 jobs:
   build:
@@ -14,7 +18,7 @@ jobs:
           - os: macos-latest
             target: bun-darwin-arm64
             artifact: inbox-zero-darwin-arm64
-          - os: macos-13
+          - os: macos-latest
             target: bun-darwin-x64
             artifact: inbox-zero-darwin-x64
           - os: ubuntu-latest
@@ -24,9 +28,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
 
@@ -44,28 +48,76 @@ jobs:
           tar -czvf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: packages/cli/dist/${{ matrix.artifact }}.tar.gz
+
+  publish-npm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Set version from tag
+        if: github.ref_type == 'tag'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd packages/cli
+          npm version "$VERSION" --no-git-tag-version
+
+      - name: Install dependencies
+        run: cd packages/cli && bun install
+
+      - name: Build
+        run: cd packages/cli && bun run build
+
+      - name: Publish to npm
+        run: |
+          cd packages/cli
+          VERSION=$(node -p "require('./package.json').version")
+
+          if npm view "@inbox-zero/cli@$VERSION" version >/dev/null 2>&1; then
+            echo "Version $VERSION is already published, skipping."
+            exit 0
+          fi
+
+          npm publish --provenance --access public
 
   release:
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
       - name: Get version
         id: version
         run: |
-          VERSION=$(cat version.txt | tr -d 'v' | tr -d '\n')
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "This workflow must be run from a tag ref (got: ${GITHUB_REF_TYPE} '${GITHUB_REF_NAME}')" >&2
+            exit 1
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$GITHUB_REF_NAME" >> $GITHUB_OUTPUT
 
       - name: Calculate SHA256
         id: sha
@@ -74,84 +126,62 @@ jobs:
           echo "darwin_x64=$(sha256sum artifacts/inbox-zero-darwin-x64/inbox-zero-darwin-x64.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
           echo "linux_x64=$(sha256sum artifacts/inbox-zero-linux-x64/inbox-zero-linux-x64.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload to Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: cli-v${{ steps.version.outputs.version }}
-          name: CLI v${{ steps.version.outputs.version }}
-          draft: false
-          prerelease: false
+          tag_name: ${{ steps.version.outputs.tag }}
           files: |
             artifacts/inbox-zero-darwin-arm64/inbox-zero-darwin-arm64.tar.gz
             artifacts/inbox-zero-darwin-x64/inbox-zero-darwin-x64.tar.gz
             artifacts/inbox-zero-linux-x64/inbox-zero-linux-x64.tar.gz
-          body: |
-            ## Inbox Zero CLI v${{ steps.version.outputs.version }}
-
-            ### Installation
-
-            **Homebrew (macOS/Linux):**
-            ```bash
-            brew tap inbox-zero/inbox-zero https://github.com/elie222/inbox-zero.git
-            brew install inbox-zero
-            ```
-
-            **Manual installation:**
-            ```bash
-            # macOS (Apple Silicon)
-            curl -L https://github.com/elie222/inbox-zero/releases/download/cli-v${{ steps.version.outputs.version }}/inbox-zero-darwin-arm64.tar.gz | tar xz
-            chmod +x inbox-zero-darwin-arm64
-            sudo mv inbox-zero-darwin-arm64 /usr/local/bin/inbox-zero
-
-            # macOS (Intel)
-            curl -L https://github.com/elie222/inbox-zero/releases/download/cli-v${{ steps.version.outputs.version }}/inbox-zero-darwin-x64.tar.gz | tar xz
-            chmod +x inbox-zero-darwin-x64
-            sudo mv inbox-zero-darwin-x64 /usr/local/bin/inbox-zero
-
-            # Linux
-            curl -L https://github.com/elie222/inbox-zero/releases/download/cli-v${{ steps.version.outputs.version }}/inbox-zero-linux-x64.tar.gz | tar xz
-            chmod +x inbox-zero-linux-x64
-            sudo mv inbox-zero-linux-x64 /usr/local/bin/inbox-zero
-            ```
-
-            ### SHA256 Checksums
-            ```
-            ${{ steps.sha.outputs.darwin_arm64 }}  inbox-zero-darwin-arm64.tar.gz
-            ${{ steps.sha.outputs.darwin_x64 }}  inbox-zero-darwin-x64.tar.gz
-            ${{ steps.sha.outputs.linux_x64 }}  inbox-zero-linux-x64.tar.gz
-            ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update Homebrew formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DARWIN_ARM64_SHA: ${{ steps.sha.outputs.darwin_arm64 }}
+          DARWIN_X64_SHA: ${{ steps.sha.outputs.darwin_x64 }}
+          LINUX_X64_SHA: ${{ steps.sha.outputs.linux_x64 }}
         run: |
           python3 << 'EOF'
+          import os
           import re
+
+          version = os.environ["VERSION"]
+          tag = os.environ["TAG"]
+          darwin_arm64_sha = os.environ["DARWIN_ARM64_SHA"]
+          darwin_x64_sha = os.environ["DARWIN_X64_SHA"]
+          linux_x64_sha = os.environ["LINUX_X64_SHA"]
           
           with open('Formula/inbox-zero.rb', 'r') as f:
               content = f.read()
           
           # Update version
-          content = re.sub(r'version "[^"]*"', 'version "${{ steps.version.outputs.version }}"', content)
+          content = re.sub(r'version "[^"]*"', f'version "{version}"', content)
+          
+          # Update URLs to current version (handles both cli-v* and v* formats)
+          content = re.sub(r'releases/download/(?:cli-)?v[^/]+/', f'releases/download/{tag}/', content)
           
           # Update SHA256 for darwin-arm64 (first sha256 after "on_arm do")
           content = re.sub(
               r'(on_arm do.*?sha256 ")[^"]*(")',
-              r'\g<1>${{ steps.sha.outputs.darwin_arm64 }}\2',
+              rf'\g<1>{darwin_arm64_sha}\2',
               content, count=1, flags=re.DOTALL
           )
           
           # Update SHA256 for darwin-x64 (first sha256 after "on_intel do" inside on_macos)
           content = re.sub(
               r'(on_macos do.*?on_intel do.*?sha256 ")[^"]*(")',
-              r'\g<1>${{ steps.sha.outputs.darwin_x64 }}\2',
+              rf'\g<1>{darwin_x64_sha}\2',
               content, count=1, flags=re.DOTALL
           )
           
           # Update SHA256 for linux-x64 (sha256 after "on_linux do")
           content = re.sub(
               r'(on_linux do.*?sha256 ")[^"]*(")',
-              r'\g<1>${{ steps.sha.outputs.linux_x64 }}\2',
+              rf'\g<1>{linux_x64_sha}\2',
               content, count=1, flags=re.DOTALL
           )
           
@@ -161,11 +191,15 @@ jobs:
           print(content)
           EOF
 
-      - name: Commit formula update
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add Formula/inbox-zero.rb
-          git diff --staged --quiet || git commit -m "chore: update Homebrew formula for CLI v${{ steps.version.outputs.version }}"
-          git push origin HEAD:${{ github.ref_name }}
-
+      - name: Create formula update pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          add-paths: Formula/inbox-zero.rb
+          branch: automation/homebrew-formula-${{ steps.version.outputs.version }}
+          base: main
+          commit-message: "chore: update Homebrew formula for ${{ steps.version.outputs.tag }}"
+          title: "chore: update Homebrew formula for ${{ steps.version.outputs.tag }}"
+          body: |
+            Update the Homebrew formula for the new CLI release.
+          delete-branch: true

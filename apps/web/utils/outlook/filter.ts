@@ -1,12 +1,9 @@
 import type { OutlookClient } from "@/utils/outlook/client";
-import type {
-  MessageRule,
-  OutlookCategory,
-} from "@microsoft/microsoft-graph-types";
+import type { MessageRule } from "@microsoft/microsoft-graph-types";
 import type { Logger } from "@/utils/logger";
 import { isAlreadyExistsError } from "./errors";
-import { withOutlookRetry } from "@/utils/outlook/retry";
-import { getLabelById } from "@/utils/outlook/label";
+import { withMicrosoftGraphWriteRetry } from "@/utils/outlook/retry";
+import { getLabelById, getOrCreateLabel } from "@/utils/outlook/label";
 
 // Microsoft Graph API doesn't have a direct equivalent to Gmail filters
 // Instead, we can work with mail rules which are more complex but provide similar functionality
@@ -40,7 +37,7 @@ export async function createFilter(options: {
       actions,
     };
 
-    const response: MessageRule = await withOutlookRetry(
+    const response: MessageRule = await withMicrosoftGraphWriteRetry(
       () =>
         client.getClient().api("/me/mailFolders/inbox/messageRules").post(rule),
       logger,
@@ -83,7 +80,7 @@ export async function createAutoArchiveFilter({
       },
     };
 
-    const response: MessageRule = await withOutlookRetry(
+    const response: MessageRule = await withMicrosoftGraphWriteRetry(
       () =>
         client.getClient().api("/me/mailFolders/inbox/messageRules").post(rule),
       logger,
@@ -109,7 +106,7 @@ export async function deleteFilter({
   logger: Logger;
 }) {
   try {
-    await withOutlookRetry(
+    await withMicrosoftGraphWriteRetry(
       () =>
         client
           .getClient()
@@ -162,52 +159,26 @@ export async function createCategoryFilter({
   categoryName: string;
   logger: Logger;
 }) {
-  try {
-    // First, ensure the category exists
-    const categories: { value: OutlookCategory[] } = await client
-      .getClient()
-      .api("/me/outlook/masterCategories")
-      .get();
+  const category = await getOrCreateLabel({
+    client,
+    name: categoryName,
+    logger,
+  });
 
-    let category = categories.value.find(
-      (cat) => cat.displayName === categoryName,
-    );
+  // Note: Microsoft Graph API doesn't support applying categories directly in mail rules
+  // This function ensures the category exists; assignment happens when processing messages
+  logger.info("Category ensured for filter", {
+    categoryName: category.displayName,
+    categoryId: category.id,
+  });
+  logger.trace("Category ensure filter context", { from });
 
-    if (!category) {
-      // Create the category if it doesn't exist
-      category = await withOutlookRetry(
-        () =>
-          client.getClient().api("/me/outlook/masterCategories").post({
-            displayName: categoryName,
-            color: "preset0", // Default color
-          }),
-        logger,
-      );
-    }
-
-    // Note: Microsoft Graph API doesn't support applying categories directly in mail rules
-    // This function creates the category but the actual application would need to be done
-    // when processing individual messages, similar to how it's done in the label functions
-
-    logger.info("Category created for filter", {
-      from,
-      categoryName,
-      categoryId: category?.id,
-    });
-
-    return {
-      status: 200,
-      category,
-      message:
-        "Category created. Note: Categories must be applied to individual messages.",
-    };
-  } catch (error) {
-    if (isAlreadyExistsError(error)) {
-      logger.warn("Category filter already exists", { from, categoryName });
-      return { status: 200 };
-    }
-    throw error;
-  }
+  return {
+    status: 200,
+    category,
+    message:
+      "Category ensured. Note: Categories must be applied to individual messages.",
+  };
 }
 
 export async function updateFilter({
@@ -244,7 +215,7 @@ export async function updateFilter({
       actions,
     };
 
-    const response: MessageRule = await withOutlookRetry(
+    const response: MessageRule = await withMicrosoftGraphWriteRetry(
       () =>
         client
           .getClient()

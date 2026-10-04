@@ -1,18 +1,30 @@
 import { tool } from "ai";
 import { subMonths } from "date-fns/subMonths";
+import uniq from "lodash/uniq";
+import uniqBy from "lodash/uniqBy";
 import { z } from "zod";
 import { createScopedLogger } from "@/utils/logger";
 import { createGenerateText } from "@/utils/llms";
 import type { EmailAccountWithAI } from "@/utils/llms/types";
-import type { EmailForLLM } from "@/utils/types";
+import type { EmailForLLM, ParsedMessage } from "@/utils/types";
 import { getTodayForLLM } from "@/utils/ai/helpers";
-import { getModel } from "@/utils/llms/model";
+import { getModelForUseCase, LlmUseCase } from "@/utils/llms/use-cases";
 import type { EmailProvider } from "@/utils/email/types";
 import { getEmailForLLM } from "@/utils/get-email-from-message";
 import { captureException } from "@/utils/error";
 import { getEmailListPrompt, getUserInfoPrompt } from "@/utils/ai/helpers";
 
+type ReplyContextThreadEmail = EmailForLLM & {
+  threadId?: string | null;
+};
+
 const logger = createScopedLogger("reply-context-collector");
+const SEARCH_RESULTS_PER_QUERY = 20;
+const MAX_EXPANDED_THREADS_PER_QUERY = 5;
+const MAX_EXPANDED_EMAILS_PER_QUERY = 40;
+const MAX_CONTEXT_EMAILS_PER_THREAD = 12;
+const THREAD_CONTEXT_BEFORE_MATCH = 2;
+const THREAD_CONTEXT_AFTER_MATCH = 4;
 
 const resultSchema = z.object({
   notes: z
@@ -46,6 +58,7 @@ CRITICAL GUIDELINES:
 - Perform as many searches as needed to confidently gather context, but be efficient
 - Focus on emails that show how similar questions were answered before
 - Only include information that directly helps a downstream drafting agent
+- Omit historical threads whose only useful context asks for details already present in the current thread.
 
 IMPORTANT - For scheduling/meeting requests:
 - DO NOT include emails that show old availability times or scheduling patterns
@@ -72,7 +85,7 @@ export async function aiCollectReplyContext({
   emailAccount,
   emailProvider,
 }: {
-  currentThread: EmailForLLM[];
+  currentThread: ReplyContextThreadEmail[];
   emailAccount: EmailAccountWithAI;
   emailProvider: EmailProvider;
 }): Promise<ReplyContextCollectorResult | null> {
@@ -89,19 +102,24 @@ ${getUserInfoPrompt({ emailAccount })}
 
 ${getTodayForLLM()}`;
 
-    const modelOptions = getModel(emailAccount.user, "economy");
+    const modelOptions = getModelForUseCase(
+      emailAccount.user,
+      LlmUseCase.ReplyContextCollector,
+    );
 
     const generateText = createGenerateText({
       emailAccount,
       label: "Reply context collector",
       modelOptions,
+      promptHardening: { trust: "untrusted", level: "full" },
     });
 
     let result: ReplyContextCollectorResult | null = null;
+    const seenSearchResultIds = new Set<string>();
 
     await generateText({
       ...modelOptions,
-      system: agentSystem,
+      instructions: agentSystem,
       prompt,
       stopWhen: (result) =>
         result.steps.some((step) =>
@@ -119,30 +137,45 @@ ${getTodayForLLM()}`;
           execute: async ({ query }) => {
             logger.info("Searching emails", { query });
             try {
-              const { messages } =
-                await emailProvider.getMessagesWithPagination({
-                  query,
-                  maxResults: 20,
-                  after: sixMonthsAgo,
-                });
-
-              const emails = messages.map((message) => {
-                return getEmailForLLM(message, { maxLength: 2000 });
+              const emails = await searchReplyContextEmails({
+                emailProvider,
+                query,
+                after: sixMonthsAgo,
+                currentThread,
               });
 
-              logger.info("Found emails", { emails: emails.length });
+              const unseenEmails = emails.filter(
+                (email) => !seenSearchResultIds.has(email.id),
+              );
+
+              for (const email of unseenEmails) {
+                seenSearchResultIds.add(email.id);
+              }
+
+              logger.info("Found emails", {
+                emailCount: emails.length,
+                returnedEmailCount: unseenEmails.length,
+                duplicateEmailCount: emails.length - unseenEmails.length,
+              });
               // logger.trace("Found emails", { emails });
 
-              return emails;
+              return unseenEmails;
             } catch (error) {
               const errorMessage =
                 error instanceof Error ? error.message : "Unknown error";
+
+              const err = error as Record<string, unknown>;
+              const responseBody =
+                typeof err?.body === "string" ? err.body : undefined;
+
               logger.error("Email search failed", {
                 error,
                 errorMessage,
                 query,
                 emailProvider: emailProvider.name,
                 afterDate: sixMonthsAgo.toISOString(),
+                responseBody,
+                responseStatus: err?.statusCode,
               });
               return {
                 success: false,
@@ -187,4 +220,174 @@ ${getTodayForLLM()}`;
     });
     return null;
   }
+}
+
+export async function searchReplyContextEmails({
+  emailProvider,
+  query,
+  after,
+  currentThread,
+}: {
+  emailProvider: EmailProvider;
+  query: string;
+  after: Date;
+  currentThread: ReplyContextThreadEmail[];
+}): Promise<ReplyContextThreadEmail[]> {
+  const { messages } = await emailProvider.getMessagesWithPagination({
+    query,
+    maxResults: SEARCH_RESULTS_PER_QUERY,
+    after,
+  });
+
+  const historicalMatches = filterCurrentThreadMessages(
+    messages,
+    currentThread,
+  );
+  const threadIds = uniq(historicalMatches.map((m) => m.threadId)).slice(
+    0,
+    MAX_EXPANDED_THREADS_PER_QUERY,
+  );
+
+  if (threadIds.length === 0) return [];
+
+  const threadMessages = await Promise.all(
+    threadIds.map(async (threadId) => {
+      const matchingMessages = historicalMatches.filter(
+        (message) => message.threadId === threadId,
+      );
+      const messages = await getHistoricalThreadMessages({
+        emailProvider,
+        threadId,
+        fallbackMessages: matchingMessages,
+      });
+
+      return selectThreadContextMessages({
+        messages,
+        matchingMessages,
+        emailProvider,
+      });
+    }),
+  );
+
+  return uniqBy(
+    filterCurrentThreadMessages(threadMessages.flat(), currentThread),
+    "id",
+  )
+    .slice(0, MAX_EXPANDED_EMAILS_PER_QUERY)
+    .map((message) => {
+      const email = getEmailForLLM(message, {
+        maxLength: 2000,
+        extractReply: true,
+        includeLinkUrls: true,
+        includeImageAltText: true,
+      });
+
+      return {
+        ...email,
+        threadId: message.threadId,
+      };
+    });
+}
+
+async function getHistoricalThreadMessages({
+  emailProvider,
+  threadId,
+  fallbackMessages,
+}: {
+  emailProvider: EmailProvider;
+  threadId: string;
+  fallbackMessages: ParsedMessage[];
+}): Promise<ParsedMessage[]> {
+  try {
+    return await emailProvider.getThreadMessages(threadId);
+  } catch (error) {
+    logger.warn("Failed to expand search result thread", {
+      error,
+      threadId,
+      emailProvider: emailProvider.name,
+    });
+    return fallbackMessages;
+  }
+}
+
+function filterCurrentThreadMessages(
+  messages: ParsedMessage[],
+  currentThread: ReplyContextThreadEmail[],
+) {
+  const currentMessageIds = new Set(currentThread.map((message) => message.id));
+  const currentThreadIds = new Set(
+    currentThread
+      .map((message) => message.threadId)
+      .filter((threadId): threadId is string => !!threadId),
+  );
+
+  return messages.filter(
+    (message) =>
+      !currentMessageIds.has(message.id) &&
+      !currentThreadIds.has(message.threadId),
+  );
+}
+
+function selectThreadContextMessages({
+  messages,
+  matchingMessages,
+  emailProvider,
+}: {
+  messages: ParsedMessage[];
+  matchingMessages: ParsedMessage[];
+  emailProvider: EmailProvider;
+}) {
+  if (messages.length <= MAX_CONTEXT_EMAILS_PER_THREAD) return messages;
+
+  const matchIds = new Set(matchingMessages.map((message) => message.id));
+  const matchIndexes = messages.flatMap((message, index) =>
+    matchIds.has(message.id) ? [index] : [],
+  );
+
+  if (matchIndexes.length === 0) {
+    return messages.slice(0, MAX_CONTEXT_EMAILS_PER_THREAD);
+  }
+
+  const rankedMessages = messages
+    .flatMap((message, index) => {
+      const rank = getThreadContextRank({
+        index,
+        matchIndexes,
+        isSent: emailProvider.isSentMessage(message),
+      });
+      return rank === null ? [] : [{ index, message, rank }];
+    })
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .slice(0, MAX_CONTEXT_EMAILS_PER_THREAD)
+    .sort((a, b) => a.index - b.index);
+
+  return rankedMessages.map(({ message }) => message);
+}
+
+function getThreadContextRank({
+  index,
+  matchIndexes,
+  isSent,
+}: {
+  index: number;
+  matchIndexes: number[];
+  isSent: boolean;
+}) {
+  const distanceFromMatch = Math.min(
+    ...matchIndexes.map((matchIndex) => Math.abs(index - matchIndex)),
+  );
+
+  if (distanceFromMatch === 0) return 0;
+
+  const inContextWindow = matchIndexes.some(
+    (matchIndex) =>
+      index >= matchIndex - THREAD_CONTEXT_BEFORE_MATCH &&
+      index <= matchIndex + THREAD_CONTEXT_AFTER_MATCH,
+  );
+
+  if (inContextWindow && isSent) return 1;
+  if (inContextWindow) return 2 + distanceFromMatch;
+  if (isSent) return 100 + distanceFromMatch;
+
+  return null;
 }

@@ -1,71 +1,68 @@
-import type { Message } from "@microsoft/microsoft-graph-types";
+import type { Message, UploadSession } from "@microsoft/microsoft-graph-types";
 import type { OutlookClient } from "@/utils/outlook/client";
 import type { Attachment } from "nodemailer/lib/mailer";
-import type { SendEmailBody } from "@/utils/gmail/mail";
+import type { SendEmailBody, WithMailerAttachments } from "@/utils/types/mail";
 import type { ParsedMessage } from "@/utils/types";
 import type { EmailForAction } from "@/utils/ai/types";
 import { createOutlookReplyContent } from "@/utils/outlook/reply";
+import { textToHtmlParagraphs } from "@/utils/string";
 import { forwardEmailHtml, forwardEmailSubject } from "@/utils/gmail/forward";
-import { buildReplyAllRecipients } from "@/utils/email/reply-all";
-import { formatReplySubject } from "@/utils/email/subject";
-import { withOutlookRetry } from "@/utils/outlook/retry";
+import {
+  buildReplyAllRecipients,
+  mergeAndDedupeRecipients,
+} from "@/utils/email/reply-all";
+import {
+  withMicrosoftGraphRetry,
+  withMicrosoftGraphWriteRetry,
+} from "@/utils/outlook/retry";
 import { extractEmailAddress, extractNameFromEmail } from "@/utils/email";
+import { isOutlookItemNotFoundError, SafeError } from "@/utils/error";
 import { ensureEmailSendingEnabled } from "@/utils/mail";
+import { uploadResumableChunks } from "@/utils/outlook/upload-session";
 import type { Logger } from "@/utils/logger";
 
-interface OutlookMessageRequest {
-  subject: string;
-  body: {
-    contentType: string;
-    content: string;
-  };
-  toRecipients: { emailAddress: { address: string } }[];
-  ccRecipients?: { emailAddress: { address: string } }[];
-  bccRecipients?: { emailAddress: { address: string } }[];
-  replyTo?: { emailAddress: { address: string } }[];
-  conversationId?: string;
-  isDraft?: boolean;
-}
+type GraphRecipient = {
+  emailAddress: { address: string; name?: string };
+};
+type MailSendEmailBody = WithMailerAttachments<SendEmailBody>;
+
+const MAX_GRAPH_ATTACHMENT_SIZE_BYTES = 3 * 1024 * 1024;
+const MAX_GRAPH_UPLOAD_SESSION_SIZE_BYTES = 150 * 1024 * 1024;
+const GRAPH_UPLOAD_CHUNK_SIZE_BYTES = 320 * 1024;
+type SentEmailResult = Pick<Message, "id" | "conversationId">;
 
 export async function sendEmailWithHtml(
   client: OutlookClient,
-  body: SendEmailBody,
+  body: MailSendEmailBody,
   logger: Logger,
-) {
+): Promise<SentEmailResult> {
   ensureEmailSendingEnabled();
 
-  const message: OutlookMessageRequest = {
-    subject: body.subject,
-    body: {
-      contentType: "html",
-      content: body.messageHtml,
-    },
-    toRecipients: [{ emailAddress: { address: body.to } }],
-    ...(body.cc
-      ? { ccRecipients: [{ emailAddress: { address: body.cc } }] }
-      : {}),
-    ...(body.bcc
-      ? { bccRecipients: [{ emailAddress: { address: body.bcc } }] }
-      : {}),
-    ...(body.replyTo
-      ? { replyTo: [{ emailAddress: { address: body.replyTo } }] }
-      : {}),
-  };
+  const toRecipients = buildGraphRecipients(body.to);
+  if (!toRecipients?.length)
+    throw new SafeError("Recipient address is required");
 
-  if (body.replyToEmail?.threadId) {
-    message.conversationId = body.replyToEmail.threadId;
+  // For replies with a message ID, use createReply for proper threading
+  // Microsoft Graph's sendMail doesn't support In-Reply-To/References headers
+  if (body.replyToEmail?.messageId) {
+    return sendReplyUsingCreateReply(client, body, logger);
   }
 
-  const result: Message = await withOutlookRetry(
-    () => client.getClient().api("/me/messages").post(message),
-    logger,
-  );
-  return result;
+  if (body.replyToEmail?.forwardedMessageId) {
+    return sendForwardUsingCreateForward(
+      client,
+      body,
+      body.replyToEmail.forwardedMessageId,
+      logger,
+    );
+  }
+
+  return sendNewDraft(client, body, logger);
 }
 
 export async function sendEmailWithPlainText(
   client: OutlookClient,
-  body: Omit<SendEmailBody, "messageHtml"> & { messageText: string },
+  body: Omit<MailSendEmailBody, "messageHtml"> & { messageText: string },
   logger: Logger,
 ) {
   const messageHtml = convertTextToHtmlParagraphs(body.messageText);
@@ -77,41 +74,73 @@ export async function replyToEmail(
   message: EmailForAction,
   reply: string,
   logger: Logger,
+  options?: {
+    replyTo?: string;
+    from?: string;
+    attachments?: Attachment[];
+  },
 ) {
+  ensureEmailSendingEnabled();
+
   const { html } = createOutlookReplyContent({
     textContent: reply,
     message,
   });
 
-  // Only replying to the original sender
-  const replyMessage = {
-    subject: formatReplySubject(message.headers.subject),
-    body: {
-      contentType: "html",
-      content: html,
-    },
-    toRecipients: [
-      {
-        emailAddress: {
-          address: message.headers["reply-to"] || message.headers.from,
-        },
-      },
-    ],
-    conversationId: message.threadId,
-  };
-
-  ensureEmailSendingEnabled();
-
-  // Send the email immediately using the sendMail endpoint
-  const result = await withOutlookRetry(
+  // Use createReply to create a properly threaded draft
+  // Microsoft Graph's sendMail doesn't support setting In-Reply-To/References headers
+  // Only createReply/createReplyAll endpoints ensure proper threading
+  const replyDraft: Message = await withMicrosoftGraphWriteRetry(
     () =>
-      client.getClient().api("/me/sendMail").post({
-        message: replyMessage,
-        saveToSentItems: true,
-      }),
+      client.getClient().api(`/me/messages/${message.id}/createReply`).post({}),
     logger,
   );
-  return result;
+
+  const fromField = buildGraphFromField(
+    options?.from,
+    replyDraft.from?.emailAddress?.address,
+  );
+
+  // Update the draft with our content
+  await withMicrosoftGraphWriteRetry(
+    () =>
+      client
+        .getClient()
+        .api(`/me/messages/${replyDraft.id}`)
+        .patch({
+          body: {
+            contentType: "html",
+            content: html,
+          },
+          ...(fromField ? { from: fromField } : {}),
+          ...(options?.replyTo
+            ? {
+                replyTo: [{ emailAddress: { address: options.replyTo } }],
+              }
+            : {}),
+        }),
+    logger,
+  );
+
+  if (options?.attachments?.length) {
+    await addAttachmentsToDraft({
+      client,
+      draftId: replyDraft.id || "",
+      attachments: options.attachments,
+      logger,
+    });
+  }
+
+  // Send the draft
+  await withMicrosoftGraphWriteRetry(
+    () => client.getClient().api(`/me/messages/${replyDraft.id}/send`).post({}),
+    logger,
+  );
+
+  return {
+    id: replyDraft.id,
+    conversationId: replyDraft.conversationId,
+  };
 }
 
 export async function forwardEmail(
@@ -122,6 +151,7 @@ export async function forwardEmail(
     cc?: string;
     bcc?: string;
     content?: string;
+    from?: string;
   },
   logger: Logger,
 ) {
@@ -129,8 +159,13 @@ export async function forwardEmail(
 
   if (!options.to.trim()) throw new Error("Recipient address is required");
 
+  const toRecipients = buildGraphRecipients(options.to);
+  if (!toRecipients?.length) throw new Error("Recipient address is required");
+  const ccRecipients = buildGraphRecipients(options.cc);
+  const bccRecipients = buildGraphRecipients(options.bcc);
+
   // Get the original message
-  const originalMessage: Message = await withOutlookRetry(
+  const originalMessage: Message = await withMicrosoftGraphRetry(
     () => client.getClient().api(`/me/messages/${options.messageId}`).get(),
     logger,
   );
@@ -155,31 +190,52 @@ export async function forwardEmail(
     conversationIndex: originalMessage.conversationId || "",
   };
 
-  const forwardMessage: OutlookMessageRequest = {
-    toRecipients: [{ emailAddress: { address: options.to } }],
-    ...(options.cc
-      ? { ccRecipients: [{ emailAddress: { address: options.cc } }] }
-      : {}),
-    ...(options.bcc
-      ? { bccRecipients: [{ emailAddress: { address: options.bcc } }] }
-      : {}),
-    subject: forwardEmailSubject(message.headers.subject),
-    body: {
-      contentType: "html",
-      content: forwardEmailHtml({ content: options.content ?? "", message }),
-    },
-  };
-
-  const result = await withOutlookRetry(
+  const forwardDraft: Message = await withMicrosoftGraphWriteRetry(
     () =>
       client
         .getClient()
-        .api(`/me/messages/${options.messageId}/forward`)
-        .post({ message: forwardMessage }),
+        .api(`/me/messages/${options.messageId}/createForward`)
+        .post({}),
     logger,
   );
 
-  return result;
+  const fromField = buildGraphFromField(
+    options.from,
+    forwardDraft.from?.emailAddress?.address,
+  );
+
+  await withMicrosoftGraphWriteRetry(
+    () =>
+      client
+        .getClient()
+        .api(`/me/messages/${forwardDraft.id}`)
+        .patch({
+          toRecipients,
+          ...(ccRecipients ? { ccRecipients } : {}),
+          ...(bccRecipients ? { bccRecipients } : {}),
+          ...(fromField ? { from: fromField } : {}),
+          subject: forwardEmailSubject(message.headers.subject),
+          body: {
+            contentType: "html",
+            content: forwardEmailHtml({
+              content: options.content ?? "",
+              message,
+            }),
+          },
+        }),
+    logger,
+  );
+
+  await withMicrosoftGraphWriteRetry(
+    () =>
+      client.getClient().api(`/me/messages/${forwardDraft.id}/send`).post({}),
+    logger,
+  );
+
+  return {
+    id: forwardDraft.id,
+    conversationId: forwardDraft.conversationId,
+  };
 }
 
 export async function draftEmail(
@@ -189,9 +245,11 @@ export async function draftEmail(
     to?: string;
     subject?: string;
     content: string;
+    cc?: string;
+    bcc?: string;
     attachments?: Attachment[];
   },
-  userEmail: string,
+  userEmails: string | string[],
   logger: Logger,
 ) {
   const { html } = createOutlookReplyContent({
@@ -202,19 +260,44 @@ export async function draftEmail(
   const recipients = buildReplyAllRecipients(
     originalEmail.headers,
     args.to,
-    userEmail,
+    userEmails,
   );
 
-  // Use raw recipients if available (Outlook), otherwise parse from string (Gmail)
-  const toRecipient = originalEmail.rawRecipients?.from || {
+  const overrideToRecipient = args.to
+    ? {
+        emailAddress: {
+          address: extractEmailAddress(recipients.to),
+          name: extractNameFromEmail(recipients.to),
+        },
+      }
+    : undefined;
+
+  const fallbackToRecipient = {
     emailAddress: {
       address: extractEmailAddress(recipients.to),
       name: extractNameFromEmail(recipients.to),
     },
   };
 
+  const toRecipient =
+    overrideToRecipient ??
+    originalEmail.rawRecipients?.from ??
+    fallbackToRecipient;
+
+  // Build CC list from reply-all and args
+  const ccAddresses = mergeAndDedupeRecipients(recipients.cc, args.cc);
+
   // Convert CC addresses to Outlook format
-  const ccRecipients = recipients.cc.map((addr) => ({
+  const ccRecipients = ccAddresses.map((addr) => ({
+    emailAddress: {
+      address: extractEmailAddress(addr),
+      name: extractNameFromEmail(addr),
+    },
+  }));
+
+  // Handle BCC if provided
+  const bccAddresses = mergeAndDedupeRecipients([], args.bcc);
+  const bccRecipients = bccAddresses.map((addr) => ({
     emailAddress: {
       address: extractEmailAddress(addr),
       name: extractNameFromEmail(addr),
@@ -223,7 +306,7 @@ export async function draftEmail(
 
   // Get the original message's isRead status before creating the draft
   // Microsoft Graph's createReplyAll automatically marks the original as read
-  const originalMessage: Message = await withOutlookRetry(
+  const originalMessage: Message = await withMicrosoftGraphRetry(
     () =>
       client
         .getClient()
@@ -236,7 +319,7 @@ export async function draftEmail(
 
   // Use createReplyAll endpoint to create a proper reply draft
   // This ensures the draft is linked to the original message as a reply all
-  const replyDraft: Message = await withOutlookRetry(
+  const replyDraft: Message = await withMicrosoftGraphWriteRetry(
     () =>
       client
         .getClient()
@@ -254,7 +337,7 @@ export async function draftEmail(
     updateRequest.header("If-Match", etag);
   }
 
-  const updatedDraft: Message = await withOutlookRetry(
+  const updatedDraft: Message = await withMicrosoftGraphWriteRetry(
     () =>
       updateRequest.patch({
         subject: args.subject || originalEmail.headers.subject,
@@ -263,15 +346,25 @@ export async function draftEmail(
           content: html,
         },
         toRecipients: [toRecipient],
-        ...(ccRecipients.length > 0 ? { ccRecipients } : {}),
+        ccRecipients,
+        bccRecipients,
       }),
     logger,
   );
 
+  if (args.attachments?.length) {
+    await addAttachmentsToDraft({
+      client,
+      draftId: replyDraft.id || updatedDraft.id || "",
+      attachments: args.attachments,
+      logger,
+    });
+  }
+
   // Restore the original message's unread status if it was unread before
   // createReplyAll automatically marks the original message as read
   if (wasUnread) {
-    await withOutlookRetry(
+    await withMicrosoftGraphWriteRetry(
       () =>
         client
           .getClient()
@@ -289,15 +382,403 @@ export async function draftEmail(
 function convertTextToHtmlParagraphs(text?: string | null): string {
   if (!text) return "";
 
-  // Split the text into paragraphs based on newline characters
-  const paragraphs = text
-    .split("\n")
-    .filter((paragraph) => paragraph.trim() !== "");
+  return `<html><body>${textToHtmlParagraphs(text)}</body></html>`;
+}
 
-  // Wrap each paragraph with <p> tags and join them back together
-  const htmlContent = paragraphs
-    .map((paragraph) => `<p>${paragraph.trim()}</p>`)
-    .join("");
+async function sendReplyUsingCreateReply(
+  client: OutlookClient,
+  body: MailSendEmailBody,
+  logger: Logger,
+): Promise<SentEmailResult> {
+  const originalMessageId = body.replyToEmail!.messageId!;
 
-  return `<html><body>${htmlContent}</body></html>`;
+  // Use createReply to create a properly threaded draft
+  // Microsoft Graph's createReply automatically sets In-Reply-To and References headers
+  // based on the original message, ensuring proper threading across email providers
+  const replyDraft: Message = await withMicrosoftGraphWriteRetry(
+    () =>
+      client
+        .getClient()
+        .api(`/me/messages/${originalMessageId}/createReply`)
+        .post({}),
+    logger,
+  );
+
+  const toRecipients = buildGraphRecipients(body.to);
+  const ccRecipients = buildGraphRecipients(body.cc);
+  const bccRecipients = buildGraphRecipients(body.bcc);
+
+  // Update the draft with our content and recipients
+  // Note: We cannot set In-Reply-To/References headers via internetMessageHeaders
+  // as Microsoft Graph only allows custom headers (starting with x-) there.
+  // The createReply endpoint handles standard threading headers automatically.
+  await withMicrosoftGraphWriteRetry(
+    () =>
+      client
+        .getClient()
+        .api(`/me/messages/${replyDraft.id}`)
+        .patch({
+          subject: body.subject,
+          body: {
+            contentType: "html",
+            content: body.messageHtml,
+          },
+          ...(toRecipients ? { toRecipients } : {}),
+          ...(ccRecipients ? { ccRecipients } : {}),
+          ...(bccRecipients ? { bccRecipients } : {}),
+        }),
+    logger,
+  );
+
+  if (body.attachments?.length) {
+    await addAttachmentsToDraft({
+      client,
+      draftId: replyDraft.id || "",
+      attachments: body.attachments,
+      logger,
+    });
+  }
+
+  // Send the draft
+  await withMicrosoftGraphWriteRetry(
+    () => client.getClient().api(`/me/messages/${replyDraft.id}/send`).post({}),
+    logger,
+  );
+
+  return {
+    id: replyDraft.id,
+    conversationId: replyDraft.conversationId,
+  };
+}
+
+/**
+ * Graph treats `conversationId` as read-only, so a draft posted to
+ * `/me/messages` always opens a new conversation. Drafting from the forwarded
+ * message is the only way to keep a forward in the thread it came from, and it
+ * carries the original attachments across as well.
+ */
+async function sendForwardUsingCreateForward(
+  client: OutlookClient,
+  body: MailSendEmailBody,
+  forwardedMessageId: string,
+  logger: Logger,
+): Promise<SentEmailResult> {
+  const forwardDraft = await createForwardDraft(
+    client,
+    forwardedMessageId,
+    logger,
+  );
+  const toRecipients = buildGraphRecipients(body.to);
+  const ccRecipients = buildGraphRecipients(body.cc);
+  const bccRecipients = buildGraphRecipients(body.bcc);
+
+  await withMicrosoftGraphWriteRetry(
+    () =>
+      client
+        .getClient()
+        .api(`/me/messages/${forwardDraft.id}`)
+        .patch({
+          subject: body.subject,
+          body: {
+            contentType: "html",
+            content: body.messageHtml,
+          },
+          ...(toRecipients ? { toRecipients } : {}),
+          ...(ccRecipients ? { ccRecipients } : {}),
+          ...(bccRecipients ? { bccRecipients } : {}),
+        }),
+    logger,
+  );
+
+  if (body.attachments?.length) {
+    await addAttachmentsToDraft({
+      client,
+      draftId: forwardDraft.id || "",
+      attachments: body.attachments,
+      logger,
+    });
+  }
+
+  await withMicrosoftGraphWriteRetry(
+    () =>
+      client.getClient().api(`/me/messages/${forwardDraft.id}/send`).post({}),
+    logger,
+  );
+
+  return {
+    id: forwardDraft.id,
+    conversationId: forwardDraft.conversationId,
+  };
+}
+
+async function createForwardDraft(
+  client: OutlookClient,
+  forwardedMessageId: string,
+  logger: Logger,
+): Promise<Message> {
+  try {
+    return await withMicrosoftGraphWriteRetry(
+      () =>
+        client
+          .getClient()
+          .api(`/me/messages/${forwardedMessageId}/createForward`)
+          .post({}),
+      logger,
+    );
+  } catch (error) {
+    if (!isOutlookItemNotFoundError(error)) throw error;
+    throw new SafeError(
+      "Reload the original message before forwarding. Its attachments could not be verified.",
+    );
+  }
+}
+
+/**
+ * Creating the draft before sending returns the conversation id, which
+ * `sendMail` withholds behind its empty 202.
+ */
+async function sendNewDraft(
+  client: OutlookClient,
+  body: MailSendEmailBody,
+  logger: Logger,
+): Promise<SentEmailResult> {
+  const toRecipients = buildGraphRecipients(body.to);
+  const ccRecipients = buildGraphRecipients(body.cc);
+  const bccRecipients = buildGraphRecipients(body.bcc);
+  const replyToRecipients = buildGraphRecipients(body.replyTo);
+
+  const draft: Message = await withMicrosoftGraphWriteRetry(
+    () =>
+      client
+        .getClient()
+        .api("/me/messages")
+        .post({
+          subject: body.subject,
+          body: {
+            contentType: "html",
+            content: body.messageHtml,
+          },
+          toRecipients,
+          ...(ccRecipients ? { ccRecipients } : {}),
+          ...(bccRecipients ? { bccRecipients } : {}),
+          ...(replyToRecipients ? { replyTo: replyToRecipients } : {}),
+        }),
+    logger,
+  );
+
+  if (body.attachments?.length) {
+    await addAttachmentsToDraft({
+      client,
+      draftId: draft.id || "",
+      attachments: body.attachments,
+      logger,
+    });
+  }
+
+  await withMicrosoftGraphWriteRetry(
+    () => client.getClient().api(`/me/messages/${draft.id}/send`).post({}),
+    logger,
+  );
+
+  return {
+    id: draft.id,
+    conversationId: draft.conversationId,
+  };
+}
+
+function buildGraphRecipients(
+  recipientList?: string,
+): GraphRecipient[] | undefined {
+  if (!recipientList) return;
+
+  const parts = recipientList.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
+  const recipients = parts
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part): GraphRecipient | null => {
+      const address = extractEmailAddress(part);
+      if (!address) return null;
+
+      const name = extractNameFromEmail(part).trim();
+      return {
+        emailAddress: {
+          address,
+          ...(name && name !== address ? { name } : {}),
+        },
+      };
+    })
+    .filter((recipient): recipient is GraphRecipient => recipient !== null);
+
+  if (!recipients.length) return;
+
+  const seen = new Set<string>();
+  return recipients.filter((recipient) => {
+    const key = recipient.emailAddress.address.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildGraphFromField(
+  formattedFrom?: string,
+  fallbackAddress?: string | null,
+) {
+  if (!formattedFrom) return;
+
+  const address = extractEmailAddress(formattedFrom) || fallbackAddress;
+  if (!address) return;
+
+  const name = extractNameFromEmail(formattedFrom).trim();
+
+  return {
+    emailAddress: {
+      address,
+      ...(name && name !== address ? { name } : {}),
+    },
+  };
+}
+
+export async function addAttachmentsToDraft({
+  client,
+  draftId,
+  attachments,
+  logger,
+}: {
+  client: OutlookClient;
+  draftId: string;
+  attachments: Attachment[];
+  logger: Logger;
+}) {
+  if (!draftId) return;
+
+  for (const attachment of attachments) {
+    const result = getAttachmentContent(attachment.content);
+    if (!result) continue;
+    const { buffer, base64 } = result;
+    if (buffer.length <= MAX_GRAPH_ATTACHMENT_SIZE_BYTES) {
+      await withMicrosoftGraphWriteRetry(
+        () =>
+          client
+            .getClient()
+            .api(`/me/messages/${draftId}/attachments`)
+            .post({
+              "@odata.type": "#microsoft.graph.fileAttachment",
+              name: attachment.filename || "attachment.pdf",
+              contentType: attachment.contentType || "application/octet-stream",
+              contentBytes: base64 ?? buffer.toString("base64"),
+              ...(attachment.cid
+                ? { contentId: attachment.cid, isInline: true }
+                : {}),
+            }),
+        logger,
+      );
+      continue;
+    }
+
+    assertGraphAttachmentSizeSupported({ attachment, content: buffer });
+    await uploadAttachmentViaSession({
+      client,
+      draftId,
+      attachment,
+      content: buffer,
+      logger,
+    });
+  }
+}
+
+function getAttachmentContent(
+  content: Attachment["content"],
+): { buffer: Buffer; base64: string | null } | null {
+  if (Buffer.isBuffer(content)) return { buffer: content, base64: null };
+  if (typeof content === "string") return decodeAttachmentString(content);
+  return null;
+}
+
+function assertGraphAttachmentSizeSupported({
+  attachment,
+  content,
+}: {
+  attachment: Attachment;
+  content: Buffer;
+}) {
+  if (content.length <= MAX_GRAPH_UPLOAD_SESSION_SIZE_BYTES) return;
+
+  throw new Error(
+    `Outlook attachments larger than 150 MB are not supported: ${
+      attachment.filename || "attachment"
+    }`,
+  );
+}
+
+function decodeAttachmentString(content: string): {
+  buffer: Buffer;
+  base64: string | null;
+} {
+  const normalized = content.trim().replace(/\s+/g, "");
+  if (looksLikeBase64(normalized)) {
+    const decoded = Buffer.from(normalized, "base64");
+    if (isCanonicalBase64Match(normalized, decoded)) {
+      return { buffer: decoded, base64: normalized };
+    }
+  }
+
+  return { buffer: Buffer.from(content, "utf8"), base64: null };
+}
+
+function looksLikeBase64(value: string) {
+  return value.length > 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+}
+
+function isCanonicalBase64Match(value: string, decoded: Buffer) {
+  return (
+    decoded.toString("base64").replace(/=+$/u, "") === value.replace(/=+$/u, "")
+  );
+}
+
+async function uploadAttachmentViaSession({
+  client,
+  draftId,
+  attachment,
+  content,
+  logger,
+}: {
+  client: OutlookClient;
+  draftId: string;
+  attachment: Attachment;
+  content: Buffer;
+  logger: Logger;
+}) {
+  const uploadSession = await withMicrosoftGraphWriteRetry(
+    () =>
+      client
+        .getClient()
+        .api(`/me/messages/${draftId}/attachments/createUploadSession`)
+        .post({
+          AttachmentItem: {
+            attachmentType: "file",
+            name: attachment.filename || "attachment.pdf",
+            contentType: attachment.contentType || "application/octet-stream",
+            size: content.length,
+            ...(attachment.cid
+              ? { contentId: attachment.cid, isInline: true }
+              : {}),
+          },
+        }),
+    logger,
+  );
+
+  const uploadUrl = (uploadSession as UploadSession).uploadUrl;
+  if (!uploadUrl) {
+    throw new Error("Failed to create Outlook attachment upload session");
+  }
+
+  await uploadResumableChunks({
+    uploadUrl,
+    content,
+    chunkSizeBytes: GRAPH_UPLOAD_CHUNK_SIZE_BYTES,
+    logger,
+    action: "upload Outlook attachment chunk",
+    statusAction: "fetch Outlook upload session status",
+  });
 }

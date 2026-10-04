@@ -1,55 +1,40 @@
 import type { OutlookClient } from "@/utils/outlook/client";
 import type { Logger } from "@/utils/logger";
 import { publishArchive, type TinybirdEmailAction } from "@inboxzero/tinybird";
-import { WELL_KNOWN_FOLDERS } from "./message";
-import { extractErrorInfo, withOutlookRetry } from "@/utils/outlook/retry";
+import { WELL_KNOWN_FOLDERS } from "./constants";
+import {
+  extractErrorInfo,
+  withMicrosoftGraphRetry,
+  withMicrosoftGraphWriteRetry,
+} from "@/utils/outlook/retry";
+import {
+  processThreadMessagesFallback,
+  runThreadMessageMutation,
+} from "@/utils/outlook/thread-helpers";
 import { inboxZeroLabels, type InboxZeroLabel } from "@/utils/label";
+import {
+  normalizeOutlookCategoryName,
+  sanitizeOutlookCategoryName,
+} from "@/utils/outlook/label-validation";
+import { findLabelByName } from "@/utils/label/find-label-by-name";
+import { escapeODataString } from "@/utils/outlook/odata-escape";
+import { getFolderIds } from "@/utils/outlook/message";
+import { isDefined } from "@/utils/types";
 import type {
   OutlookCategory,
   Message,
 } from "@microsoft/microsoft-graph-types";
-
-// Outlook doesn't have system labels like Gmail, but we map common categories
-// Using same format as Gmail for consistency
-export const OutlookLabel = {
-  INBOX: "INBOX",
-  SENT: "SENT",
-  UNREAD: "UNREAD",
-  STARRED: "STARRED",
-  IMPORTANT: "IMPORTANT",
-  SPAM: "SPAM",
-  TRASH: "TRASH",
-  DRAFT: "DRAFT",
-  ARCHIVE: "ARCHIVE",
-} as const;
+import {
+  OUTLOOK_CATEGORY_COLOR_IDS,
+  OUTLOOK_CATEGORY_COLOR_MAP,
+} from "@/utils/outlook/category-colors";
 
 // Outlook supported colors
-export const OUTLOOK_COLORS: Array<string> = [
-  "preset0", // Red
-  "preset1", // Orange
-  "preset2", // Yellow
-  "preset3", // Green
-  "preset4", // Teal
-  "preset5", // Blue
-  "preset6", // Purple
-  "preset7", // Pink
-  "preset8", // Brown
-  "preset9", // Gray
-] as const;
-
-// Map Outlook preset colors to single color values
-export const OUTLOOK_COLOR_MAP = {
-  preset0: "#E74C3C", // Red
-  preset1: "#E67E22", // Orange
-  preset2: "#F1C40F", // Yellow
-  preset3: "#2ECC71", // Green
-  preset4: "#1ABC9C", // Teal
-  preset5: "#3498DB", // Blue
-  preset6: "#9B59B6", // Purple
-  preset7: "#E84393", // Pink
-  preset8: "#795548", // Brown
-  preset9: "#95A5A6", // Gray
-} as const;
+export const OUTLOOK_COLORS: Array<string> = OUTLOOK_CATEGORY_COLOR_IDS.slice(
+  0,
+  10,
+);
+export const OUTLOOK_COLOR_MAP = OUTLOOK_CATEGORY_COLOR_MAP;
 
 export async function getLabels(client: OutlookClient) {
   const response: { value: OutlookCategory[] } = await client
@@ -85,6 +70,9 @@ export async function createLabel({
   color?: string;
   logger: Logger;
 }) {
+  const sanitizedName = sanitizeOutlookCategoryName(name);
+  if (!sanitizedName) throw new Error("Label name cannot be empty");
+
   try {
     // Use a random preset color if none provided or if the provided color is not supported
     const outlookColor =
@@ -92,41 +80,36 @@ export async function createLabel({
         ? color
         : OUTLOOK_COLORS[Math.floor(Math.random() * OUTLOOK_COLORS.length)];
 
-    const response: OutlookCategory = await withOutlookRetry(
+    const response: OutlookCategory = await withMicrosoftGraphWriteRetry(
       () =>
         client.getClient().api("/me/outlook/masterCategories").post({
-          displayName: name,
+          displayName: sanitizedName,
           color: outlookColor,
         }),
       logger,
     );
+
+    client.invalidateCategoryMapCache();
+
     return response;
   } catch (error) {
     let { errorMessage } = extractErrorInfo(error);
-    if (!errorMessage)
-      errorMessage = (error as any)?.message || "Unknown error";
+    if (!errorMessage) {
+      errorMessage = error instanceof Error ? error.message : "Unknown error";
+    }
     if (
       errorMessage.includes("already exists") ||
       errorMessage.includes("conflict with the current state")
     ) {
-      logger.warn("Label already exists", { name });
-      const label = await getLabel({ client, name });
+      logger.warn("Label already exists", { name: sanitizedName });
+      const label = await getLabel({ client, name: sanitizedName });
       if (label) return label;
-      throw new Error(`Label conflict but not found: ${name}`);
+      throw new Error(`Label conflict but not found: ${sanitizedName}`);
     }
     throw new Error(
-      `Failed to create Outlook category "${name}": ${errorMessage}`,
+      `Failed to create Outlook category "${sanitizedName}": ${errorMessage}`,
     );
   }
-}
-
-function normalizeLabel(name: string) {
-  return name
-    .toLowerCase()
-    .replace(/[-_.]/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/^\/+|\/+$/g, "")
-    .trim();
 }
 
 export async function getLabel(options: {
@@ -135,13 +118,15 @@ export async function getLabel(options: {
 }) {
   const { client, name } = options;
   const labels = await getLabels(client);
-  const normalizedSearch = normalizeLabel(name);
+  const normalizedSearch = normalizeOutlookCategoryName(name);
+  if (!normalizedSearch) return null;
 
-  return labels?.find(
-    (label) =>
-      label.displayName &&
-      normalizeLabel(label.displayName) === normalizedSearch,
-  );
+  return findLabelByName({
+    labels,
+    name,
+    getLabelName: (label) => label.displayName,
+    normalize: normalizeOutlookCategoryName,
+  });
 }
 
 export async function getOrCreateLabel({
@@ -153,10 +138,16 @@ export async function getOrCreateLabel({
   name: string;
   logger: Logger;
 }) {
-  if (!name?.trim()) throw new Error("Label name cannot be empty");
-  const label = await getLabel({ client, name });
+  const sanitizedName = sanitizeOutlookCategoryName(name);
+  if (!sanitizedName) throw new Error("Label name cannot be empty");
+
+  const label = await getLabel({ client, name: sanitizedName });
   if (label) return label;
-  const createdLabel = await createLabel({ client, name, logger });
+  const createdLabel = await createLabel({
+    client,
+    name: sanitizedName,
+    logger,
+  });
   return createdLabel;
 }
 
@@ -171,25 +162,51 @@ export async function getOrCreateLabels({
 }): Promise<OutlookCategory[]> {
   if (!names.length) return [];
 
-  const emptyNames = names.filter((name) => !name?.trim());
+  const entries = names.map((name) => ({
+    rawName: name,
+    sanitizedName: sanitizeOutlookCategoryName(name),
+    normalizedName: normalizeOutlookCategoryName(name),
+  }));
+
+  const emptyNames = entries.filter((entry) => !entry.sanitizedName);
   if (emptyNames.length) throw new Error("Label names cannot be empty");
 
-  const existingLabels = await getLabels(client);
-  const normalizedNames = names.map(normalizeLabel);
+  assertNoNormalizedInputCollisions(entries);
 
-  const labelMap = new Map<string, OutlookCategory>();
+  const existingLabels = await getLabels(client);
+  const labelMap = new Map<string, OutlookCategory[]>();
   existingLabels.forEach((label) => {
     if (label.displayName) {
-      labelMap.set(normalizeLabel(label.displayName), label);
+      const normalizedLabelName = normalizeOutlookCategoryName(
+        label.displayName,
+      );
+      const labelsForName = labelMap.get(normalizedLabelName) ?? [];
+      labelsForName.push(label);
+      labelMap.set(normalizedLabelName, labelsForName);
     }
   });
 
-  const results = await Promise.all(
-    normalizedNames.map(async (normalizedName, index) => {
-      const existingLabel = labelMap.get(normalizedName);
-      if (existingLabel) return existingLabel;
+  const createLabelMap = new Map<string, Promise<OutlookCategory>>();
 
-      return createLabel({ client, name: names[index], logger });
+  const results = await Promise.all(
+    entries.map(async ({ rawName, sanitizedName, normalizedName }) => {
+      const existingLabelsForName = labelMap.get(normalizedName);
+      if (existingLabelsForName?.length === 1) return existingLabelsForName[0];
+      if (existingLabelsForName?.length)
+        throw new Error(
+          `Ambiguous Outlook category match for "${rawName}". Please use a unique category name.`,
+        );
+
+      const pendingCreate = createLabelMap.get(normalizedName);
+      if (pendingCreate) return pendingCreate;
+
+      const createPromise = createLabel({
+        client,
+        name: sanitizedName,
+        logger,
+      });
+      createLabelMap.set(normalizedName, createPromise);
+      return createPromise;
     }),
   );
 
@@ -208,7 +225,7 @@ export async function labelMessage({
   categories: string[];
   logger: Logger;
 }) {
-  return withOutlookRetry(
+  return withMicrosoftGraphWriteRetry(
     () =>
       client.getClient().api(`/me/messages/${messageId}`).patch({
         categories,
@@ -237,11 +254,16 @@ export async function labelThread({
     .filter(`conversationId eq '${escapedThreadId}'`)
     .get();
 
-  await Promise.all(
-    messages.value.map((message) =>
-      labelMessage({ client, messageId: message.id!, categories, logger }),
-    ),
-  );
+  await runThreadMessageMutation({
+    messageIds: messages.value
+      .map((message) => message.id)
+      .filter((messageId): messageId is string => Boolean(messageId)),
+    threadId,
+    logger,
+    messageHandler: (messageId) =>
+      labelMessage({ client, messageId, categories, logger }),
+    failureMessage: "Failed to label message in thread",
+  });
 }
 
 // Doesn't use pagination. But this function not really used anyway. Can add in the future of needed.
@@ -271,37 +293,38 @@ export async function removeThreadLabel({
     .get();
 
   // Remove the category from each message
-  await Promise.all(
-    messages.value.map(
-      async (message: { id: string; categories?: string[] }) => {
-        if (!message.categories || !message.categories.includes(categoryName)) {
-          return; // Category not present, nothing to remove
-        }
+  const messagesWithCategory: Array<{ id: string; categories?: string[] }> =
+    messages.value.filter((message: { id: string; categories?: string[] }) =>
+      message.categories?.includes(categoryName),
+    );
 
-        const updatedCategories = message.categories.filter(
-          (cat) => cat !== categoryName,
-        );
-
-        try {
-          await withOutlookRetry(
-            () =>
-              client
-                .getClient()
-                .api(`/me/messages/${message.id}`)
-                .patch({ categories: updatedCategories }),
-            logger,
-          );
-        } catch (error) {
-          logger.warn("Failed to remove category from message", {
-            messageId: message.id,
-            threadId,
-            categoryName,
-            error,
-          });
-        }
-      },
+  await runThreadMessageMutation({
+    messageIds: messagesWithCategory.map(
+      (message: { id: string }) => message.id,
     ),
-  );
+    threadId,
+    logger,
+    messageHandler: async (messageId) => {
+      const message = messagesWithCategory.find(
+        (item) => item.id === messageId,
+      );
+      if (!message?.categories) return;
+
+      const updatedCategories = message.categories.filter(
+        (cat) => cat !== categoryName,
+      );
+
+      await withMicrosoftGraphWriteRetry(
+        () =>
+          client.getClient().api(`/me/messages/${messageId}`).patch({
+            categories: updatedCategories,
+          }),
+        logger,
+      );
+    },
+    failureMessage: "Failed to remove category from message",
+    continueOnError: true,
+  });
 }
 
 export async function archiveThread({
@@ -346,164 +369,222 @@ export async function archiveThread({
     }
   }
 
+  // In Outlook, archiving is moving to a folder
+  // We need to move each message in the thread individually
+  const escapedThreadId = threadId.replace(/'/g, "''");
+  let messages: { value: Array<{ id: string }> };
   try {
-    // In Outlook, archiving is moving to a folder
-    // We need to move each message in the thread individually
-    const escapedThreadId = threadId.replace(/'/g, "''");
-    const messages = await client
+    messages = await client
       .getClient()
       .api("/me/messages")
       .filter(`conversationId eq '${escapedThreadId}'`) // Escape single quotes in threadId for the filter
       .get();
-
-    const archivePromise = Promise.all(
-      messages.value.map(async (message: { id: string }) => {
-        try {
-          return await withOutlookRetry(
-            () =>
-              client.getClient().api(`/me/messages/${message.id}/move`).post({
-                destinationId: folderId,
-              }),
-            logger,
-          );
-        } catch (error) {
-          logger.warn("Failed to move message to folder", {
-            folderId,
-            messageId: message.id,
-            threadId,
-            error,
-          });
-          return null;
-        }
-      }),
-    );
-
-    const publishPromise = publishArchive({
-      ownerEmail,
-      threadId,
-      actionSource,
-      timestamp: Date.now(),
-    });
-
-    const [archiveResult, publishResult] = await Promise.allSettled([
-      archivePromise,
-      publishPromise,
-    ]);
-
-    // Handle publish errors as non-fatal (just log)
-    if (publishResult.status === "rejected") {
-      logger.error("Failed to publish action to move thread to folder", {
-        folderId,
-        threadId,
-        error: publishResult.reason,
-      });
-    }
-
-    // Handle archive errors
-    if (archiveResult.status === "rejected") {
-      const error = archiveResult.reason;
-      if (error.message?.includes("Requested entity was not found")) {
-        logger.warn("Thread not found", { threadId, userEmail: ownerEmail });
-        return { status: 404, message: "Thread not found" };
-      }
-      logger.error("Failed to move thread to folder", {
-        folderId,
-        threadId,
-        error,
-      });
-      throw error;
-    }
-
-    return { status: 200 };
   } catch (error) {
-    // If the filter fails, try a different approach
-    logger.warn("Filter failed, trying alternative approach", {
+    return archiveThreadWithFallback({
+      client,
+      threadId,
+      ownerEmail,
+      actionSource,
+      folderId,
+      logger,
+      filterError: error,
+    });
+  }
+
+  const archivePromise = runThreadMessageMutation({
+    messageIds: messages.value.map((message) => message.id),
+    threadId,
+    logger,
+    messageHandler: (messageId) =>
+      withMicrosoftGraphWriteRetry(
+        () =>
+          client.getClient().api(`/me/messages/${messageId}/move`).post({
+            destinationId: folderId,
+          }),
+        logger,
+      ),
+    failureMessage: "Failed to move message to folder",
+    continueOnError: true,
+  });
+
+  const publishPromise = publishArchive({
+    ownerEmail,
+    threadId,
+    actionSource,
+    timestamp: Date.now(),
+  });
+
+  const [archiveResult, publishResult] = await Promise.allSettled([
+    archivePromise,
+    publishPromise,
+  ]);
+
+  // Handle publish errors as non-fatal (just log)
+  if (publishResult.status === "rejected") {
+    logger.error("Failed to publish action to move thread to folder", {
+      folderId,
+      threadId,
+      error: publishResult.reason,
+    });
+  }
+
+  // Handle archive errors
+  if (archiveResult.status === "rejected") {
+    const error = archiveResult.reason;
+    if (error.message?.includes("Requested entity was not found")) {
+      logger.warn("Thread not found", { threadId, userEmail: ownerEmail });
+      return { status: 404, message: "Thread not found" };
+    }
+    logger.error("Failed to move thread to folder", {
+      folderId,
       threadId,
       error,
     });
-
-    try {
-      // Try to get messages by conversationId using a different endpoint
-      const messages = await client
-        .getClient()
-        .api("/me/messages")
-        .select("id")
-        .get();
-
-      // Filter messages by conversationId manually
-      const threadMessages = messages.value.filter(
-        (message: { conversationId: string }) =>
-          message.conversationId === threadId,
-      );
-
-      if (threadMessages.length > 0) {
-        // Move each message in the thread to the destination folder
-        const movePromises = threadMessages.map(
-          async (message: { id: string }) => {
-            try {
-              return await withOutlookRetry(
-                () =>
-                  client
-                    .getClient()
-                    .api(`/me/messages/${message.id}/move`)
-                    .post({
-                      destinationId: folderId,
-                    }),
-                logger,
-              );
-            } catch (moveError) {
-              // Log the error but don't fail the entire operation
-              logger.warn("Failed to move message to folder", {
-                folderId,
-                messageId: message.id,
-                threadId,
-                error:
-                  moveError instanceof Error ? moveError.message : moveError,
-              });
-              return null;
-            }
-          },
-        );
-
-        await Promise.allSettled(movePromises);
-      } else {
-        // If no messages found, try treating threadId as a messageId
-        await withOutlookRetry(
-          () =>
-            client.getClient().api(`/me/messages/${threadId}/move`).post({
-              destinationId: folderId,
-            }),
-          logger,
-        );
-      }
-
-      // Publish the archive action
-      try {
-        await publishArchive({
-          ownerEmail,
-          threadId,
-          actionSource,
-          timestamp: Date.now(),
-        });
-      } catch (publishError) {
-        logger.error("Failed to publish action to move thread to folder", {
-          folderId,
-          email: ownerEmail,
-          threadId,
-          error: publishError,
-        });
-      }
-
-      return { status: 200 };
-    } catch (directError) {
-      logger.error("Failed to move thread to folder", {
-        folderId,
-        threadId,
-        error: directError,
-      });
-      throw directError;
-    }
+    throw error;
   }
+
+  return { status: 200 };
+}
+
+// Graph pages at 10 messages by default, which would silently leave the rest of
+// a long thread archived. Pages beyond this are followed via @odata.nextLink.
+const THREAD_MESSAGE_PAGE_SIZE = 100;
+const MAX_THREAD_MESSAGE_PAGES = 20;
+
+const SOURCE_FOLDER_LABELS = {
+  archive: "Archive",
+  deleteditems: "Deleted items",
+} as const;
+
+/**
+ * Moves a conversation's messages out of one well-known folder and into the
+ * inbox.
+ *
+ * Scoping to a source folder is what keeps the sent and deleted messages of the
+ * same conversation where they are. Outlook has no thread-level state to
+ * restore, so the source folder is the only signal for which messages the user
+ * actually meant.
+ */
+async function moveThreadFromFolderToInbox({
+  client,
+  threadId,
+  sourceFolder,
+  logger,
+}: {
+  client: OutlookClient;
+  threadId: string;
+  sourceFolder: keyof typeof SOURCE_FOLDER_LABELS;
+  logger: Logger;
+}) {
+  const folderIds = await getFolderIds(client, logger, {
+    includeDrafts: false,
+  });
+  const sourceFolderId = folderIds[WELL_KNOWN_FOLDERS[sourceFolder]];
+
+  // Without the source folder we can't tell the messages apart from the sent
+  // and deleted ones in the same conversation, and moving those into the inbox
+  // would be worse than failing.
+  if (!sourceFolderId) {
+    throw new Error(
+      `${SOURCE_FOLDER_LABELS[sourceFolder]} folder not found, cannot move thread to inbox`,
+    );
+  }
+
+  const messageIds: string[] = [];
+  let nextLink: string | undefined;
+
+  for (let page = 0; page < MAX_THREAD_MESSAGE_PAGES; page++) {
+    const response: {
+      value: { id?: string | null }[];
+      "@odata.nextLink"?: string;
+    } = await withMicrosoftGraphRetry(
+      () =>
+        nextLink
+          ? client.getClient().api(nextLink).get()
+          : client
+              .getClient()
+              .api("/me/messages")
+              .filter(
+                `conversationId eq '${escapeODataString(threadId)}' and parentFolderId eq '${escapeODataString(sourceFolderId)}'`,
+              )
+              .select("id")
+              .top(THREAD_MESSAGE_PAGE_SIZE)
+              .get(),
+      logger,
+    );
+
+    messageIds.push(
+      ...response.value.map((message) => message.id).filter(isDefined),
+    );
+
+    nextLink = response["@odata.nextLink"];
+    if (!nextLink) break;
+  }
+
+  if (nextLink) {
+    logger.warn("Stopped paging thread messages at the page limit", {
+      threadId,
+      sourceFolder,
+      messageCount: messageIds.length,
+    });
+  }
+
+  await runThreadMessageMutation({
+    messageIds,
+    threadId,
+    logger,
+    messageHandler: (messageId) =>
+      withMicrosoftGraphWriteRetry(
+        () =>
+          client
+            .getClient()
+            .api(`/me/messages/${messageId}/move`)
+            .post({ destinationId: WELL_KNOWN_FOLDERS.inbox }),
+        logger,
+      ),
+    failureMessage: "Failed to move message back to inbox",
+  });
+}
+
+export async function unarchiveThread({
+  client,
+  threadId,
+  logger,
+}: {
+  client: OutlookClient;
+  threadId: string;
+  logger: Logger;
+}) {
+  await moveThreadFromFolderToInbox({
+    client,
+    threadId,
+    sourceFolder: "archive",
+    logger,
+  });
+}
+
+/**
+ * Moves a trashed thread back to the inbox.
+ *
+ * Unlike Gmail's untrash this cannot restore the thread to wherever it was
+ * before, because Outlook does not record that. Messages deleted from a custom
+ * folder come back to the inbox.
+ */
+export async function untrashThread({
+  client,
+  threadId,
+  logger,
+}: {
+  client: OutlookClient;
+  threadId: string;
+  logger: Logger;
+}) {
+  await moveThreadFromFolderToInbox({
+    client,
+    threadId,
+    sourceFolder: "deleteditems",
+    logger,
+  });
 }
 
 export async function markReadThread({
@@ -528,17 +609,20 @@ export async function markReadThread({
       .get();
 
     // Update each message in the thread
-    await Promise.all(
-      messages.value.map((message: { id: string }) =>
-        withOutlookRetry(
+    await runThreadMessageMutation({
+      messageIds: messages.value.map((message: { id: string }) => message.id),
+      threadId,
+      logger,
+      messageHandler: (messageId) =>
+        withMicrosoftGraphWriteRetry(
           () =>
-            client.getClient().api(`/me/messages/${message.id}`).patch({
+            client.getClient().api(`/me/messages/${messageId}`).patch({
               isRead: read,
             }),
           logger,
         ),
-      ),
-    );
+      failureMessage: "Failed to mark message as read",
+    });
   } catch (error) {
     // If the filter fails, try a different approach
     logger.warn("Filter failed, trying alternative approach", {
@@ -547,42 +631,22 @@ export async function markReadThread({
     });
 
     try {
-      // Try to get messages by conversationId using a different endpoint
-      const messages = await client
-        .getClient()
-        .api("/me/messages")
-        .select("id")
-        .get();
-
-      // Filter messages by conversationId manually
-      const threadMessages = messages.value.filter(
-        (message: { conversationId: string }) =>
-          message.conversationId === threadId,
-      );
-
-      if (threadMessages.length > 0) {
-        // Update each message in the thread
-        await Promise.all(
-          threadMessages.map((message: { id: string }) =>
-            withOutlookRetry(
-              () =>
-                client.getClient().api(`/me/messages/${message.id}`).patch({
-                  isRead: read,
-                }),
-              logger,
-            ),
+      await processThreadMessagesFallback({
+        client,
+        threadId,
+        logger,
+        messageHandler: (messageId) =>
+          withMicrosoftGraphWriteRetry(
+            () =>
+              client
+                .getClient()
+                .api(`/me/messages/${messageId}`)
+                .patch({ isRead: read }),
+            logger,
           ),
-        );
-      } else {
-        // If no messages found, try treating threadId as a messageId
-        await withOutlookRetry(
-          () =>
-            client.getClient().api(`/me/messages/${threadId}`).patch({
-              isRead: read,
-            }),
-          logger,
-        );
-      }
+        noMessagesMessage:
+          "No messages found for conversationId, skipping mark read",
+      });
     } catch (directError) {
       logger.error("Failed to mark message as read", {
         threadId,
@@ -605,7 +669,7 @@ export async function markImportantMessage({
   logger: Logger;
 }) {
   // In Outlook, we use the "Important" flag
-  await withOutlookRetry(
+  await withMicrosoftGraphWriteRetry(
     () =>
       client
         .getClient()
@@ -613,6 +677,27 @@ export async function markImportantMessage({
         .patch({
           importance: important ? "high" : "normal",
         }),
+    logger,
+  );
+}
+
+export async function markStarredMessage({
+  starred = true,
+  client,
+  messageId,
+  logger,
+}: {
+  client: OutlookClient;
+  messageId: string;
+  logger: Logger;
+  starred?: boolean;
+}) {
+  await withMicrosoftGraphWriteRetry(
+    () =>
+      client
+        .getClient()
+        .api(`/me/messages/${messageId}`)
+        .patch({ flag: { flagStatus: starred ? "flagged" : "notFlagged" } }),
     logger,
   );
 }
@@ -636,4 +721,91 @@ export async function getOrCreateInboxZeroLabel({
   // Create label if it doesn't exist
   const createdLabel = await createLabel({ client, name, logger });
   return createdLabel;
+}
+
+function assertNoNormalizedInputCollisions(
+  entries: {
+    rawName: string;
+    normalizedName: string;
+  }[],
+) {
+  const normalizedMap = new Map<string, string>();
+
+  entries.forEach(({ rawName, normalizedName }) => {
+    const existingRawName = normalizedMap.get(normalizedName);
+    if (existingRawName && existingRawName !== rawName) {
+      throw new Error(
+        `Ambiguous Outlook category names "${existingRawName}" and "${rawName}" normalize to the same value. Please keep category names unique.`,
+      );
+    }
+
+    if (!existingRawName) normalizedMap.set(normalizedName, rawName);
+  });
+}
+
+async function archiveThreadWithFallback({
+  client,
+  threadId,
+  ownerEmail,
+  actionSource,
+  folderId,
+  logger,
+  filterError,
+}: {
+  client: OutlookClient;
+  threadId: string;
+  ownerEmail: string;
+  actionSource: TinybirdEmailAction["actionSource"];
+  folderId: string;
+  logger: Logger;
+  filterError: unknown;
+}) {
+  logger.warn("Filter failed, trying alternative approach", {
+    threadId,
+    error: filterError,
+  });
+
+  try {
+    await processThreadMessagesFallback({
+      client,
+      threadId,
+      logger,
+      messageHandler: (messageId) =>
+        withMicrosoftGraphWriteRetry(
+          () =>
+            client
+              .getClient()
+              .api(`/me/messages/${messageId}/move`)
+              .post({ destinationId: folderId }),
+          logger,
+        ),
+      noMessagesMessage:
+        "No messages found for conversationId, skipping folder move",
+    });
+
+    try {
+      await publishArchive({
+        ownerEmail,
+        threadId,
+        actionSource,
+        timestamp: Date.now(),
+      });
+    } catch (publishError) {
+      logger.error("Failed to publish action to move thread to folder", {
+        folderId,
+        email: ownerEmail,
+        threadId,
+        error: publishError,
+      });
+    }
+
+    return { status: 200 };
+  } catch (directError) {
+    logger.error("Failed to move thread to folder", {
+      folderId,
+      threadId,
+      error: directError,
+    });
+    throw directError;
+  }
 }

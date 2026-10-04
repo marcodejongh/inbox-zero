@@ -5,9 +5,12 @@ const { fontFamily } = require("tailwindcss/defaultTheme");
 module.exports = {
   darkMode: ["class"],
   content: [
+    "../../packages/mail-ui/src/**/*.{ts,tsx}",
     "./app/**/*.{js,ts,jsx,tsx}",
     "./pages/**/*.{js,ts,jsx,tsx}",
     "./components/**/*.{js,ts,jsx,tsx}",
+    "./providers/**/*.{js,ts,jsx,tsx}",
+    "./node_modules/streamdown/dist/**/*.js",
   ],
   theme: {
     transparent: "transparent",
@@ -36,12 +39,26 @@ module.exports = {
           from: { transform: "translateX(0)" },
           to: { transform: "translateX(calc(-200% - var(--gap)))" },
         },
+        "hero-reveal": {
+          from: {
+            opacity: 0,
+            transform: "translateY(6px)",
+            filter: "blur(6px)",
+          },
+          to: {
+            opacity: 1,
+            transform: "translateY(0)",
+            filter: "blur(0)",
+          },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
         marquee: "marquee var(--duration) linear infinite",
         "marquee-reverse": "marquee-reverse var(--duration) linear infinite",
+        "hero-rise": "hero-reveal 0.4s ease-out both",
+        "hero-word": "hero-reveal 0.6s ease-out both",
       },
       fontFamily: {
         sans: ["var(--font-geist)", ...fontFamily.sans],
@@ -86,6 +103,7 @@ module.exports = {
         sidebar: {
           DEFAULT: "hsl(var(--sidebar-background))",
           foreground: "hsl(var(--sidebar-foreground))",
+          "muted-foreground": "hsl(var(--sidebar-muted-foreground))",
           primary: "hsl(var(--sidebar-primary))",
           "primary-foreground": "hsl(var(--sidebar-primary-foreground))",
           accent: "hsl(var(--sidebar-accent))",
@@ -144,6 +162,8 @@ module.exports = {
             150: "#E7E0CB",
             200: "#E7DBB9",
             500: "#D8A40C",
+            // Readable on the 50 tint; the 500 fails contrast as chip text
+            600: "#B5870A",
           },
           brown: {
             50: "#FEEDE0",
@@ -164,6 +184,8 @@ module.exports = {
             100: "#E5F9FF",
             200: "#D0F4FF",
             500: "#49D1FA",
+            // Readable on the 100 tint; the 500 fails contrast as chip text
+            700: "#0E86AC",
           },
           gray: {
             50: "#FFFFFF",
@@ -171,6 +193,7 @@ module.exports = {
             150: "#EEEEEE",
             200: "#E6E6E6",
             500: "#8E8E8E",
+            550: "#6D6E70",
             600: "#525252",
           },
         },

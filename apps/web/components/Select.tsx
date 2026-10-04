@@ -4,13 +4,13 @@ import { cn } from "@/utils";
 import { ErrorMessage, ExplainText, Label } from "@/components/Input";
 
 interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
-  name: string;
-  label?: string;
-  tooltipText?: string;
-  options: Array<{ label: string; value: string | number }>;
-  explainText?: string;
-  error?: FieldError;
   disabled?: boolean;
+  error?: FieldError;
+  explainText?: string;
+  label?: string;
+  name: string;
+  options: Array<{ label: string; value: string | number }>;
+  tooltipText?: string;
 }
 
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(
@@ -26,7 +26,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
         <select
           id={props.name}
           className={cn(
-            "block w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+            "block w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-[color,box-shadow] focus:border-ring focus:ring-[3px] focus:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50",
             label && "mt-1",
           )}
           disabled={props.disabled}

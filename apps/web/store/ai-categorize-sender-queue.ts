@@ -10,8 +10,8 @@ import { aiQueue } from "@/utils/queue/ai-queue";
 type CategorizationStatus = "pending" | "processing" | "completed";
 
 interface QueueItem {
-  status: CategorizationStatus;
   categoryId?: string;
+  status: CategorizationStatus;
 }
 
 const aiCategorizeSenderQueueAtom = atom<Map<string, QueueItem>>(new Map());
@@ -58,9 +58,7 @@ const hasProcessingItemsAtom = atom((get) => {
   );
 });
 
-export const useHasProcessingItems = () => {
-  return useAtomValue(hasProcessingItemsAtom);
-};
+export const useHasProcessingItems = () => useAtomValue(hasProcessingItemsAtom);
 
 function processAiCategorizeSenderQueue({
   senders,

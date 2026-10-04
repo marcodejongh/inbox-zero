@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
-import Script from "next/script";
+
 import { Analytics } from "@vercel/analytics/react";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import { AxiomWebVitals } from "next-axiom";
@@ -16,6 +16,13 @@ import { GlobalProviders } from "@/providers/GlobalProviders";
 import { UTM } from "@/app/utm";
 import { startupImage } from "@/app/startup-image";
 import { Toaster } from "@/components/Toast";
+import {
+  BRAND_ICON_URL,
+  BRAND_NAME,
+  SUPPORT_EMAIL,
+  toAbsoluteUrl,
+} from "@/utils/branding";
+import { isIndexingAllowed } from "@/utils/indexing";
 
 const aeonikFont = localFont({
   src: "../styles/aeonik-medium.woff",
@@ -26,19 +33,20 @@ const aeonikFont = localFont({
 const geist = Geist({
   subsets: ["latin"],
   variable: "--font-geist",
-  weight: ["400", "500", "600", "700"], // font-normal, font-medium, font-semibold, font-bold
   display: "swap",
 });
 
-const title = "Inbox Zero | Automate and clean your inbox";
+const title = `${BRAND_NAME} | Automate and clean your inbox`;
 const description =
   "Your AI executive assistant to reach inbox zero fast. Automate emails, bulk unsubscribe, block cold emails, and analytics. Open-source";
+
+const indexingAllowed = isIndexingAllowed(env.NEXT_PUBLIC_BASE_URL);
 
 // JSON-LD structured data
 const jsonLd: WithContext<WebApplication> = {
   "@context": "https://schema.org",
   "@type": "WebApplication",
-  name: "Inbox Zero",
+  name: BRAND_NAME,
   url: env.NEXT_PUBLIC_BASE_URL,
   description,
   applicationCategory: "ProductivityApplication",
@@ -65,16 +73,34 @@ const jsonLd: WithContext<WebApplication> = {
   ],
   publisher: {
     "@type": "Organization",
-    name: "Inbox Zero",
+    "@id": toAbsoluteUrl("/#organization"),
+    name: BRAND_NAME,
     url: env.NEXT_PUBLIC_BASE_URL,
     logo: {
       "@type": "ImageObject",
-      url: `${env.NEXT_PUBLIC_BASE_URL}/icon.png`,
+      url: toAbsoluteUrl(BRAND_ICON_URL),
     },
     sameAs: [
       "https://x.com/inboxzero_ai",
       "https://github.com/elie222/inbox-zero",
     ],
+    ...(SUPPORT_EMAIL
+      ? {
+          contactPoint: {
+            "@type": "ContactPoint" as const,
+            email: SUPPORT_EMAIL,
+            contactType: "customer support",
+          },
+        }
+      : {}),
+    address: {
+      "@type": "PostalAddress",
+      streetAddress: "131 Continental Dr, Suite 305",
+      addressLocality: "Newark",
+      addressRegion: "DE",
+      postalCode: "19713",
+      addressCountry: "US",
+    },
   },
 };
 
@@ -84,8 +110,9 @@ export const metadata: Metadata = {
   openGraph: {
     title,
     description,
-    siteName: "Inbox Zero",
+    siteName: BRAND_NAME,
     type: "website",
+    url: env.NEXT_PUBLIC_BASE_URL,
   },
   twitter: {
     card: "summary_large_image",
@@ -96,15 +123,15 @@ export const metadata: Metadata = {
   metadataBase: new URL(env.NEXT_PUBLIC_BASE_URL),
   // issues with robots.txt: https://github.com/vercel/next.js/issues/58615#issuecomment-1852457285
   robots: {
-    index: true,
-    follow: true,
+    index: indexingAllowed,
+    follow: indexingAllowed,
   },
   // pwa
-  applicationName: "Inbox Zero",
+  applicationName: BRAND_NAME,
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Inbox Zero",
+    title: BRAND_NAME,
     startupImage,
   },
   formatDetection: {
@@ -132,10 +159,17 @@ export default async function RootLayout({
       <body
         className={`h-full ${env.NEXT_PUBLIC_USE_AEONIK_FONT ? aeonikFont.variable : ""} ${geist.variable} font-sans antialiased`}
       >
-        <Script
-          id="json-ld"
+        <script
+          // Marks the Mac Electron shell before paint so traffic-light
+          // insets apply without a logo flash. Harmless in the browser.
+          // biome-ignore lint/security/noDangerouslySetInnerHtml: static UA check, no user input
+          dangerouslySetInnerHTML={{
+            __html:
+              'if(window.inboxZeroDesktop&&/Mac/i.test(navigator.userAgent))document.documentElement.dataset.macDesktop=""',
+          }}
+        />
+        <script
           type="application/ld+json"
-          strategy="beforeInteractive"
           // biome-ignore lint/security/noDangerouslySetInnerHtml: JSON.stringify on controlled object is safe
           dangerouslySetInnerHTML={{
             __html: JSON.stringify(jsonLd),
@@ -147,7 +181,7 @@ export default async function RootLayout({
           </Suspense>
           <GlobalProviders>
             {children}
-            <Toaster closeButton richColors theme="light" visibleToasts={9} />
+            <Toaster />
           </GlobalProviders>
         </PostHogProvider>
         <Analytics />

@@ -3,6 +3,8 @@ import { withEmailAccount } from "@/utils/middleware";
 import { composeAutocompleteBody } from "@/app/api/ai/compose-autocomplete/validation";
 import { chatCompletionStream } from "@/utils/llms";
 import { getEmailAccountWithAi } from "@/utils/user/get";
+import { assertHasAiAccess } from "@/utils/premium/limits";
+import { LlmUseCase } from "@/utils/llms/use-cases";
 
 export const POST = withEmailAccount(async (request) => {
   const emailAccountId = request.auth.emailAccountId;
@@ -10,6 +12,11 @@ export const POST = withEmailAccount(async (request) => {
   const user = await getEmailAccountWithAi({ emailAccountId });
 
   if (!user) return NextResponse.json({ error: "Not authenticated" });
+
+  await assertHasAiAccess({
+    userId: user.userId,
+    hasUserApiKey: !!user.user.aiApiKey,
+  });
 
   const json = await request.json();
   const { prompt } = composeAutocompleteBody.parse(json);
@@ -20,6 +27,10 @@ Limit your response to no more than 200 characters, but make sure to construct c
 
   const response = await chatCompletionStream({
     userAi: user.user,
+    userId: user.userId,
+    emailAccountId,
+    useCase: LlmUseCase.ComposeAutocomplete,
+    promptHardening: { trust: "trusted" },
     messages: [
       {
         role: "system",
@@ -32,6 +43,7 @@ Limit your response to no more than 200 characters, but make sure to construct c
     ],
     userEmail: user.email,
     usageLabel: "Compose auto complete",
+    sensitiveDataPolicy: user.sensitiveDataPolicy,
   });
 
   return response.toTextStreamResponse();

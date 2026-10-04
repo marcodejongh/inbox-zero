@@ -5,13 +5,13 @@ import { cn } from "@/utils";
 import { extractDomainFromEmail } from "@/utils/email";
 
 interface HorizontalBarChartProps {
+  className?: string;
   data: Array<{
     name: string;
     value: number;
     href?: string;
     target?: string;
   }>;
-  className?: string;
 }
 
 export function HorizontalBarChart({
@@ -38,7 +38,7 @@ export function HorizontalBarChart({
                   style={{ width: `${widthPercentage}%` }}
                 />
                 <div className="flex items-center gap-2">
-                  <DomainIcon domain={domain} />
+                  <DomainIcon domain={domain} variant="circular" />
                   {item.href ? (
                     <a
                       href={item.href}

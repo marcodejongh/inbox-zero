@@ -6,6 +6,13 @@ import { useAction } from "next-safe-action/hooks";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
+  Item,
+  ItemContent,
+  ItemTitle,
+  ItemDescription,
+  ItemActions,
+} from "@/components/ui/item";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -16,18 +23,25 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { FormSection, FormSectionLeft } from "@/components/Form";
 import { deleteAccountAction } from "@/utils/actions/user";
 import { logOut } from "@/utils/user";
 import { useStatLoader } from "@/providers/StatLoaderProvider";
-import { usePremium } from "@/components/PremiumAlert";
+import { usePremium } from "@/hooks/usePremium";
+import { hasActiveAppleSubscription } from "@/utils/premium";
 
 export function DeleteSection() {
   const { onCancelLoadBatch } = useStatLoader();
   const { premium } = usePremium();
+  const hasAppleSubscription = hasActiveAppleSubscription(
+    premium?.appleExpiresAt || null,
+    premium?.appleRevokedAt || null,
+    premium?.appleSubscriptionStatus || null,
+  );
 
   const hasSubscription =
-    premium?.stripeSubscriptionId || premium?.lemonSqueezySubscriptionId;
+    premium?.stripeSubscriptionId ||
+    premium?.lemonSqueezySubscriptionId ||
+    hasAppleSubscription;
 
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [hasConfirmedCancellation, setHasConfirmedCancellation] =
@@ -50,7 +64,10 @@ export function DeleteSection() {
       {
         loading: "Deleting account...",
         success: "Account deleted!",
-        error: (err) => `Error deleting account: ${err.message}`,
+        error: (err: unknown) =>
+          `Error deleting account: ${
+            err instanceof Error ? err.message : "Unknown error"
+          }`,
       },
     );
   };
@@ -62,17 +79,18 @@ export function DeleteSection() {
   const shouldBlockDeletion = hasSubscription && !hasConfirmedCancellation;
 
   return (
-    <FormSection>
-      <FormSectionLeft
-        title="Delete account"
-        description="No longer want to use our service? You can delete your account here. This action is not reversible. All information related to this account will be deleted permanently."
-      />
-
-      <div>
+    <Item size="sm">
+      <ItemContent>
+        <ItemTitle>Delete account</ItemTitle>
+        <ItemDescription>
+          Permanently delete your account and all data.
+        </ItemDescription>
+      </ItemContent>
+      <ItemActions>
         <AlertDialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <AlertDialogTrigger asChild>
             <Button variant="destructiveSoft" size="sm">
-              Delete user
+              Delete
             </Button>
           </AlertDialogTrigger>
           <AlertDialogContent>
@@ -91,16 +109,25 @@ export function DeleteSection() {
                         account.
                       </p>
                       <p className="mb-3">
-                        You can manage your subscription by clicking "Manage
-                        Subscription" above or going to the{" "}
-                        <Link
-                          href="/premium"
-                          className="text-blue-600 underline hover:text-blue-800"
-                          onClick={() => setIsDialogOpen(false)}
-                        >
-                          premium page
-                        </Link>{" "}
-                        and clicking "Manage subscription".
+                        {hasAppleSubscription ? (
+                          <>
+                            You can manage your subscription from your iPhone or
+                            iPad subscription settings.
+                          </>
+                        ) : (
+                          <>
+                            You can manage your subscription by clicking "Manage
+                            Subscription" above or going to the{" "}
+                            <Link
+                              href="/premium"
+                              className="text-blue-600 underline hover:text-blue-800"
+                              onClick={() => setIsDialogOpen(false)}
+                            >
+                              premium page
+                            </Link>{" "}
+                            and clicking "Manage subscription".
+                          </>
+                        )}
                       </p>
                       <p className="text-sm text-gray-600">
                         Already cancelled your subscription? Click the button
@@ -130,7 +157,7 @@ export function DeleteSection() {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
-      </div>
-    </FormSection>
+      </ItemActions>
+    </Item>
   );
 }

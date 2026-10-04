@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { EmailAccountWithAI } from "@/utils/llms/types";
 import type { EmailForLLM } from "@/utils/types";
-import { getModel } from "@/utils/llms/model";
+import { getModelForUseCase, LlmUseCase } from "@/utils/llms/use-cases";
 import { createGenerateObject } from "@/utils/llms";
 import type { Logger } from "@/utils/logger";
 import {
@@ -9,14 +9,18 @@ import {
   getUserInfoPrompt,
   getUserRulesPrompt,
 } from "@/utils/ai/helpers";
+import { decideRecurringPattern } from "@/utils/decision-model/recurring-pattern";
+import { runDecisionModelOrFallback } from "@/utils/decision-model/decision-model";
 
 // const braintrust = new Braintrust("recurring-pattern-detection");
 
 const schema = z.object({
-  matchedRule: z.string().nullish(),
+  matchedRule: z.string().nullable(),
   explanation: z.string(),
 });
 export type DetectPatternResult = z.infer<typeof schema>;
+
+const MAX_PATTERN_SAMPLE_EMAILS = 10;
 
 export async function aiDetectRecurringPattern({
   emails,
@@ -38,6 +42,80 @@ export async function aiDetectRecurringPattern({
   // All emails should be from the same sender
   const senderEmail = emails[0].from;
 
+  if (!senderEmail) return null;
+
+  if (emails.length > MAX_PATTERN_SAMPLE_EMAILS) {
+    logger.info("Truncating sender pattern history for prompt", {
+      emailCount: emails.length,
+      sampledEmailCount: MAX_PATTERN_SAMPLE_EMAILS,
+    });
+  }
+
+  return runDecisionModelOrFallback({
+    emailAccount,
+    logger,
+    feature: "recurring pattern detection",
+    decide: (config) =>
+      decideRecurringPattern({
+        config,
+        emails,
+        emailAccount,
+        rules,
+        consistentRuleName,
+        logger,
+      }),
+    fallback: () =>
+      detectRecurringPatternWithLlm({
+        emails,
+        emailAccount,
+        rules,
+        consistentRuleName,
+        logger,
+      }),
+  });
+}
+
+export async function detectRecurringPatternWithLlm({
+  emails,
+  emailAccount,
+  rules,
+  consistentRuleName,
+  logger,
+}: {
+  emails: EmailForLLM[];
+  emailAccount: EmailAccountWithAI;
+  rules: { name: string; instructions: string }[];
+  consistentRuleName?: string;
+  logger: Logger;
+}): Promise<DetectPatternResult | null> {
+  const senderEmail = emails[0]?.from;
+  if (!senderEmail) return null;
+
+  try {
+    return await detectRecurringPatternWithLlmStrict({
+      emails,
+      emailAccount,
+      rules,
+      consistentRuleName,
+    });
+  } catch (error) {
+    logger.error("Error detecting recurring pattern", { error });
+    return null;
+  }
+}
+
+export async function detectRecurringPatternWithLlmStrict({
+  emails,
+  emailAccount,
+  rules,
+  consistentRuleName,
+}: {
+  emails: EmailForLLM[];
+  emailAccount: EmailAccountWithAI;
+  rules: { name: string; instructions: string }[];
+  consistentRuleName?: string;
+}): Promise<DetectPatternResult | null> {
+  const senderEmail = emails[0]?.from;
   if (!senderEmail) return null;
 
   const system = `You are an AI assistant that helps analyze if a sender's emails should consistently be matched to a specific rule.
@@ -90,42 +168,45 @@ If you're not confident (at least 90% certain) that a single rule should handle 
 <sender>${senderEmail}</sender>
 
 <sample_emails>
-${getEmailListPrompt({ messages: emails, messageMaxLength: 500 })}
+${getEmailListPrompt({
+  messages: emails,
+  messageMaxLength: 500,
+  maxMessages: MAX_PATTERN_SAMPLE_EMAILS,
+})}
 </sample_emails>`;
 
-  try {
-    const modelOptions = getModel(emailAccount.user, "chat");
+  const modelOptions = getModelForUseCase(
+    emailAccount.user,
+    LlmUseCase.DetectRecurringPattern,
+  );
 
-    const generateObject = createGenerateObject({
-      emailAccount,
-      label: "Detect recurring pattern",
-      modelOptions,
-    });
+  const generateObject = createGenerateObject({
+    emailAccount,
+    label: "Detect recurring pattern",
+    modelOptions,
+    promptHardening: { trust: "untrusted", level: "compact" },
+  });
 
-    const aiResponse = await generateObject({
-      ...modelOptions,
-      system,
-      prompt,
-      schema,
-    });
+  const aiResponse = await generateObject({
+    ...modelOptions,
+    instructions: system,
+    prompt,
+    schema,
+  });
 
-    // braintrust.insertToDataset({
-    //   id: emails[0].id,
-    //   input: {
-    //     senderEmail,
-    //     emailCount: emails.length,
-    //     sampleEmails: emails.map((email) => ({
-    //       from: email.from,
-    //       subject: email.subject,
-    //     })),
-    //     rules: rules.map((rule) => rule.name),
-    //   },
-    //   expected: aiResponse.object.matchedRule,
-    // });
+  // braintrust.insertToDataset({
+  //   id: emails[0].id,
+  //   input: {
+  //     senderEmail,
+  //     emailCount: emails.length,
+  //     sampleEmails: emails.map((email) => ({
+  //       from: email.from,
+  //       subject: email.subject,
+  //     })),
+  //     rules: rules.map((rule) => rule.name),
+  //   },
+  //   expected: aiResponse.object.matchedRule,
+  // });
 
-    return aiResponse.object;
-  } catch (error) {
-    logger.error("Error detecting recurring pattern", { error });
-    return null;
-  }
+  return aiResponse.object;
 }

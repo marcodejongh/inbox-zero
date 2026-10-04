@@ -1,7 +1,6 @@
 import { toastSuccess, toastError } from "@/components/Toast";
 import {
   createAutoArchiveFilterAction,
-  deleteFilterAction,
   trashThreadAction,
 } from "@/utils/actions/mail";
 
@@ -15,7 +14,7 @@ export async function onAutoArchive({
   from: string;
   gmailLabelId?: string;
   labelName?: string;
-}) {
+}): Promise<boolean> {
   const result = await createAutoArchiveFilterAction(emailAccountId, {
     from,
     gmailLabelId,
@@ -27,31 +26,9 @@ export async function onAutoArchive({
       description:
         `There was an error enabling auto archive. ${result.serverError || ""}`.trim(),
     });
-  } else {
-    toastSuccess({
-      description: "Auto archive enabled!",
-    });
+    return false;
   }
-}
-
-export async function onDeleteFilter({
-  emailAccountId,
-  filterId,
-}: {
-  emailAccountId: string;
-  filterId: string;
-}) {
-  const result = await deleteFilterAction(emailAccountId, { id: filterId });
-  if (result?.serverError) {
-    toastError({
-      description:
-        `There was an error disabling auto archive. ${result.serverError || ""}`.trim(),
-    });
-  } else {
-    toastSuccess({
-      description: "Auto archive disabled!",
-    });
-  }
+  return true;
 }
 
 export async function onTrashThread({

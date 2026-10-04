@@ -2,21 +2,30 @@ export const DEFAULT_PROVIDER = "DEFAULT";
 
 export const Provider = {
   OPEN_AI: "openai",
+  AZURE: "azure",
+  AZURE_FOUNDRY: "azure-foundry",
+  VERTEX: "vertex",
   ANTHROPIC: "anthropic",
   BEDROCK: "bedrock",
   GOOGLE: "google",
   GROQ: "groq",
+  CEREBRAS: "cerebras",
   OPENROUTER: "openrouter",
   AI_GATEWAY: "aigateway",
   OLLAMA: "ollama",
+  OPENAI_COMPATIBLE: "openai-compatible",
+  CODEX_CLI: "codex-cli",
+  CLAUDE_CODE: "claude-code",
 };
 
 export const providerOptions: { label: string; value: string }[] = [
   { label: "Default", value: DEFAULT_PROVIDER },
   { label: "Anthropic", value: Provider.ANTHROPIC },
   { label: "OpenAI", value: Provider.OPEN_AI },
+  { label: "Azure OpenAI", value: Provider.AZURE },
   { label: "Google", value: Provider.GOOGLE },
   { label: "Groq", value: Provider.GROQ },
+  { label: "Cerebras", value: Provider.CEREBRAS },
   { label: "OpenRouter", value: Provider.OPENROUTER },
-  { label: "AI Gateway", value: Provider.AI_GATEWAY },
+  { label: "Vercel AI Gateway", value: Provider.AI_GATEWAY },
 ];

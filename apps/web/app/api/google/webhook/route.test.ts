@@ -1,0 +1,248 @@
+import { publishLocalMailHint } from "@/utils/redis/local-mail-hints";
+import { markGmailHistoryCatchUp } from "@/utils/redis/gmail-history-catch-up";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/utils/redis/gmail-history-catch-up", () => ({
+  markGmailHistoryCatchUp: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/utils/redis/local-mail-hints", () => ({
+  publishLocalMailHint: vi.fn().mockResolvedValue(undefined),
+}));
+
+const {
+  envMock,
+  processHistoryForUserMock,
+  runWithBackgroundLoggerFlushMock,
+  getWebhookEmailAccountMock,
+  getEmailProviderRateLimitStateMock,
+  cleanupWebhookAccountOnRateLimitSkipMock,
+} = vi.hoisted(() => ({
+  envMock: {
+    GOOGLE_PUBSUB_VERIFICATION_TOKEN: "test-google-webhook-token" as
+      | string
+      | undefined,
+  },
+  processHistoryForUserMock: vi.fn(),
+  runWithBackgroundLoggerFlushMock: vi.fn(),
+  getWebhookEmailAccountMock: vi.fn(),
+  getEmailProviderRateLimitStateMock: vi.fn(),
+  cleanupWebhookAccountOnRateLimitSkipMock: vi.fn(),
+}));
+
+vi.mock("@/utils/middleware", async () => {
+  const { createWithErrorTestMiddleware } = await vi.importActual<
+    typeof import("@/__tests__/helpers")
+  >("@/__tests__/helpers");
+
+  return createWithErrorTestMiddleware();
+});
+
+vi.mock("@/env", () => ({
+  env: envMock,
+}));
+
+vi.mock("@/utils/webhook/google/process-history", () => ({
+  processHistoryForUser: (...args: unknown[]) =>
+    processHistoryForUserMock(...args),
+}));
+
+vi.mock("@/utils/webhook/error-handler", () => ({
+  handleWebhookError: vi.fn(),
+}));
+
+vi.mock("@/utils/logger-flush", () => ({
+  runWithBackgroundLoggerFlush: (...args: unknown[]) =>
+    runWithBackgroundLoggerFlushMock(...args),
+}));
+
+vi.mock("@/utils/webhook/validate-webhook-account", () => ({
+  getWebhookEmailAccount: (...args: unknown[]) =>
+    getWebhookEmailAccountMock(...args),
+  cleanupWebhookAccountOnRateLimitSkip: (...args: unknown[]) =>
+    cleanupWebhookAccountOnRateLimitSkipMock(...args),
+}));
+
+vi.mock("@/utils/email/rate-limit", () => ({
+  getEmailProviderRateLimitState: (...args: unknown[]) =>
+    getEmailProviderRateLimitStateMock(...args),
+}));
+
+import { POST } from "./route";
+
+describe("Google webhook route", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    envMock.GOOGLE_PUBSUB_VERIFICATION_TOKEN = "test-google-webhook-token";
+    processHistoryForUserMock.mockResolvedValue(undefined);
+    getWebhookEmailAccountMock.mockResolvedValue(null);
+    getEmailProviderRateLimitStateMock.mockResolvedValue(null);
+    cleanupWebhookAccountOnRateLimitSkipMock.mockResolvedValue(undefined);
+    runWithBackgroundLoggerFlushMock.mockImplementation(
+      ({ task }: { task: () => Promise<void> }) => task(),
+    );
+  });
+
+  it("fails closed when the verification token is missing", async () => {
+    envMock.GOOGLE_PUBSUB_VERIFICATION_TOKEN = undefined;
+    const request = createRequest({
+      token: "test-google-webhook-token",
+    });
+
+    const response = await POST(request as any, {} as never);
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body).toEqual({ message: "Google webhook is not configured" });
+    expect(processHistoryForUserMock).not.toHaveBeenCalled();
+    expect(publishLocalMailHint).not.toHaveBeenCalled();
+  });
+
+  it("rejects requests with an invalid verification token", async () => {
+    const request = createRequest({
+      token: "invalid-token",
+    });
+
+    const response = await POST(request as any, {} as never);
+    const body = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(body).toEqual({ message: "Invalid verification token" });
+    expect(processHistoryForUserMock).not.toHaveBeenCalled();
+    expect(publishLocalMailHint).not.toHaveBeenCalled();
+  });
+
+  it("allows requests without a token when verification is intentionally disabled", async () => {
+    envMock.GOOGLE_PUBSUB_VERIFICATION_TOKEN = "";
+    const request = createRequest({
+      emailAddress: "user@example.com",
+      historyId: 123,
+    });
+
+    const response = await POST(request as any, {} as never);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(processHistoryForUserMock).toHaveBeenCalledWith(
+      { emailAddress: "user@example.com", historyId: "123" },
+      { preloadedEmailAccount: null },
+      expect.anything(),
+    );
+  });
+
+  it("acknowledges valid requests and processes history asynchronously", async () => {
+    getWebhookEmailAccountMock.mockResolvedValue({ id: "account-1" });
+
+    const request = createRequest({
+      token: "test-google-webhook-token",
+      emailAddress: "user@example.com",
+      historyId: 123,
+    });
+
+    const response = await POST(request as any, {} as never);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(publishLocalMailHint).toHaveBeenCalledWith(
+      "account-1",
+      expect.anything(),
+    );
+    expect(runWithBackgroundLoggerFlushMock).toHaveBeenCalledTimes(1);
+    expect(markGmailHistoryCatchUp).not.toHaveBeenCalled();
+    expect(processHistoryForUserMock).toHaveBeenCalledWith(
+      { emailAddress: "user@example.com", historyId: "123" },
+      { preloadedEmailAccount: { id: "account-1" } },
+      expect.anything(),
+    );
+  });
+
+  it("preserves large Gmail history IDs as opaque strings", async () => {
+    const request = createRequest({
+      token: "test-google-webhook-token",
+      emailAddress: "user@example.com",
+      historyId: "90071992547409931234",
+    });
+
+    const response = await POST(request as any, {} as never);
+
+    expect(response.status).toBe(200);
+    expect(processHistoryForUserMock).toHaveBeenCalledWith(
+      {
+        emailAddress: "user@example.com",
+        historyId: "90071992547409931234",
+      },
+      { preloadedEmailAccount: null },
+      expect.anything(),
+    );
+  });
+
+  it("skips enqueueing background processing while provider rate limit is active", async () => {
+    getWebhookEmailAccountMock.mockResolvedValue({ id: "account-1" });
+    getEmailProviderRateLimitStateMock.mockResolvedValue({
+      provider: "google",
+      retryAt: new Date(Date.now() + 60_000),
+      source: "google/webhook",
+    });
+
+    const request = createRequest({
+      token: "test-google-webhook-token",
+      emailAddress: "user@example.com",
+      historyId: 123,
+    });
+
+    const response = await POST(request as any, {} as never);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(cleanupWebhookAccountOnRateLimitSkipMock).toHaveBeenCalledWith(
+      { id: "account-1" },
+      expect.anything(),
+    );
+    expect(publishLocalMailHint).toHaveBeenCalledWith(
+      "account-1",
+      expect.anything(),
+    );
+    expect(markGmailHistoryCatchUp).toHaveBeenCalledWith(
+      "account-1",
+      expect.anything(),
+    );
+    expect(runWithBackgroundLoggerFlushMock).not.toHaveBeenCalled();
+    expect(processHistoryForUserMock).not.toHaveBeenCalled();
+  });
+});
+
+function createRequest({
+  token,
+  emailAddress = "user@example.com",
+  historyId = 123,
+}: {
+  token?: string;
+  emailAddress?: string;
+  historyId?: number | string;
+}) {
+  const requestUrl = new URL("https://example.com/api/google/webhook");
+  if (token) requestUrl.searchParams.set("token", token);
+
+  return new Request(requestUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      message: {
+        data: Buffer.from(
+          JSON.stringify({
+            emailAddress,
+            historyId,
+          }),
+        )
+          .toString("base64url")
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_"),
+      },
+    }),
+  });
+}

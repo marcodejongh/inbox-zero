@@ -1,5 +1,4 @@
 import type {
-  Control,
   UseFormRegister,
   UseFormSetValue,
   UseFormWatch,
@@ -10,7 +9,6 @@ import { Input, Label, ErrorMessage } from "@/components/Input";
 import { toastError } from "@/components/Toast";
 import { LogicalOperator } from "@/generated/prisma/enums";
 import { ConditionType } from "@/utils/config";
-import { getRuleConfig } from "@/utils/rule/consts";
 import { isConversationStatusType } from "@/utils/reply-tracker/conversation-status-config";
 import type {
   CreateRuleBody,
@@ -23,10 +21,10 @@ import {
   SelectValue,
   SelectTrigger,
 } from "@/components/ui/select";
-import { FormControl, FormField, FormItem } from "@/components/ui/form";
+import { FormControl, FormItem } from "@/components/ui/form";
 import { RuleStep } from "@/app/(app)/[emailAccountId]/assistant/RuleStep";
 import { SystemType } from "@/generated/prisma/enums";
-import TextareaAutosize from "react-textarea-autosize";
+import { AutosizeTextarea } from "@/components/ui/textarea";
 import { RuleSteps } from "@/app/(app)/[emailAccountId]/assistant/RuleSteps";
 import { TooltipExplanation } from "@/components/TooltipExplanation";
 
@@ -57,7 +55,7 @@ function getUIConditionType(
   if (condition.subject !== null) return "subject";
   if (condition.body !== null) return "subject"; // body maps to subject in UI
   // Return undefined if no field is populated (new/unselected condition)
-  return undefined;
+  return;
 }
 
 function allowMultipleConditions(systemType: SystemType | null | undefined) {
@@ -130,7 +128,6 @@ export function ConditionSteps({
   conditionFields,
   conditionalOperator,
   removeCondition,
-  control,
   watch,
   setValue,
   register,
@@ -142,7 +139,6 @@ export function ConditionSteps({
   conditionFields: Array<{ id: string }>;
   conditionalOperator: LogicalOperator | null | undefined;
   removeCondition: (index: number) => void;
-  control: Control<CreateRuleBody>;
   watch: UseFormWatch<CreateRuleBody>;
   setValue: UseFormSetValue<CreateRuleBody>;
   register: UseFormRegister<CreateRuleBody>;
@@ -197,172 +193,131 @@ export function ConditionSteps({
         const uiType = getUIConditionType(currentCondition);
         const isFirstCondition = index === 0;
         const isFirstConditionPrompt = isFirstCondition && uiType === "prompt";
+        const conditionTypeLabel = getConditionTypeLabel(uiType);
+        const usedUITypes = new Set(
+          conditions
+            .map((c, idx) =>
+              idx === index ? undefined : getUIConditionType(c),
+            )
+            .filter(
+              (type): type is UIConditionType =>
+                type !== undefined && type !== null,
+            ),
+        );
+        const previousConditionType =
+          index > 0 ? getUIConditionType(conditions[index - 1]) : undefined;
+        const isStaticFollowingStatic =
+          uiType !== "prompt" && previousConditionType !== "prompt";
+        const showOperatorSelector =
+          index === 1 && previousConditionType === "prompt";
 
         // Hide leftContent only for first condition when it's a prompt type
         // Static conditions always need the label shown
         const leftContent = isFirstConditionPrompt ? null : (
-          <FormField
-            control={control}
-            name={`conditions.${index}`}
-            render={({ field }) => {
-              const currentCondition = field.value;
-              const uiType = getUIConditionType(currentCondition);
+          <FormItem>
+            <Select
+              onValueChange={(value: UIConditionType) => {
+                // Check if we have duplicate UI condition types
+                const prospectiveUITypes = conditions.map((c, idx) =>
+                  idx === index ? value : getUIConditionType(c),
+                );
+                const configuredTypes = prospectiveUITypes.filter(
+                  (type): type is UIConditionType =>
+                    type !== undefined && type !== null,
+                );
+                const uniqueUITypes = new Set(configuredTypes);
 
-              const conditionTypeLabel =
-                uiType === "prompt"
-                  ? "AI Prompt"
-                  : uiType === "from"
-                    ? "From"
-                    : uiType === "to"
-                      ? "To"
-                      : uiType === "subject"
-                        ? "Subject"
-                        : "Select";
+                if (uniqueUITypes.size !== configuredTypes.length) {
+                  toastError({
+                    description:
+                      "You can only have one condition of each type.",
+                  });
+                  return;
+                }
 
-              // Get UI types already used in other conditions (excluding current)
-              const usedUITypes = new Set(
-                conditions
-                  .map((c, idx) =>
-                    idx === index ? undefined : getUIConditionType(c),
-                  )
-                  .filter(
-                    (type): type is UIConditionType =>
-                      type !== undefined && type !== null,
-                  ),
-              );
+                const newCondition = getConditionFromUIType(value);
 
-              // Determine operator display logic:
-              // - AND/OR selector only between AI condition and first static condition
-              // - Static conditions always show "and" between each other
-              const previousConditionType =
-                index > 0
-                  ? getUIConditionType(conditions[index - 1])
-                  : undefined;
+                // If AI Prompt is selected at a non-first position,
+                // insert it at position 0 and shift other conditions
+                if (value === "prompt" && index !== 0) {
+                  const currentConditionAtIndex = conditions[index];
+                  const currentConditionType = getUIConditionType(
+                    currentConditionAtIndex,
+                  );
 
-              // Static following static: both current and previous are not prompt
-              // (includes undefined/empty conditions as they will become static)
-              const isStaticFollowingStatic =
-                uiType !== "prompt" && previousConditionType !== "prompt";
+                  const newConditions = [newCondition];
 
-              // Show AND/OR selector only at boundary between AI (prompt) and static conditions
-              const showOperatorSelector =
-                index === 1 && previousConditionType === "prompt";
+                  for (let i = 0; i < conditions.length; i++) {
+                    if (i !== index) {
+                      newConditions.push(conditions[i]);
+                    } else if (currentConditionType !== undefined) {
+                      newConditions.push(currentConditionAtIndex);
+                    }
+                  }
 
-              return (
-                <FormItem>
+                  setValue("conditions", newConditions);
+                } else {
+                  setValue(`conditions.${index}`, newCondition);
+                }
+              }}
+              value={uiType || undefined}
+            >
+              <div className="flex items-center gap-2">
+                {index === 0 ? null : showOperatorSelector ? (
                   <Select
-                    onValueChange={(value: UIConditionType) => {
-                      // Check if we have duplicate UI condition types
-                      const prospectiveUITypes = conditions.map((c, idx) =>
-                        idx === index ? value : getUIConditionType(c),
+                    value={
+                      conditionalOperator === LogicalOperator.OR ? "or" : "and"
+                    }
+                    onValueChange={(value) => {
+                      setValue(
+                        "conditionalOperator",
+                        value === "or"
+                          ? LogicalOperator.OR
+                          : LogicalOperator.AND,
                       );
-                      const configuredTypes = prospectiveUITypes.filter(
-                        (type): type is UIConditionType =>
-                          type !== undefined && type !== null,
-                      );
-                      const uniqueUITypes = new Set(configuredTypes);
-
-                      if (uniqueUITypes.size !== configuredTypes.length) {
-                        toastError({
-                          description:
-                            "You can only have one condition of each type.",
-                        });
-                        return; // abort update
-                      }
-
-                      const newCondition = getConditionFromUIType(value);
-
-                      // If AI Prompt is selected at a non-first position,
-                      // insert it at position 0 and shift other conditions
-                      if (value === "prompt" && index !== 0) {
-                        const currentConditionAtIndex = conditions[index];
-                        const currentConditionType = getUIConditionType(
-                          currentConditionAtIndex,
-                        );
-
-                        // Build new conditions array with AI Prompt at position 0
-                        const newConditions = [newCondition];
-
-                        // Add all existing conditions except the one being changed
-                        for (let i = 0; i < conditions.length; i++) {
-                          if (i !== index) {
-                            newConditions.push(conditions[i]);
-                          } else if (currentConditionType !== undefined) {
-                            // If the condition being changed had data, keep it
-                            newConditions.push(currentConditionAtIndex);
-                          }
-                          // If it was empty (undefined type), just skip it
-                        }
-
-                        setValue("conditions", newConditions);
-                      } else {
-                        setValue(`conditions.${index}`, newCondition);
-                      }
                     }}
-                    value={uiType || undefined}
                   >
-                    <div className="flex items-center gap-2">
-                      {index === 0 ? null : showOperatorSelector ? (
-                        <Select
-                          value={
-                            conditionalOperator === LogicalOperator.OR
-                              ? "or"
-                              : "and"
-                          }
-                          onValueChange={(value) => {
-                            setValue(
-                              "conditionalOperator",
-                              value === "or"
-                                ? LogicalOperator.OR
-                                : LogicalOperator.AND,
-                            );
-                          }}
-                        >
-                          <FormControl>
-                            <SelectTrigger className="w-[80px]">
-                              <SelectValue />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            <SelectItem value="and">and</SelectItem>
-                            <SelectItem value="or">or</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      ) : (
-                        <p className="text-muted-foreground">
-                          {isStaticFollowingStatic
-                            ? "and"
-                            : conditionalOperator === LogicalOperator.OR
-                              ? "or"
-                              : "and"}
-                        </p>
-                      )}
-                      <FormControl>
-                        <SelectTrigger className="w-[120px]">
-                          {uiType ? (
-                            conditionTypeLabel
-                          ) : (
-                            <SelectValue placeholder="Choose" />
-                          )}
-                        </SelectTrigger>
-                      </FormControl>
-                    </div>
+                    <FormControl>
+                      <SelectTrigger className="w-[80px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
                     <SelectContent>
-                      {CONDITION_TYPE_OPTIONS.filter(
-                        (option) =>
-                          !usedUITypes.has(option.value) ||
-                          option.value === uiType,
-                      ).map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
+                      <SelectItem value="and">and</SelectItem>
+                      <SelectItem value="or">or</SelectItem>
                     </SelectContent>
                   </Select>
-                </FormItem>
-              );
-            }}
-          />
+                ) : (
+                  <p className="text-muted-foreground">
+                    {isStaticFollowingStatic
+                      ? "and"
+                      : conditionalOperator === LogicalOperator.OR
+                        ? "or"
+                        : "and"}
+                  </p>
+                )}
+                <FormControl>
+                  <SelectTrigger className="w-[120px]">
+                    {uiType ? (
+                      conditionTypeLabel
+                    ) : (
+                      <SelectValue placeholder="Choose" />
+                    )}
+                  </SelectTrigger>
+                </FormControl>
+              </div>
+              <SelectContent>
+                {CONDITION_TYPE_OPTIONS.filter(
+                  (option) =>
+                    !usedUITypes.has(option.value) || option.value === uiType,
+                ).map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FormItem>
         );
 
         // Check if this static condition should be indented
@@ -377,7 +332,7 @@ export function ConditionSteps({
 
         return (
           <div
-            className={`pl-3 ${shouldIndent ? "ml-14" : ""}`}
+            className={shouldIndent ? "ml-14" : undefined}
             key={condition.id}
           >
             <RuleStep
@@ -389,36 +344,18 @@ export function ConditionSteps({
                 const uiType = getUIConditionType(currentCondition);
 
                 if (uiType === "prompt") {
-                  if (
-                    ruleSystemType &&
-                    isConversationStatusType(ruleSystemType)
-                  ) {
-                    return (
-                      <div>
-                        <Label name="instructions" label="Instructions" />
-                        <div className="mt-2 rounded-md bg-muted/50 p-3 text-sm text-muted-foreground">
-                          <p>{getRuleConfig(ruleSystemType).instructions}</p>
-                          <p className="mt-2 text-xs italic">
-                            Note: Instructions for conversation tracking rules
-                            cannot be edited.
-                          </p>
-                        </div>
-                      </div>
-                    );
-                  }
                   return (
                     <>
                       {isFirstCondition && (
                         <div className="mb-2">
                           <Label
                             name={`conditions.${index}.instructions`}
-                            label="Matching:"
+                            label="That matches:"
                           />
                         </div>
                       )}
                       <div className="relative">
-                        <TextareaAutosize
-                          className="block w-full flex-1 whitespace-pre-wrap rounded-md border border-border bg-background shadow-sm focus:border-black focus:ring-black sm:text-sm"
+                        <AutosizeTextarea
                           minRows={3}
                           rows={3}
                           {...register(`conditions.${index}.instructions`)}
@@ -545,3 +482,18 @@ export function ConditionSteps({
 
 const getFilterTooltipText = (filterType: "from" | "to") =>
   `Only apply this rule ${filterType} emails from this address. Supports multiple addresses separated by comma, pipe, or OR. e.g. "@company.com", "hello@example.com OR support@test.com"`;
+
+function getConditionTypeLabel(uiType: UIConditionType | undefined): string {
+  switch (uiType) {
+    case "prompt":
+      return "AI Prompt";
+    case "from":
+      return "From";
+    case "to":
+      return "To";
+    case "subject":
+      return "Subject";
+    default:
+      return "Select";
+  }
+}

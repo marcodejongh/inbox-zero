@@ -1,10 +1,25 @@
 /** biome-ignore-all lint/suspicious/noConsole: we use console.log for development logs */
+import get from "lodash/get";
 import { log } from "next-axiom";
+import { serializeError } from "serialize-error";
 import { env } from "@/env";
+import {
+  CONTENT_FIELD_NAMES,
+  normalizeRedactionFieldName,
+  REDACTED_FIELD_NAMES,
+  SENSITIVE_FIELD_NAMES,
+} from "@/utils/redact-fields";
 
 export type Logger = ReturnType<typeof createScopedLogger>;
 
 type LogLevel = "info" | "error" | "warn" | "trace";
+
+const NORMALIZED_REDACTED_FIELD_NAMES =
+  normalizeFieldNames(REDACTED_FIELD_NAMES);
+const NORMALIZED_CONTENT_FIELD_NAMES = normalizeFieldNames(CONTENT_FIELD_NAMES);
+const NORMALIZED_SENSITIVE_FIELD_NAMES = normalizeFieldNames(
+  SENSITIVE_FIELD_NAMES,
+);
 
 const colors = {
   info: "\x1b[0m", // white
@@ -15,7 +30,8 @@ const colors = {
 } as const;
 
 export function createScopedLogger(scope: string) {
-  if (env.NEXT_PUBLIC_AXIOM_TOKEN) return createAxiomLogger(scope);
+  if (typeof window === "undefined" && env.AXIOM_TOKEN)
+    return createAxiomLogger(scope);
   if (env.NEXT_PUBLIC_LOG_SCOPES && !env.NEXT_PUBLIC_LOG_SCOPES.includes(scope))
     return createNullLogger();
 
@@ -83,14 +99,20 @@ export function createScopedLogger(scope: string) {
 function createAxiomLogger(scope: string) {
   const createLogger = (fields: Record<string, unknown> = {}) => ({
     info: (message: string, args?: Record<string, unknown>) =>
-      log.info(message, hashSensitiveFields({ scope, ...fields, ...args })),
+      log.info(
+        message,
+        hashSensitiveFields({ scope, ...fields, ...formatError(args) }),
+      ),
     error: (message: string, args?: Record<string, unknown>) =>
       log.error(
         message,
         hashSensitiveFields({ scope, ...fields, ...formatError(args) }),
       ),
     warn: (message: string, args?: Record<string, unknown>) =>
-      log.warn(message, hashSensitiveFields({ scope, ...fields, ...args })),
+      log.warn(
+        message,
+        hashSensitiveFields({ scope, ...fields, ...formatError(args) }),
+      ),
     trace: (
       message: string,
       args?: Record<string, unknown> | (() => Record<string, unknown>),
@@ -99,7 +121,7 @@ function createAxiomLogger(scope: string) {
       const resolved = typeof args === "function" ? args() : args;
       log.debug(
         message,
-        hashSensitiveFields({ scope, ...fields, ...resolved }),
+        hashSensitiveFields({ scope, ...fields, ...formatError(resolved) }),
       );
     },
     with: (newFields: Record<string, unknown>) =>
@@ -125,28 +147,14 @@ function formatError(args?: Record<string, unknown>) {
   if (env.NODE_ENV !== "production") return args;
   if (!args?.error) return args;
 
-  const error = args.error;
-  const errorMessage = getSimpleErrorMessage(error) ?? "Unknown error";
-  const errorFull = serializeError(error);
+  const error = serializeError(args.error);
+  const { error: _rawError, ...argsWithoutError } = args;
 
   return {
-    ...args,
-    error: errorMessage,
-    errorFull,
+    ...argsWithoutError,
+    error,
+    errorMessage: getSimpleErrorMessage(error) ?? "Unknown error",
   };
-}
-
-function serializeError(error: unknown): unknown {
-  if (error instanceof Error) {
-    return {
-      ...error,
-      name: error.name,
-      message: error.message,
-      stack: error.stack,
-    };
-  }
-
-  return error;
 }
 
 function processErrorsInObject(obj: unknown): unknown {
@@ -169,58 +177,30 @@ function processErrorsInObject(obj: unknown): unknown {
   return obj;
 }
 
+const NESTED_ERROR_MESSAGE_PATHS = [
+  ["message"],
+  ["error", "message"],
+  ["cause", "message"],
+  ["response", "data", "error", "message"],
+  ["data", "error", "message"],
+  ["lastError", "data", "error", "message"],
+  ["error", "cause", "message"],
+  ["error", "response", "data", "error", "message"],
+  ["error", "data", "error", "message"],
+  ["error", "lastError", "data", "error", "message"],
+] as const;
+
 function getSimpleErrorMessage(error: unknown): string | undefined {
-  if (typeof error === "string") {
-    return error;
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+
+  for (const path of NESTED_ERROR_MESSAGE_PATHS) {
+    const value = get(error, path);
+    if (typeof value === "string") return value;
   }
 
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  if (!hasMessageField(error) && !hasNestedErrorField(error)) {
-    return undefined;
-  }
-
-  if (hasMessageField(error) && typeof error.message === "string") {
-    return error.message;
-  }
-
-  if (hasNestedErrorField(error)) {
-    const nested = error.error;
-    if (hasMessageField(nested) && typeof nested.message === "string") {
-      return nested.message;
-    }
-  }
-
-  return undefined;
+  return;
 }
-
-function hasMessageField(value: unknown): value is { message?: unknown } {
-  return typeof value === "object" && value !== null && "message" in value;
-}
-
-function hasNestedErrorField(value: unknown): value is { error: unknown } {
-  return typeof value === "object" && value !== null && "error" in value;
-}
-
-// Field names that contain PII and should be hashed in production
-const SENSITIVE_FIELD_NAMES = new Set(["from", "sender", "to", "replyTo"]);
-
-// Field names that should NEVER be logged - replaced with boolean
-const REDACTED_FIELD_NAMES = new Set([
-  "accessToken",
-  "access_token",
-  "refreshToken",
-  "refresh_token",
-  "idToken",
-  "id_token",
-  "headers",
-  "authorization",
-]);
-
-// Fields containing email/message content - redacted in production unless debug logs enabled
-const CONTENT_FIELD_NAMES = new Set(["text", "body", "content"]);
 
 /**
  * Recursively processes an object to protect sensitive data:
@@ -247,13 +227,15 @@ function hashSensitiveFields<T>(obj: T, depth = 0): T {
   if (isPlainObject(obj)) {
     const processed: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
+      const normalizedKey = normalizeRedactionFieldName(key);
+
       // Always redact tokens - never log them
-      if (REDACTED_FIELD_NAMES.has(key)) {
+      if (NORMALIZED_REDACTED_FIELD_NAMES.has(normalizedKey)) {
         processed[key] = !!value;
       }
       // Redact content fields in production (unless debug logs enabled)
       else if (
-        CONTENT_FIELD_NAMES.has(key) &&
+        NORMALIZED_CONTENT_FIELD_NAMES.has(normalizedKey) &&
         env.NODE_ENV === "production" &&
         !env.ENABLE_DEBUG_LOGS
       ) {
@@ -261,7 +243,7 @@ function hashSensitiveFields<T>(obj: T, depth = 0): T {
       }
       // Hash emails in production only (server-side only)
       else if (
-        SENSITIVE_FIELD_NAMES.has(key) &&
+        NORMALIZED_SENSITIVE_FIELD_NAMES.has(normalizedKey) &&
         typeof value === "string" &&
         env.NODE_ENV === "production" &&
         typeof window === "undefined" // Server-side check
@@ -289,4 +271,8 @@ function isPlainObject(obj: unknown): obj is Record<string, unknown> {
   if (typeof obj !== "object" || obj === null) return false;
   const proto = Object.getPrototypeOf(obj);
   return proto === Object.prototype || proto === null;
+}
+
+function normalizeFieldNames(fieldNames: Set<string>) {
+  return new Set([...fieldNames].map(normalizeRedactionFieldName));
 }

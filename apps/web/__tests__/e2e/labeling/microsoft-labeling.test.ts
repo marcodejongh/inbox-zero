@@ -17,11 +17,14 @@
  * - Clean up all test labels at the end
  */
 
-import { describe, test, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import prisma from "@/utils/prisma";
 import { createEmailProvider } from "@/utils/email/provider";
 import { findOldMessage } from "@/__tests__/e2e/helpers";
 import type { EmailProvider } from "@/utils/email/types";
+import { createTestLogger } from "@/__tests__/helpers";
+
+const logger = createTestLogger();
 
 // ============================================
 // TEST DATA - SET VIA ENVIRONMENT VARIABLES
@@ -34,8 +37,6 @@ const TEST_CONVERSATION_ID =
 const DEFAULT_TEST_OUTLOOK_MESSAGE_ID =
   "AQMkADAwATNiZmYAZS05YWEAYy1iNWY0LTAwAi0wMAoARgAAA-ybH4V64nRKkgXhv9H-GEkHAP38WoVoPXRMilGF27prOB8AAAIBDAAAAP38WoVoPXRMilGF27prOB8AAABGAqbwAAAA";
 let TEST_OUTLOOK_MESSAGE_ID = process.env.TEST_OUTLOOK_MESSAGE_ID || "";
-
-vi.mock("server-only", () => ({}));
 
 describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
   let provider: EmailProvider;
@@ -72,6 +73,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
     provider = await createEmailProvider({
       emailAccountId: emailAccount.id,
       provider: "microsoft",
+      logger,
     });
 
     // If message ID not provided via env, use the helper to find an old message
@@ -238,7 +240,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
       const message = await provider.getMessage(TEST_OUTLOOK_MESSAGE_ID);
 
       expect(message.labelIds).toBeDefined();
-      expect(message.labelIds).toContain(label.name);
+      expect(message.labelIds).toContain(label.id);
 
       console.log("   ✅ Verified label is on message");
       console.log(`      Message labels: ${message.labelIds?.join(", ")}`);
@@ -281,8 +283,8 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
       const message = await provider.getMessage(TEST_OUTLOOK_MESSAGE_ID);
 
       expect(message.labelIds).toBeDefined();
-      expect(message.labelIds).toContain(label1.name);
-      expect(message.labelIds).toContain(label2.name);
+      expect(message.labelIds).toContain(label1.id);
+      expect(message.labelIds).toContain(label2.id);
 
       console.log("   ✅ Verified both labels are on message");
       console.log(`      Message labels: ${message.labelIds?.join(", ")}`);
@@ -332,7 +334,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
 
       // Verify label is applied
       const messageBefore = await provider.getMessage(TEST_OUTLOOK_MESSAGE_ID);
-      expect(messageBefore.labelIds).toContain(label.name);
+      expect(messageBefore.labelIds).toContain(label.id);
       console.log("   ✅ Verified label is on message before removal");
 
       // Remove label from thread - use the message's actual conversationId
@@ -341,7 +343,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
 
       // Verify label is removed
       const messageAfter = await provider.getMessage(TEST_OUTLOOK_MESSAGE_ID);
-      expect(messageAfter.labelIds).not.toContain(label.name);
+      expect(messageAfter.labelIds).not.toContain(label.id);
       console.log("   ✅ Verified label is removed from message");
     });
 
@@ -389,7 +391,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
       // Verify all messages in thread don't have the label
       for (const msg of threadMessages) {
         const message = await provider.getMessage(msg.id);
-        expect(message.labelIds).not.toContain(label.name);
+        expect(message.labelIds).not.toContain(label.id);
       }
 
       console.log(
@@ -441,7 +443,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
       const messageWithLabel = await provider.getMessage(
         TEST_OUTLOOK_MESSAGE_ID,
       );
-      expect(messageWithLabel.labelIds).toContain(label.name);
+      expect(messageWithLabel.labelIds).toContain(label.id);
       console.log(
         `      ✅ Label verified on message (${messageWithLabel.labelIds?.length} total labels)`,
       );
@@ -456,7 +458,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
       const messageWithoutLabel = await provider.getMessage(
         TEST_OUTLOOK_MESSAGE_ID,
       );
-      expect(messageWithoutLabel.labelIds).not.toContain(label.name);
+      expect(messageWithoutLabel.labelIds).not.toContain(label.id);
       console.log("      ✅ Label confirmed removed from message");
 
       console.log("\n   ✅ Full lifecycle test completed successfully!");
@@ -484,8 +486,8 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
 
       // Verify only label1 is present
       let message = await provider.getMessage(TEST_OUTLOOK_MESSAGE_ID);
-      expect(message.labelIds).toContain(label1.name);
-      expect(message.labelIds).not.toContain(label2.name);
+      expect(message.labelIds).toContain(label1.id);
+      expect(message.labelIds).not.toContain(label2.id);
       console.log("   ✅ State check 1: Only label1 present");
 
       // Apply label2
@@ -497,8 +499,8 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
 
       // Verify both labels are present
       message = await provider.getMessage(TEST_OUTLOOK_MESSAGE_ID);
-      expect(message.labelIds).toContain(label1.name);
-      expect(message.labelIds).toContain(label2.name);
+      expect(message.labelIds).toContain(label1.id);
+      expect(message.labelIds).toContain(label2.id);
       console.log("   ✅ State check 2: Both labels present");
 
       // Remove label1 (use the message's actual threadId)
@@ -506,8 +508,8 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
 
       // Verify only label2 is present
       message = await provider.getMessage(TEST_OUTLOOK_MESSAGE_ID);
-      expect(message.labelIds).not.toContain(label1.name);
-      expect(message.labelIds).toContain(label2.name);
+      expect(message.labelIds).not.toContain(label1.id);
+      expect(message.labelIds).toContain(label2.id);
       console.log("   ✅ State check 3: Only label2 present");
 
       // Remove label2 (use the message's actual threadId)
@@ -515,8 +517,8 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Labeling E2E Tests", () => {
 
       // Verify neither label is present
       message = await provider.getMessage(TEST_OUTLOOK_MESSAGE_ID);
-      expect(message.labelIds).not.toContain(label1.name);
-      expect(message.labelIds).not.toContain(label2.name);
+      expect(message.labelIds).not.toContain(label1.id);
+      expect(message.labelIds).not.toContain(label2.id);
       console.log("   ✅ State check 4: No test labels present");
 
       console.log("   ✅ Label state consistency maintained!");

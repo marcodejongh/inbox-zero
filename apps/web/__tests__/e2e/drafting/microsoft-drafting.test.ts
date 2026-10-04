@@ -11,13 +11,16 @@
  * 3. Set TEST_CONVERSATION_ID with a real conversationId from your logs (optional)
  */
 
-import { describe, test, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import prisma from "@/utils/prisma";
 import { createEmailProvider } from "@/utils/email/provider";
 import type { EmailProvider } from "@/utils/email/types";
 import type { ParsedMessage } from "@/utils/types";
 import { extractEmailAddress } from "@/utils/email";
 import { findOldMessage } from "@/__tests__/e2e/helpers";
+import { createTestLogger } from "@/__tests__/helpers";
+
+const logger = createTestLogger();
 
 // ============================================
 // TEST DATA - SET VIA ENVIRONMENT VARIABLES
@@ -28,8 +31,6 @@ const TEST_CONVERSATION_ID =
   process.env.TEST_CONVERSATION_ID ||
   "AQQkADAwATNiZmYAZS05YWEAYy1iNWY0LTAwAi0wMAoAEABuo-fmt9KvQ4u55KlWB32H";
 const TEST_OUTLOOK_MESSAGE_ID = process.env.TEST_OUTLOOK_MESSAGE_ID;
-
-vi.mock("server-only", () => ({}));
 
 describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Drafting E2E Tests", () => {
   let provider: EmailProvider;
@@ -74,6 +75,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Microsoft Outlook Drafting E2E Tests", () => {
     provider = await createEmailProvider({
       emailAccountId: account.id,
       provider: "microsoft",
+      logger,
     });
 
     emailAccount = {

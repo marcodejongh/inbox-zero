@@ -9,15 +9,15 @@
  * - TEST_OUTLOOK_EMAIL=<your outlook email>
  */
 
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import prisma from "@/utils/prisma";
 import { createEmailProvider } from "@/utils/email/provider";
 import type { EmailProvider } from "@/utils/email/types";
+import { createTestLogger } from "@/__tests__/helpers";
 
+const logger = createTestLogger();
 const RUN_E2E_TESTS = process.env.RUN_E2E_TESTS;
 const TEST_OUTLOOK_EMAIL = process.env.TEST_OUTLOOK_EMAIL;
-
-vi.mock("server-only", () => ({}));
 
 describe.skipIf(!RUN_E2E_TESTS)("Outlook Search Edge Cases", () => {
   let provider: EmailProvider | undefined;
@@ -52,6 +52,7 @@ describe.skipIf(!RUN_E2E_TESTS)("Outlook Search Edge Cases", () => {
     provider = await createEmailProvider({
       emailAccountId: emailAccount.id,
       provider: "microsoft",
+      logger,
     });
 
     console.log(`\n✅ Using account for search tests: ${emailAccount.email}`);

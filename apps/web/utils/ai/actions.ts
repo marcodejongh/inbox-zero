@@ -1,45 +1,73 @@
 import { after } from "next/server";
-import { ActionType } from "@/generated/prisma/enums";
-import type { ExecutedRule } from "@/generated/prisma/client";
+import { ActionType, MessagingMessageStatus } from "@/generated/prisma/enums";
 import type { Logger } from "@/utils/logger";
-import { callWebhook } from "@/utils/webhook";
-import type { ActionItem, EmailForAction } from "@/utils/ai/types";
+import { callWebhook } from "@/utils/outbound-webhook/call-webhook";
+import type {
+  ActionExecutionEmailAccount,
+  ActionItem,
+  EmailForAction,
+  ExecutedRuleForAction,
+} from "@/utils/ai/types";
 import type { EmailProvider } from "@/utils/email/types";
 import { enqueueDigestItem } from "@/utils/digest/index";
 import { filterNullProperties } from "@/utils";
 import { labelMessageAndSync } from "@/utils/label.server";
 import { hasVariables } from "@/utils/template";
 import prisma from "@/utils/prisma";
+import { sendColdEmailNotification } from "@/utils/cold-email/send-notification";
+import {
+  extractEmailAddress,
+  extractEmailAddresses,
+  isSameEmailAddress,
+  isSameOrganization,
+  splitRecipientList,
+} from "@/utils/email";
+import { captureException, getErrorMessage } from "@/utils/error";
+import { env } from "@/env";
+import { ensureEmailSendingEnabled } from "@/utils/mail";
+import { isDeleteEmailActionEnabled } from "@/utils/delete-email-action";
+import { callMcpTool } from "@/utils/mcp/call-tool";
+import { findIntegration } from "@/utils/mcp/integrations";
+import { getIntegrationToolSpec } from "@/utils/mcp/tool-specs";
+import { resolveActionAttachments } from "@/utils/ai/action-attachments";
+import {
+  getMessagingRuleNotificationResult,
+  sendMessagingRuleNotification,
+} from "@/utils/messaging/rule-notifications";
+import { isMessagingDraftActionType } from "@/utils/actions/draft-reply";
+import { checkHasAccess } from "@/utils/premium/server";
+import { handlePreviousDraftDeletion } from "@/utils/ai/choose-rule/draft-management";
+import { isIntegrationActionEnabledForUserId } from "@/utils/integration-action.server";
 
 const MODULE = "ai-actions";
 
 type ActionFunction<T extends Partial<Omit<ActionItem, "type">>> = (options: {
   client: EmailProvider;
   email: EmailForAction;
-  args: T;
-  userEmail: string;
-  userId: string;
-  emailAccountId: string;
-  executedRule: ExecutedRule;
+  args: T & Pick<ActionItem, "id">;
+  emailAccount: ActionExecutionEmailAccount;
+  executedRule: ExecutedRuleForAction;
   logger: Logger;
-}) => Promise<any>;
+}) => Promise<unknown>;
+
+type MessagingNotificationActionType =
+  | typeof ActionType.DRAFT_MESSAGING_CHANNEL
+  | typeof ActionType.NOTIFY_MESSAGING_CHANNEL;
 
 export const runActionFunction = async (options: {
   client: EmailProvider;
   email: EmailForAction;
   action: ActionItem;
-  userEmail: string;
-  userId: string;
-  emailAccountId: string;
-  executedRule: ExecutedRule;
+  emailAccount: ActionExecutionEmailAccount;
+  executedRule: ExecutedRuleForAction;
   logger: Logger;
 }) => {
-  const { action, userEmail, logger } = options;
+  const { action, emailAccount, logger } = options;
   const log = logger.with({ module: MODULE });
 
   log.info("Running action", {
     actionType: action.type,
-    userEmail,
+    userEmail: emailAccount.email,
     id: action.id,
   });
   log.trace("Running action", () => filterNullProperties(action));
@@ -57,11 +85,18 @@ export const runActionFunction = async (options: {
       return label(opts);
     case ActionType.DRAFT_EMAIL:
       return draft(opts);
+    case ActionType.DRAFT_MESSAGING_CHANNEL:
+      return draft_messaging_channel(opts);
+    case ActionType.NOTIFY_MESSAGING_CHANNEL:
+      return notify_messaging_channel(opts);
     case ActionType.REPLY:
+      ensureEmailSendingEnabled();
       return reply(opts);
     case ActionType.SEND_EMAIL:
+      ensureEmailSendingEnabled();
       return send_email(opts);
     case ActionType.FORWARD:
+      ensureEmailSendingEnabled();
       return forward(opts);
     case ActionType.MARK_SPAM:
       return mark_spam(opts);
@@ -69,10 +104,24 @@ export const runActionFunction = async (options: {
       return call_webhook(opts);
     case ActionType.MARK_READ:
       return mark_read(opts);
+    case ActionType.STAR:
+      return star(opts);
+    case ActionType.DELETE:
+      if (!isDeleteEmailActionEnabled()) {
+        log.info(
+          "Skipping delete action because delete email actions are disabled",
+        );
+        return;
+      }
+      return delete_email(opts);
     case ActionType.DIGEST:
       return digest(opts);
     case ActionType.MOVE_FOLDER:
       return move_folder(opts);
+    case ActionType.NOTIFY_SENDER:
+      return notify_sender(opts);
+    case ActionType.INTEGRATION:
+      return integration(opts);
     default:
       throw new Error(`Unknown action: ${action}`);
   }
@@ -81,15 +130,15 @@ export const runActionFunction = async (options: {
 const archive: ActionFunction<Record<string, unknown>> = async ({
   client,
   email,
-  userEmail,
+  emailAccount,
 }) => {
-  await client.archiveThread(email.threadId, userEmail);
+  await client.archiveThread(email.threadId, emailAccount.email);
 };
 
 const label: ActionFunction<{
   label?: string | null;
   labelId?: string | null;
-}> = async ({ client, email, args, emailAccountId, logger }) => {
+}> = async ({ client, email, args, emailAccount, logger }) => {
   logger.info("Label action started", {
     label: args.label,
     labelId: args.labelId,
@@ -127,7 +176,7 @@ const label: ActionFunction<{
     messageId: email.id,
     labelId: labelIdToUse,
     labelName: args.label || null,
-    emailAccountId,
+    emailAccountId: emailAccount.id,
     logger,
   });
 
@@ -136,7 +185,7 @@ const label: ActionFunction<{
       lazyUpdateActionLabelId({
         labelName: args.label!,
         labelId: labelIdToUse!,
-        emailAccountId,
+        emailAccountId: emailAccount.id,
         logger,
       }),
     );
@@ -144,16 +193,79 @@ const label: ActionFunction<{
 };
 
 const draft: ActionFunction<{
+  messagingChannelId?: string | null;
   subject?: string | null;
   content?: string | null;
   to?: string | null;
   cc?: string | null;
   bcc?: string | null;
-}> = async ({ client, email, args, userEmail, executedRule }) => {
+  staticAttachments?: ActionItem["staticAttachments"];
+  selectedAttachments?: ActionItem["selectedAttachments"];
+}> = async ({ client, email, args, emailAccount, executedRule, logger }) => {
+  if (env.NEXT_PUBLIC_AUTO_DRAFT_DISABLED) return;
+
+  if (
+    isLegacyMessagingDraft({
+      executedRule,
+      messagingChannelId: args.messagingChannelId,
+    })
+  ) {
+    if (args.id) {
+      const notificationResult = await getMessagingRuleNotificationResult({
+        executedActionId: args.id,
+        email,
+        logger,
+      });
+
+      if (
+        notificationResult.delivered &&
+        notificationResult.kind === "interactive"
+      ) {
+        return;
+      }
+
+      if (!notificationResult.delivered) {
+        logger.warn(
+          "Falling back to mailbox draft after messaging delivery failure",
+          {
+            actionId: args.id,
+          },
+        );
+      }
+    }
+  }
+
+  const previousDraftHandling = await handlePreviousDraftDeletion({
+    client,
+    executedRule,
+    logger,
+  });
+
+  if (!previousDraftHandling.shouldCreateDraft) {
+    logger.info("Skipping draft creation", {
+      existingDraftId: previousDraftHandling.existingDraftId,
+      reason: previousDraftHandling.reason,
+    });
+    return { draftId: "" };
+  }
+
+  const attachments = await resolveActionAttachments({
+    email,
+    emailAccount,
+    executedRule,
+    logger,
+    staticAttachments: args.staticAttachments,
+    selectedAttachments: args.selectedAttachments,
+    includeAiSelectedAttachments: true,
+  });
+
   const draftArgs = {
     to: args.to ?? undefined,
     subject: args.subject ?? undefined,
     content: args.content ?? "",
+    cc: args.cc ?? undefined,
+    bcc: args.bcc ?? undefined,
+    attachments,
   };
 
   const result = await client.draftEmail(
@@ -173,20 +285,51 @@ const draft: ActionFunction<{
       attachments: email.attachments,
     },
     draftArgs,
-    userEmail,
-    executedRule,
+    emailAccount.email,
   );
   return { draftId: result.draftId };
 };
+
+const draft_messaging_channel: ActionFunction<{
+  messagingChannelId?: string | null;
+}> = async ({ email, args, logger }) =>
+  runMessagingNotificationAction({
+    actionId: args.id,
+    actionType: ActionType.DRAFT_MESSAGING_CHANNEL,
+    messagingChannelId: args.messagingChannelId,
+    email,
+    logger,
+  });
+
+const notify_messaging_channel: ActionFunction<{
+  messagingChannelId?: string | null;
+}> = async ({ email, args, logger }) =>
+  runMessagingNotificationAction({
+    actionId: args.id,
+    actionType: ActionType.NOTIFY_MESSAGING_CHANNEL,
+    messagingChannelId: args.messagingChannelId,
+    email,
+    logger,
+  });
 
 const reply: ActionFunction<{
   content?: string | null;
   cc?: string | null;
   bcc?: string | null;
-}> = async ({ client, email, args }) => {
+  staticAttachments?: ActionItem["staticAttachments"];
+}> = async ({ client, email, args, emailAccount, executedRule, logger }) => {
   if (!args.content) return;
 
-  await client.replyToEmail(
+  const attachments = await resolveActionAttachments({
+    email,
+    emailAccount,
+    executedRule,
+    logger,
+    staticAttachments: args.staticAttachments,
+    includeAiSelectedAttachments: false,
+  });
+
+  const { messageId } = await client.replyToEmail(
     {
       id: email.id,
       threadId: email.threadId,
@@ -201,7 +344,9 @@ const reply: ActionFunction<{
       textHtml: email.textHtml,
     },
     args.content,
+    { attachments },
   );
+  return { sentMessageIds: [messageId] };
 };
 
 const send_email: ActionFunction<{
@@ -210,8 +355,18 @@ const send_email: ActionFunction<{
   to?: string | null;
   cc?: string | null;
   bcc?: string | null;
-}> = async ({ client, args }) => {
+  staticAttachments?: ActionItem["staticAttachments"];
+}> = async ({ client, args, email, emailAccount, executedRule, logger }) => {
   if (!args.to || !args.subject || !args.content) return;
+
+  const attachments = await resolveActionAttachments({
+    email,
+    emailAccount,
+    executedRule,
+    logger,
+    staticAttachments: args.staticAttachments,
+    includeAiSelectedAttachments: false,
+  });
 
   const emailArgs = {
     to: args.to,
@@ -219,9 +374,11 @@ const send_email: ActionFunction<{
     bcc: args.bcc ?? undefined,
     subject: args.subject,
     messageText: args.content,
+    attachments,
   };
 
-  await client.sendEmail(emailArgs);
+  const { messageId } = await client.sendEmail(emailArgs);
+  return { sentMessageIds: [messageId] };
 };
 
 const forward: ActionFunction<{
@@ -229,31 +386,86 @@ const forward: ActionFunction<{
   to?: string | null;
   cc?: string | null;
   bcc?: string | null;
-}> = async ({ client, email, args }) => {
+}> = async ({ client, email, args, logger }) => {
   if (!args.to) return;
 
+  const messageParticipants = [
+    email.headers.from,
+    email.headers.to,
+    email.headers.cc,
+    email.headers.bcc,
+  ].flatMap((value) => extractEmailAddresses(value ?? ""));
+
+  const toRecipients = removeMessageParticipants(args.to, messageParticipants);
+  const ccRecipients = removeMessageParticipants(args.cc, messageParticipants);
+  const bccRecipients = removeMessageParticipants(
+    args.bcc,
+    messageParticipants,
+  );
+
+  if (!toRecipients.length && !ccRecipients.length && !bccRecipients.length) {
+    logger.warn("Skipping forward because no new recipients remain");
+    return { skipped: true, reason: "NO_NEW_FORWARD_RECIPIENTS" };
+  }
+
+  const recipients = [args.to, args.cc, args.bcc].flatMap((value) =>
+    extractEmailAddresses(value ?? ""),
+  );
+  const remainingRecipientCount =
+    toRecipients.length + ccRecipients.length + bccRecipients.length;
+  if (remainingRecipientCount < recipients.length) {
+    logger.info("Removed existing message participants from forward");
+  }
+
+  const forwardMessage = {
+    id: email.id,
+    threadId: email.threadId,
+    headers: email.headers,
+    internalDate: email.internalDate,
+    snippet: "",
+    historyId: "",
+    inline: [],
+    subject: email.headers.subject,
+    date: email.headers.date,
+  };
   const forwardArgs = {
     messageId: email.id,
-    to: args.to,
-    cc: args.cc ?? undefined,
-    bcc: args.bcc ?? undefined,
     content: args.content ?? undefined,
   };
 
-  await client.forwardEmail(
-    {
-      id: email.id,
-      threadId: email.threadId,
-      headers: email.headers,
-      internalDate: email.internalDate,
-      snippet: "",
-      historyId: "",
-      inline: [],
-      subject: email.headers.subject,
-      date: email.headers.date,
-    },
-    forwardArgs,
-  );
+  if (!toRecipients.length && !ccRecipients.length) {
+    // A primary recipient is required, so send BCC-only recipients separately
+    // to avoid exposing them to each other.
+    const sentMessageIds = [];
+    for (const recipient of bccRecipients) {
+      try {
+        const { messageId } = await client.forwardEmail(forwardMessage, {
+          ...forwardArgs,
+          to: recipient,
+        });
+        sentMessageIds.push(messageId);
+      } catch (error) {
+        throw attachSentMessageIds(error, sentMessageIds);
+      }
+    }
+    return { sentMessageIds };
+  }
+
+  if (!toRecipients.length) {
+    const primaryRecipient = ccRecipients.shift();
+    if (!primaryRecipient) {
+      throw new Error("Forward requires a primary recipient");
+    }
+    toRecipients.push(primaryRecipient);
+  }
+
+  const { messageId } = await client.forwardEmail(forwardMessage, {
+    ...forwardArgs,
+    to: toRecipients.join(", "),
+    cc: ccRecipients.join(", ") || undefined,
+    bcc: bccRecipients.join(", ") || undefined,
+  });
+  return { sentMessageIds: [messageId] };
 };
 
 const mark_spam: ActionFunction<Record<string, unknown>> = async ({
@@ -266,7 +478,7 @@ const mark_spam: ActionFunction<Record<string, unknown>> = async ({
 const call_webhook: ActionFunction<{ url?: string | null }> = async ({
   email,
   args,
-  userId,
+  emailAccount,
   executedRule,
 }) => {
   if (!args.url) return;
@@ -290,7 +502,7 @@ const call_webhook: ActionFunction<{ url?: string | null }> = async ({
     },
   };
 
-  await callWebhook(userId, args.url, payload);
+  await callWebhook(emailAccount.userId, args.url, payload);
 };
 
 const mark_read: ActionFunction<Record<string, unknown>> = async ({
@@ -300,25 +512,239 @@ const mark_read: ActionFunction<Record<string, unknown>> = async ({
   await client.markRead(email.threadId);
 };
 
+const delete_email: ActionFunction<Record<string, unknown>> = async ({
+  client,
+  email,
+  emailAccount,
+}) => {
+  await client.trashThread(email.threadId, emailAccount.email, "automation");
+};
+
+const star: ActionFunction<Record<string, unknown>> = async ({
+  client,
+  email,
+}) => {
+  await client.starMessage(email.id);
+};
+
 const digest: ActionFunction<{ id?: string }> = async ({
   email,
-  emailAccountId,
+  emailAccount,
   args,
   logger,
 }) => {
   if (!args.id) return;
+  const hasDigestAccess = await checkHasAccess({
+    userId: emailAccount.userId,
+    minimumTier: "PLUS_MONTHLY",
+  });
+  if (!hasDigestAccess) {
+    logger.info("Skipping digest action because plan does not include it");
+    return;
+  }
+
   const actionId = args.id;
-  await enqueueDigestItem({ email, emailAccountId, actionId, logger });
+  await enqueueDigestItem({
+    email,
+    emailAccountId: emailAccount.id,
+    actionId,
+    logger,
+  });
 };
 
-const move_folder: ActionFunction<{ folderId?: string | null }> = async ({
-  client,
+const move_folder: ActionFunction<{
+  folderId?: string | null;
+  folderName?: string | null;
+}> = async ({ client, email, emailAccount, args, logger }) => {
+  const originalFolderId = args.folderId;
+  let folderIdToUse = originalFolderId;
+
+  // resolve folder name to ID if needed (similar to label resolution)
+  if (!folderIdToUse && args.folderName) {
+    if (hasVariables(args.folderName)) {
+      logger.error("Template folder name not processed by AI", {
+        folderName: args.folderName,
+      });
+      return;
+    }
+
+    logger.info("Resolving folder name to ID", { folderName: args.folderName });
+    folderIdToUse = await client.getOrCreateFolderIdByName(args.folderName);
+
+    if (!folderIdToUse) {
+      logger.error("Failed to resolve folder", { folderName: args.folderName });
+      return;
+    }
+  }
+
+  if (!folderIdToUse) return;
+
+  await client.moveThreadToFolder(
+    email.threadId,
+    emailAccount.email,
+    folderIdToUse,
+  );
+
+  // lazy-update the folderId in the database for future runs
+  if (!originalFolderId && folderIdToUse && args.folderName) {
+    after(() =>
+      lazyUpdateActionFolderId({
+        folderName: args.folderName!,
+        folderId: folderIdToUse!,
+        emailAccountId: emailAccount.id,
+        logger,
+      }),
+    );
+  }
+};
+
+const integration: ActionFunction<{
+  integrationName?: string | null;
+  integrationToolName?: string | null;
+  integrationArgs?: ActionItem["integrationArgs"];
+}> = async ({ args, emailAccount, logger }) => {
+  if (!(await isIntegrationActionEnabledForUserId(emailAccount.userId))) {
+    logger.info(
+      "Skipping integration action because integration actions are disabled",
+    );
+    return { skipped: true, reason: "INTEGRATION_ACTION_DISABLED" };
+  }
+
+  const { integrationName, integrationToolName } = args;
+  if (!integrationName || !integrationToolName) {
+    return {
+      success: false,
+      errorCode: "MISSING_INTEGRATION_CONFIG",
+      errorMessage: "Integration action is missing its integration or tool",
+    };
+  }
+
+  const integrationConfig = findIntegration(integrationName);
+  const ruleActionWriteTools = integrationConfig?.ruleActionWriteTools ?? [];
+  if (
+    !integrationConfig ||
+    !ruleActionWriteTools.includes(integrationToolName)
+  ) {
+    return {
+      success: false,
+      errorCode: "UNSUPPORTED_INTEGRATION_TOOL",
+      errorMessage: `Unsupported integration tool: ${integrationName}/${integrationToolName}`,
+    };
+  }
+
+  const connection = await prisma.mcpConnection.findFirst({
+    where: {
+      emailAccountId: emailAccount.id,
+      isActive: true,
+      integration: { name: integrationName },
+    },
+    select: { id: true },
+  });
+  if (!connection) {
+    return {
+      success: false,
+      errorCode: "INTEGRATION_NOT_CONNECTED",
+      errorMessage: `${integrationConfig.displayName} is not connected. Connect it on the Integrations page.`,
+    };
+  }
+
+  const spec = getIntegrationToolSpec(integrationName, integrationToolName);
+  if (!spec) {
+    return {
+      success: false,
+      errorCode: "UNSUPPORTED_INTEGRATION_TOOL",
+      errorMessage: `Unsupported integration tool: ${integrationName}/${integrationToolName}`,
+    };
+  }
+
+  const resolvedArgs = readIntegrationArgs(args.integrationArgs);
+  const missingArg = spec.args.find(
+    (arg) => arg.required && !resolvedArgs[arg.key]?.trim(),
+  );
+  if (missingArg) {
+    return {
+      success: false,
+      errorCode: "MISSING_INTEGRATION_ARGS",
+      errorMessage: `The integration action has no ${missingArg.label.toLowerCase()}`,
+    };
+  }
+
+  const toolArgs = spec.buildPayload(resolvedArgs);
+
+  try {
+    await callMcpTool({
+      emailAccountId: emailAccount.id,
+      integration: integrationName,
+      toolName: integrationToolName,
+      args: toolArgs,
+    });
+    return { success: true };
+  } catch (error) {
+    logger.error("Integration action failed", {
+      error,
+      integration: integrationName,
+      toolName: integrationToolName,
+    });
+    return {
+      success: false,
+      errorCode: "INTEGRATION_CALL_FAILED",
+      errorMessage:
+        getErrorMessage(error) ?? "The integration tool call failed",
+    };
+  }
+};
+
+const notify_sender: ActionFunction<Record<string, unknown>> = async ({
   email,
-  userEmail,
-  args,
+  emailAccount,
+  logger,
 }) => {
-  if (!args.folderId) return;
-  await client.moveThreadToFolder(email.threadId, userEmail, args.folderId);
+  const senderEmail = extractEmailAddress(email.headers.from);
+  if (!senderEmail) {
+    logger.error("Could not extract sender email for notify_sender action");
+    return { success: false, errorCode: "MISSING_SENDER_EMAIL" };
+  }
+
+  // A learned pattern can match without a fresh classification, so guard here too:
+  // this action emails the sender, and a wrong one accuses a colleague of spamming.
+  if (isSameOrganization(senderEmail, emailAccount.email)) {
+    logger.warn("Skipping cold email notification to an internal sender");
+    return { skipped: true, reason: "INTERNAL_SENDER" };
+  }
+
+  const result = await sendColdEmailNotification({
+    senderEmail,
+    recipientEmail: emailAccount.email,
+    originalSubject: email.headers.subject,
+    originalMessageId: email.headers["message-id"],
+    logger,
+  });
+
+  if (!result.success) {
+    const errorCode =
+      result.error === "Resend not configured"
+        ? "RESEND_NOT_CONFIGURED"
+        : "SEND_FAILED";
+
+    // Best-effort: don't fail the whole rule run if notification can't be sent.
+    logger.error("Cold email notification failed", {
+      error: result.error,
+      errorCode,
+    });
+    logger.trace("Cold email notification failed sender", { senderEmail });
+
+    captureException(
+      new Error(result.error ?? "Cold email notification failed"),
+      {
+        emailAccountId: emailAccount.id,
+        extra: { actionType: ActionType.NOTIFY_SENDER },
+        sampleRate: 0.01,
+      },
+    );
+    return { success: false, errorCode };
+  }
+
+  return { success: true };
 };
 
 async function lazyUpdateActionLabelId({
@@ -354,4 +780,158 @@ async function lazyUpdateActionLabelId({
       error,
     });
   }
+}
+
+async function lazyUpdateActionFolderId({
+  folderName,
+  folderId,
+  emailAccountId,
+  logger,
+}: {
+  folderName: string;
+  folderId: string;
+  emailAccountId: string;
+  logger: Logger;
+}) {
+  try {
+    const result = await prisma.action.updateMany({
+      where: {
+        folderName,
+        folderId: null,
+        rule: { emailAccountId },
+      },
+      data: { folderId },
+    });
+
+    if (result.count > 0) {
+      logger.info("Lazy-updated Action folderId", {
+        folderId,
+        updatedCount: result.count,
+      });
+    }
+  } catch (error) {
+    logger.warn("Failed to lazy-update Action folderId", {
+      folderId,
+      error,
+    });
+  }
+}
+
+async function markMessagingActionFailed({
+  actionId,
+  logger,
+  reason,
+}: {
+  actionId: string;
+  logger: Logger;
+  reason: string;
+}) {
+  try {
+    await prisma.executedAction.update({
+      where: { id: actionId },
+      data: {
+        messagingMessageStatus: MessagingMessageStatus.FAILED,
+      },
+    });
+  } catch (error) {
+    logger.warn("Failed to mark messaging action as failed", {
+      actionId,
+      error,
+    });
+  }
+  logger.warn(reason, { actionId });
+}
+
+async function runMessagingNotificationAction({
+  actionId,
+  actionType,
+  messagingChannelId,
+  email,
+  logger,
+}: {
+  actionId?: string | null;
+  actionType: MessagingNotificationActionType;
+  messagingChannelId?: string | null;
+  email: EmailForAction;
+  logger: Logger;
+}) {
+  if (!actionId) {
+    throw new Error(`Missing action id for ${actionType}`);
+  }
+
+  if (!messagingChannelId) {
+    await markMessagingActionFailed({
+      actionId,
+      logger,
+      reason: `Missing messaging channel for ${actionType}`,
+    });
+    return { success: false, errorCode: "MISSING_MESSAGING_CHANNEL" };
+  }
+
+  const delivered = await sendMessagingRuleNotification({
+    executedActionId: actionId,
+    email,
+    logger,
+  });
+
+  if (delivered) return { success: true };
+
+  await markMessagingActionFailed({
+    actionId,
+    logger,
+    reason: `Failed to deliver ${actionType} notification`,
+  });
+  return { success: false, errorCode: "MESSAGING_DELIVERY_FAILED" };
+}
+
+function isLegacyMessagingDraft({
+  executedRule,
+  messagingChannelId,
+}: {
+  executedRule: ExecutedRuleForAction;
+  messagingChannelId?: string | null;
+}) {
+  if (!messagingChannelId) return false;
+
+  return !executedRule.actionItems?.some((action) =>
+    isMessagingDraftActionType(action.type),
+  );
+}
+
+function readIntegrationArgs(
+  integrationArgs: ActionItem["integrationArgs"],
+): Record<string, string> {
+  if (
+    !integrationArgs ||
+    typeof integrationArgs !== "object" ||
+    Array.isArray(integrationArgs)
+  ) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(integrationArgs).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  );
+}
+
+function removeMessageParticipants(
+  recipientList: string | null | undefined,
+  messageParticipants: string[],
+) {
+  return splitRecipientList(recipientList ?? "").filter(
+    (recipient) =>
+      !messageParticipants.some((participant) =>
+        isSameEmailAddress(participant, recipient),
+      ),
+  );
+}
+
+function attachSentMessageIds(error: unknown, sentMessageIds: string[]) {
+  if (error && typeof error === "object") {
+    return Object.assign(error, { sentMessageIds });
+  }
+
+  return Object.assign(new Error(String(error)), { sentMessageIds });
 }

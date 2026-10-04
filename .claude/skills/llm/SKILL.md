@@ -1,0 +1,142 @@
+---
+name: llm
+description: Guidelines for implementing LLM (Language Model) functionality in the application
+---
+# LLM Implementation Guidelines
+
+## Directory Structure
+
+LLM-related code is organized in specific directories:
+
+- `apps/web/utils/ai/` - Main LLM implementations
+- `apps/web/utils/llms/` - Core LLM utilities and configurations
+- `apps/web/__tests__/` - LLM-specific tests
+
+## Key Files
+
+- `utils/llms/index.ts` - Core LLM functionality
+- `utils/llms/model.ts` - Model definitions and configurations
+- `utils/llms/use-cases.ts` - Product use-case to model-role routing
+- `utils/usage.ts` - Usage tracking and monitoring
+
+## Model Routing
+
+For product features with a static model choice, use `getModelForUseCase(emailAccount.user, LlmUseCase.FeatureName)` from `utils/llms/use-cases.ts`. Keep direct `getModel(user, modelType)` calls for generic helpers where the model role is intentionally passed from upstream. When adding or changing a use case, update `utils/llms/use-cases.test.ts`.
+
+## Implementation Pattern
+
+Follow this standard structure for LLM-related functions:
+
+```typescript
+import { z } from "zod";
+import { createScopedLogger } from "@/utils/logger";
+import { chatCompletionObject } from "@/utils/llms";
+import type { EmailAccountWithAI } from "@/utils/llms/types";
+import { createGenerateObject } from "@/utils/llms";
+import { getModelForUseCase, LlmUseCase } from "@/utils/llms/use-cases";
+
+export async function featureFunction(options: {
+  inputData: InputType;
+  emailAccount: EmailAccountWithAI;
+}) {
+  const { inputData, user } = options;
+
+  if (!inputData || [other validation conditions]) {
+    logger.warn("Invalid input for feature function");
+    return null;
+  }
+
+  const system = `[Detailed system prompt that defines the LLM's role and task]`;
+
+  const prompt = `[User prompt with context and specific instructions]
+
+<data>
+...
+</data>
+
+${emailAccount.about ? `<user_info>${emailAccount.about}</user_info>` : ""}`;
+
+  const modelOptions = getModelForUseCase(
+    emailAccount.user,
+    LlmUseCase.FeatureName,
+  );
+
+  const generateObject = createGenerateObject({
+    userEmail: emailAccount.email,
+    label: "Feature Name",
+    modelOptions,
+  });
+
+
+  const result = await generateObject({
+    ...modelOptions,
+    system,
+    prompt,
+    schema: z.object({
+      field1: z.string(),
+      field2: z.number(),
+      nested: z.object({
+        subfield: z.string(),
+      }),
+      array_field: z.array(z.string()),
+    }),
+  });
+
+  return result.object;
+}
+```
+
+## Best Practices
+
+1. **System and User Prompts**:
+
+   - Keep system prompts and user prompts separate
+   - System prompt should define the LLM's role and task specifications
+   - User prompt should contain the actual data and context
+
+2. **Schema Validation**:
+
+   - Always define a Zod schema for response validation
+   - Make schemas as specific as possible to guide the LLM output
+
+3. **Logging**:
+
+   - Use descriptive scoped loggers for each feature
+   - Log inputs and outputs with appropriate log levels
+   - Include relevant context in log messages
+
+4. **Error Handling**:
+
+   - Implement early returns for invalid inputs
+   - Use proper error types and logging
+   - Implement fallbacks for AI failures
+   - Add retry logic for transient failures using `withRetry`
+
+5. **Input Formatting**:
+
+   - Use XML-like tags to structure data in prompts
+   - Remove excessive whitespace and truncate long inputs
+   - Format data consistently across similar functions
+
+6. **Type Safety**:
+
+   - Use TypeScript types for all parameters and return values
+   - Define clear interfaces for complex input/output structures
+
+7. **Code Organization**:
+   - Keep related AI functions in the same file or directory
+   - Extract common patterns into utility functions
+   - Document complex AI logic with clear comments
+
+8. **AI-First Behavior**:
+   - Prefer generic prompt instructions, structured outputs, and model choice over brittle lexical heuristics that imitate model reasoning
+   - Only add deterministic filters when the product truly needs a hard rule outside the model
+   - Do not add prompt examples that closely mirror eval fixtures just to make a test pass
+9. **Draft Attribution Versioning**:
+   - When changing draft-generation prompt inputs, retrieval context, model routing behavior, or post-processing, bump `apps/web/utils/ai/reply/draft-attribution.ts` `DRAFT_PIPELINE_VERSION`
+   - Do not bump it for behavior-preserving refactors that keep the same prompt, context, model role, and output processing
+   - Treat that version as analytics attribution for reply-draft quality comparisons
+
+## Testing
+
+See [llm-test.mdc](mdc:.cursor/rules/llm-test.mdc)

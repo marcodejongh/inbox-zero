@@ -1,0 +1,451 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import prisma from "@/utils/prisma";
+
+const mockEnv = vi.hoisted(() => ({
+  NEXT_PUBLIC_POSTHOG_KEY: "phc_test_key",
+  NEXT_PUBLIC_POSTHOG_API_HOST: undefined as string | undefined,
+  POSTHOG_API_SECRET: "posthog-secret",
+  POSTHOG_PROJECT_ID: "project-1",
+  POSTHOG_FEEDBACK_SURVEY_ID: "survey-1" as string | undefined,
+  POSTHOG_FEEDBACK_SURVEY_QUESTION_ID: "question-1" as string | undefined,
+  EMAIL_ENCRYPT_SALT: "test-encryption-salt",
+  NODE_ENV: "test",
+}));
+
+vi.mock("@/env", () => ({
+  env: mockEnv,
+}));
+
+const captureMock = vi.fn();
+const flushMock = vi.fn().mockResolvedValue(undefined);
+const shutdownMock = vi.fn();
+const getFeatureFlagMock = vi.fn();
+const { afterMock } = vi.hoisted(() => ({
+  afterMock: vi.fn((callback: () => unknown) => callback()),
+}));
+
+vi.mock("posthog-node", () => ({
+  PostHog: class PostHogMock {
+    capture = captureMock;
+    flush = flushMock;
+    shutdown = shutdownMock;
+    getFeatureFlag = getFeatureFlagMock;
+  },
+}));
+
+vi.mock("next/server", () => ({ after: afterMock }));
+
+vi.mock("@/utils/redis", () => ({
+  redis: {
+    del: vi.fn(),
+    set: vi.fn(),
+  },
+}));
+
+vi.mock("@/utils/prisma");
+
+import {
+  FIRST_TIME_EVENTS,
+  deletePosthogUser,
+  getCheckoutSessionIdHash,
+  getServerFeatureFlagVariant,
+  posthogCaptureEvent,
+  trackBillingCancellationInitiated,
+  trackBillingTrialConverted,
+  trackFirstTimeEvent,
+  trackProductFeedback,
+  trackStripeCheckoutCreated,
+  trackUserDeleted,
+  trackUserDeletionRequested,
+} from "./posthog";
+import { redis } from "@/utils/redis";
+
+describe("trackFirstTimeEvent", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("captures PostHog once when Redis grants the NX lock and user email exists", async () => {
+    vi.mocked(redis.set).mockResolvedValue("OK");
+
+    prisma.emailAccount.findUnique.mockResolvedValue({
+      user: { email: "person@example.com" },
+    } as any);
+
+    await trackFirstTimeEvent({
+      emailAccountId: "acct-1",
+      event: FIRST_TIME_EVENTS.FIRST_CHAT_MESSAGE,
+      properties: { source: "test" },
+    });
+
+    expect(redis.set).toHaveBeenCalledWith(
+      `first-event:acct-1:${FIRST_TIME_EVENTS.FIRST_CHAT_MESSAGE}`,
+      "1",
+      { nx: true },
+    );
+    expect(captureMock).toHaveBeenCalledTimes(1);
+    expect(captureMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        distinctId: "person@example.com",
+        event: FIRST_TIME_EVENTS.FIRST_CHAT_MESSAGE,
+        properties: expect.objectContaining({
+          emailAccountId: "acct-1",
+          source: "test",
+        }),
+      }),
+    );
+    expect(shutdownMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not capture when Redis reports the dedupe key already exists", async () => {
+    vi.mocked(redis.set).mockResolvedValue(null);
+
+    await trackFirstTimeEvent({
+      emailAccountId: "acct-2",
+      event: FIRST_TIME_EVENTS.FIRST_AUTOMATED_RULE_RUN,
+    });
+
+    expect(prisma.emailAccount.findUnique).not.toHaveBeenCalled();
+    expect(captureMock).not.toHaveBeenCalled();
+  });
+
+  it("does not hit Redis on a second call for the same account and event in-process", async () => {
+    vi.mocked(redis.set).mockResolvedValue("OK");
+
+    prisma.emailAccount.findUnique.mockResolvedValue({
+      user: { email: "repeat@example.com" },
+    } as any);
+
+    await trackFirstTimeEvent({
+      emailAccountId: "acct-3",
+      event: FIRST_TIME_EVENTS.FIRST_DRAFT_SENT,
+    });
+    await trackFirstTimeEvent({
+      emailAccountId: "acct-3",
+      event: FIRST_TIME_EVENTS.FIRST_DRAFT_SENT,
+    });
+
+    expect(redis.set).toHaveBeenCalledTimes(1);
+    expect(captureMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("evicts older in-process dedupe keys so the cache stays bounded", async () => {
+    vi.mocked(redis.set).mockResolvedValue(null);
+
+    await trackFirstTimeEvent({
+      emailAccountId: "bounded-cache-first-account",
+      event: FIRST_TIME_EVENTS.FIRST_CHAT_MESSAGE,
+    });
+
+    for (let i = 0; i < 1000; i++) {
+      await trackFirstTimeEvent({
+        emailAccountId: `bounded-cache-account-${i}`,
+        event: FIRST_TIME_EVENTS.FIRST_CHAT_MESSAGE,
+      });
+    }
+
+    await trackFirstTimeEvent({
+      emailAccountId: "bounded-cache-first-account",
+      event: FIRST_TIME_EVENTS.FIRST_CHAT_MESSAGE,
+    });
+
+    expect(redis.set).toHaveBeenCalledTimes(1002);
+    expect(redis.set).toHaveBeenLastCalledWith(
+      `first-event:bounded-cache-first-account:${FIRST_TIME_EVENTS.FIRST_CHAT_MESSAGE}`,
+      "1",
+      { nx: true },
+    );
+  });
+
+  it("does not capture when the email account has no user email", async () => {
+    vi.mocked(redis.set).mockResolvedValue("OK");
+
+    prisma.emailAccount.findUnique.mockResolvedValue({
+      user: { email: null },
+    } as any);
+
+    await trackFirstTimeEvent({
+      emailAccountId: "orphan-acct",
+      event: FIRST_TIME_EVENTS.FIRST_CHAT_MESSAGE,
+    });
+
+    expect(captureMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("user deletion events", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    global.fetch = vi.fn();
+  });
+
+  it("encodes email special characters when looking up the PostHog user", async () => {
+    const email = "person+tag&team#100%@example.com";
+    vi.mocked(global.fetch)
+      .mockResolvedValueOnce({
+        json: async () => ({
+          results: [{ id: "person-id", distinct_ids: [email] }],
+        }),
+      } as Response)
+      .mockResolvedValueOnce({} as Response);
+
+    await deletePosthogUser({ email });
+
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      1,
+      "https://app.posthog.com/api/projects/project-1/persons/?distinct_id=person%2Btag%26team%23100%25%40example.com",
+      {
+        headers: {
+          Authorization: "Bearer posthog-secret",
+        },
+      },
+    );
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      2,
+      "https://app.posthog.com/api/projects/project-1/persons/person-id/?delete_events=true",
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: "Bearer posthog-secret",
+        },
+      },
+    );
+  });
+
+  it("captures deletion requested with an anonymous distinct id", async () => {
+    await trackUserDeletionRequested("user-1");
+
+    expect(captureMock).toHaveBeenCalledWith({
+      distinctId: "anonymous",
+      event: "User deletion requested",
+      properties: { userId: "user-1" },
+      sendFeatureFlags: false,
+    });
+    expect(shutdownMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures deletion completed with an anonymous distinct id", async () => {
+    await trackUserDeleted("user-1");
+
+    expect(captureMock).toHaveBeenCalledWith({
+      distinctId: "anonymous",
+      event: "User deleted",
+      properties: { userId: "user-1" },
+      sendFeatureFlags: false,
+    });
+    expect(shutdownMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("trackProductFeedback", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEnv.POSTHOG_FEEDBACK_SURVEY_ID = "survey-1";
+    mockEnv.POSTHOG_FEEDBACK_SURVEY_QUESTION_ID = "question-1";
+  });
+
+  it("captures a regular event and an ID-based survey sent event", async () => {
+    await trackProductFeedback("user@example.com", "Love the assistant");
+
+    expect(captureMock).toHaveBeenCalledTimes(2);
+    expect(captureMock).toHaveBeenNthCalledWith(1, {
+      distinctId: "user@example.com",
+      event: "Product feedback submitted",
+      properties: { feedback: "Love the assistant" },
+      sendFeatureFlags: undefined,
+    });
+    expect(captureMock).toHaveBeenNthCalledWith(2, {
+      distinctId: "user@example.com",
+      event: "survey sent",
+      properties: {
+        $survey_id: "survey-1",
+        "$survey_response_question-1": "Love the assistant",
+        $survey_questions: [
+          {
+            id: "question-1",
+            question: "What's your feedback?",
+          },
+        ],
+        $survey_completed: true,
+      },
+      sendFeatureFlags: undefined,
+    });
+  });
+  it("still captures the regular event when survey env vars are missing", async () => {
+    mockEnv.POSTHOG_FEEDBACK_SURVEY_ID = undefined;
+    mockEnv.POSTHOG_FEEDBACK_SURVEY_QUESTION_ID = undefined;
+
+    await trackProductFeedback("user@example.com", "Still useful");
+
+    expect(captureMock).toHaveBeenCalledTimes(1);
+    expect(captureMock).toHaveBeenCalledWith({
+      distinctId: "user@example.com",
+      event: "Product feedback submitted",
+      properties: { feedback: "Still useful" },
+      sendFeatureFlags: undefined,
+    });
+  });
+});
+
+describe("trackStripeCheckoutCreated", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("captures only once for a replayed Stripe Checkout Session", async () => {
+    vi.mocked(redis.set)
+      .mockResolvedValueOnce("OK")
+      .mockResolvedValueOnce(null);
+
+    await trackStripeCheckoutCreated("user@example.com", "cs_test", {
+      tier: "BASIC_MONTHLY",
+    });
+    await trackStripeCheckoutCreated("user@example.com", "cs_test", {
+      tier: "BASIC_MONTHLY",
+    });
+
+    expect(redis.set).toHaveBeenCalledTimes(2);
+    expect(redis.set).toHaveBeenCalledWith(
+      "posthog:stripe-checkout-created:cs_test",
+      "1",
+      { nx: true, ex: 172_800 },
+    );
+    expect(captureMock).toHaveBeenCalledTimes(1);
+    expect(captureMock).toHaveBeenCalledWith({
+      distinctId: "user@example.com",
+      event: "Stripe checkout created",
+      properties: {
+        checkoutSessionIdHash: getCheckoutSessionIdHash("cs_test"),
+        tier: "BASIC_MONTHLY",
+      },
+      sendFeatureFlags: undefined,
+    });
+  });
+
+  it("captures when Redis is unavailable", async () => {
+    vi.mocked(redis.set).mockRejectedValue(new Error("Redis unavailable"));
+
+    await trackStripeCheckoutCreated("user@example.com", "cs_test", {
+      tier: "BASIC_MONTHLY",
+    });
+
+    expect(captureMock).toHaveBeenCalledTimes(1);
+    expect(redis.del).not.toHaveBeenCalled();
+  });
+
+  it("releases the dedupe reservation when PostHog capture fails", async () => {
+    vi.mocked(redis.set).mockResolvedValue("OK");
+    flushMock.mockRejectedValueOnce(new Error("PostHog unavailable"));
+
+    await trackStripeCheckoutCreated("user@example.com", "cs_test", {
+      tier: "BASIC_MONTHLY",
+    });
+
+    expect(redis.del).toHaveBeenCalledWith(
+      "posthog:stripe-checkout-created:cs_test",
+    );
+  });
+});
+
+describe("posthogCaptureEvent", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("does not fail a delivered event when shutdown cleanup rejects", async () => {
+    const shutdownResult = Promise.reject(new Error("Shutdown unavailable"));
+    shutdownResult.catch(() => undefined);
+    const catchSpy = vi.spyOn(shutdownResult, "catch");
+    shutdownMock.mockReturnValueOnce(shutdownResult);
+
+    await expect(
+      posthogCaptureEvent("user@example.com", "Test event"),
+    ).resolves.toBe(true);
+
+    expect(catchSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Stripe billing outcome events", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("captures the paid trial conversion event used by experiments", async () => {
+    await trackBillingTrialConverted("user@example.com", {
+      subscriptionId: "sub_test",
+    });
+
+    expect(captureMock).toHaveBeenCalledWith({
+      distinctId: "user@example.com",
+      event: "billing_trial_converted",
+      properties: {
+        subscriptionId: "sub_test",
+        $set: {
+          premium: true,
+          premiumTier: "subscription",
+          premiumStatus: "active",
+        },
+      },
+      sendFeatureFlags: undefined,
+    });
+  });
+
+  it("captures the scheduled cancellation event used by experiments", async () => {
+    await trackBillingCancellationInitiated("user@example.com", {
+      subscriptionId: "sub_test",
+    });
+
+    expect(captureMock).toHaveBeenCalledWith({
+      distinctId: "user@example.com",
+      event: "billing_cancellation_initiated",
+      properties: { subscriptionId: "sub_test" },
+      sendFeatureFlags: undefined,
+    });
+  });
+});
+
+describe("getServerFeatureFlagVariant", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the variant and flushes the exposure after the response", async () => {
+    getFeatureFlagMock.mockResolvedValue("paywall-first");
+
+    const variant = await getServerFeatureFlagVariant({
+      key: "onboarding-paywall-first",
+      distinctId: "user@example.com",
+    });
+
+    expect(variant).toBe("paywall-first");
+    expect(getFeatureFlagMock).toHaveBeenCalledWith(
+      "onboarding-paywall-first",
+      "user@example.com",
+    );
+    expect(afterMock).toHaveBeenCalledOnce();
+    expect(flushMock).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to undefined when the lookup fails", async () => {
+    getFeatureFlagMock.mockRejectedValue(new Error("network"));
+
+    expect(
+      await getServerFeatureFlagVariant({
+        key: "onboarding-paywall-first",
+        distinctId: "user@example.com",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("treats boolean flags as no variant", async () => {
+    getFeatureFlagMock.mockResolvedValue(true);
+
+    expect(
+      await getServerFeatureFlagVariant({
+        key: "integration-actions",
+        distinctId: "user@example.com",
+      }),
+    ).toBeUndefined();
+  });
+});

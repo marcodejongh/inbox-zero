@@ -1,0 +1,24 @@
+{
+  "name": "@inboxzero/image-proxy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./node-safe-fetch": "./src/node-safe-fetch.ts",
+    "./proxy-url": "./src/proxy-url.ts",
+    "./proxy-service": "./src/proxy-service.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@inboxzero/network": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@vitest/coverage-v8": "4.1.10",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}

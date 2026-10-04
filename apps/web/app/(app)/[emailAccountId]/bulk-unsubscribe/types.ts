@@ -1,7 +1,14 @@
 import type { NewsletterStatsResponse } from "@/app/api/user/stats/newsletters/route";
 import type { NewsletterStatus } from "@/generated/prisma/enums";
-import type { EmailLabel } from "@/providers/EmailProvider";
+import type { EmailLabel } from "@/providers/email-label-types";
 import type { UserResponse } from "@/app/api/user/me/route";
+
+export type NewsletterFilterType =
+  | "all"
+  | "unhandled"
+  | "unsubscribed"
+  | "autoArchived"
+  | "approved";
 
 export type Row = {
   name: string;
@@ -9,28 +16,28 @@ export type Row = {
   unsubscribeLink?: string | null;
   status?: NewsletterStatus | null;
   autoArchived?: { id?: string | null };
+  labelFilters?: { id: string; labelId: string }[];
 };
 
 type Newsletter = NewsletterStatsResponse["newsletters"][number];
 
 export interface RowProps {
+  checked: boolean;
   emailAccountId: string;
-  userEmail: string;
+  filter: NewsletterFilterType;
+  hasUnsubscribeAccess: boolean;
   item: Newsletter;
-  readPercentage: number;
-  archivedEmails: number;
-  archivedPercentage: number;
+  labels: EmailLabel[];
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
+  mutate: () => Promise<any>;
+  onDoubleClick: () => void;
 
   onOpenNewsletter: (row: Newsletter) => void;
-  labels: EmailLabel[];
-  // biome-ignore lint/suspicious/noExplicitAny: simplest
-  mutate: () => Promise<any>;
-  selected: boolean;
   onSelectRow: () => void;
-  onDoubleClick: () => void;
-  hasUnsubscribeAccess: boolean;
-  refetchPremium: () => Promise<UserResponse | null | undefined>;
+  onToggleSelect: (id: string, shiftKey?: boolean) => void;
   openPremiumModal: () => void;
-  checked: boolean;
-  onToggleSelect: (id: string) => void;
+  readPercentage: number;
+  refetchPremium: () => Promise<UserResponse | null | undefined>;
+  selected: boolean;
+  userEmail: string;
 }

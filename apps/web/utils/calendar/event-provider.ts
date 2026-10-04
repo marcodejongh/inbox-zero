@@ -1,8 +1,14 @@
+import { FastmailCalendarProvider } from "@/utils/calendar/providers/fastmail";
+import { SafeError } from "@/utils/error";
 import prisma from "@/utils/prisma";
 import type { Logger } from "@/utils/logger";
 import type { CalendarEventProvider } from "@/utils/calendar/event-types";
 import { GoogleCalendarEventProvider } from "@/utils/calendar/providers/google-events";
 import { MicrosoftCalendarEventProvider } from "@/utils/calendar/providers/microsoft-events";
+import {
+  isGoogleProvider,
+  isMicrosoftProvider,
+} from "@/utils/email/provider-types";
 
 /**
  * Create calendar event providers for all connected calendars.
@@ -20,6 +26,8 @@ export async function createCalendarEventProviders(
     select: {
       id: true,
       provider: true,
+      email: true,
+      appPassword: true,
       accessToken: true,
       refreshToken: true,
       expiresAt: true,
@@ -34,34 +42,12 @@ export async function createCalendarEventProviders(
   const providers: CalendarEventProvider[] = [];
 
   for (const connection of connections) {
-    if (!connection.refreshToken) continue;
+    if (!isUsableCalendarConnection(connection)) continue;
 
     try {
-      if (connection.provider === "google") {
-        providers.push(
-          new GoogleCalendarEventProvider(
-            {
-              accessToken: connection.accessToken,
-              refreshToken: connection.refreshToken,
-              expiresAt: connection.expiresAt?.getTime() ?? null,
-              emailAccountId,
-            },
-            logger,
-          ),
-        );
-      } else if (connection.provider === "microsoft") {
-        providers.push(
-          new MicrosoftCalendarEventProvider(
-            {
-              accessToken: connection.accessToken,
-              refreshToken: connection.refreshToken,
-              expiresAt: connection.expiresAt?.getTime() ?? null,
-              emailAccountId,
-            },
-            logger,
-          ),
-        );
-      }
+      providers.push(
+        createCalendarEventProvider({ connection, emailAccountId, logger }),
+      );
     } catch (error) {
       logger.error("Failed to create calendar event provider", {
         provider: connection.provider,
@@ -71,4 +57,88 @@ export async function createCalendarEventProviders(
   }
 
   return providers;
+}
+
+// Same connections createCalendarEventProviders can use. A missing refresh
+// token or unknown provider builds no provider, so the chat tool would fail.
+export async function hasUsableCalendarConnection(emailAccountId: string) {
+  const connections = await prisma.calendarConnection.findMany({
+    where: {
+      emailAccountId,
+      isConnected: true,
+    },
+    select: {
+      provider: true,
+      email: true,
+      appPassword: true,
+      refreshToken: true,
+    },
+  });
+
+  return connections.some(isUsableCalendarConnection);
+}
+
+export function createCalendarEventProvider({
+  connection,
+  emailAccountId,
+  logger,
+}: {
+  connection: {
+    email?: string;
+    appPassword?: string | null;
+    accessToken: string | null;
+    expiresAt: Date | null;
+    id: string;
+    provider: string;
+    refreshToken: string | null;
+  };
+  emailAccountId: string;
+  logger: Logger;
+}) {
+  const providerParams = {
+    accessToken: connection.accessToken,
+    connectionId: connection.id,
+    refreshToken: connection.refreshToken,
+    expiresAt: connection.expiresAt?.getTime() ?? null,
+    emailAccountId,
+  };
+
+  if (isGoogleProvider(connection.provider)) {
+    return new GoogleCalendarEventProvider(providerParams, logger);
+  }
+
+  if (isMicrosoftProvider(connection.provider)) {
+    return new MicrosoftCalendarEventProvider(providerParams, logger);
+  }
+
+  if (
+    connection.provider === "fastmail" &&
+    connection.email &&
+    connection.appPassword
+  ) {
+    return new FastmailCalendarProvider({
+      email: connection.email,
+      appPassword: connection.appPassword,
+      connectionId: connection.id,
+      emailAccountId,
+    });
+  }
+
+  throw new SafeError("Unsupported calendar provider or missing credentials");
+}
+
+export function isUsableCalendarConnection(connection: {
+  email?: string;
+  appPassword?: string | null;
+  provider: string;
+  refreshToken: string | null;
+}) {
+  if (connection.provider === "fastmail")
+    return !!connection.email && !!connection.appPassword;
+  if (!connection.refreshToken) return false;
+
+  return (
+    isGoogleProvider(connection.provider) ||
+    isMicrosoftProvider(connection.provider)
+  );
 }

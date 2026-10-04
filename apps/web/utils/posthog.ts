@@ -1,22 +1,91 @@
+import { after } from "next/server";
 import { PostHog } from "posthog-node";
+import type { Properties } from "posthog-js";
 import { env } from "@/env";
 import { createScopedLogger } from "@/utils/logger";
 import { hash } from "@/utils/hash";
+import prisma from "@/utils/prisma";
+import { redis } from "@/utils/redis";
 
 const logger = createScopedLogger("posthog");
+let posthogLlmClient: PostHog | undefined;
+
+export function getPosthogLlmClient() {
+  if (!env.NEXT_PUBLIC_POSTHOG_KEY) return;
+
+  if (!posthogLlmClient) {
+    const host = env.NEXT_PUBLIC_POSTHOG_API_HOST?.startsWith("http")
+      ? env.NEXT_PUBLIC_POSTHOG_API_HOST
+      : undefined;
+
+    posthogLlmClient = new PostHog(env.NEXT_PUBLIC_POSTHOG_KEY, {
+      ...(host ? { host } : {}),
+      flushAt: 1,
+      flushInterval: 0,
+    });
+  }
+
+  return posthogLlmClient;
+}
+
+const FEATURE_FLAG_TIMEOUT_MS = 2000;
+
+// Server-side experiment lookup. Keyed by the same distinct id the browser
+// identifies with (the user's email) so assignment and exposure line up with
+// client-side flag calls. Falls back to undefined on any failure or timeout so
+// a PostHog outage never blocks a page. The exposure event is flushed after
+// the response, since a redirect would otherwise end the request before the
+// client's background send completes.
+export async function getServerFeatureFlagVariant({
+  key,
+  distinctId,
+}: {
+  key: string;
+  distinctId: string;
+}): Promise<string | undefined> {
+  const client = getPosthogLlmClient();
+  if (!client) return;
+
+  try {
+    const variant = await Promise.race([
+      client.getFeatureFlag(key, distinctId),
+      new Promise<undefined>((resolve) =>
+        setTimeout(resolve, FEATURE_FLAG_TIMEOUT_MS),
+      ),
+    ]);
+    after(() =>
+      client.flush().catch((error) => {
+        logger.warn("Failed to flush feature flag exposure", { key, error });
+      }),
+    );
+    return typeof variant === "string" ? variant : undefined;
+  } catch (error) {
+    logger.warn("Failed to evaluate feature flag", { key, error });
+    return;
+  }
+}
+
+export function isPosthogLlmEvalApproved(email: string) {
+  if (env.NODE_ENV !== "development") return false;
+
+  const approvedEmails = getPosthogLlmEvalApprovedEmails();
+  if (!approvedEmails.length) return false;
+
+  return approvedEmails.includes(email.trim().toLowerCase());
+}
 
 async function getPosthogUserId(options: { email: string }) {
-  const personsEndpoint = `https://app.posthog.com/api/projects/${env.POSTHOG_PROJECT_ID}/persons/`;
+  const personsEndpoint = new URL(
+    `https://app.posthog.com/api/projects/${env.POSTHOG_PROJECT_ID}/persons/`,
+  );
+  personsEndpoint.searchParams.set("distinct_id", options.email);
 
   // 1. find user id by distinct id
-  const responseGet = await fetch(
-    `${personsEndpoint}?distinct_id=${options.email}`,
-    {
-      headers: {
-        Authorization: `Bearer ${env.POSTHOG_API_SECRET}`,
-      },
+  const responseGet = await fetch(personsEndpoint.toString(), {
+    headers: {
+      Authorization: `Bearer ${env.POSTHOG_API_SECRET}`,
     },
-  );
+  });
 
   const resGet: { results: { id: string; distinct_ids: string[] }[] } =
     await responseGet.json();
@@ -101,13 +170,14 @@ export async function aliasPosthogUser({
 export async function posthogCaptureEvent(
   email: string,
   event: string,
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   properties?: Record<string, any>,
   sendFeatureFlags?: boolean,
 ) {
   try {
     if (!env.NEXT_PUBLIC_POSTHOG_KEY) {
       logger.warn("NEXT_PUBLIC_POSTHOG_KEY not set");
-      return;
+      return false;
     }
 
     const client = new PostHog(env.NEXT_PUBLIC_POSTHOG_KEY);
@@ -117,9 +187,21 @@ export async function posthogCaptureEvent(
       properties,
       sendFeatureFlags,
     });
-    await client.shutdown();
+    try {
+      await client.flush();
+      return true;
+    } finally {
+      try {
+        Promise.resolve(client.shutdown()).catch((error) => {
+          logger.error("Error shutting down PostHog client", { error });
+        });
+      } catch (error) {
+        logger.error("Error shutting down PostHog client", { error });
+      }
+    }
   } catch (error) {
     logger.error("Error capturing PostHog event", { error });
+    return false;
   }
 }
 
@@ -148,12 +230,61 @@ export async function trackStripeCustomerCreated(
   );
 }
 
-export async function trackStripeCheckoutCreated(email: string) {
-  return posthogCaptureEvent(email, "Stripe checkout created");
+export async function trackStripeCheckoutCreated(
+  email: string,
+  checkoutSessionId: string,
+  properties?: Properties,
+) {
+  const checkoutProperties = {
+    ...properties,
+    checkoutSessionIdHash: getCheckoutSessionIdHash(checkoutSessionId),
+  };
+  const dedupeKey = `posthog:stripe-checkout-created:${checkoutSessionId}`;
+  let firstCapture: string | null;
+
+  try {
+    firstCapture = await redis.set(dedupeKey, "1", {
+      nx: true,
+      ex: 172_800,
+    });
+  } catch (error) {
+    logger.error("Error deduplicating Stripe checkout creation event", {
+      error,
+    });
+    return posthogCaptureEvent(
+      email,
+      "Stripe checkout created",
+      checkoutProperties,
+    );
+  }
+
+  if (!firstCapture) return;
+
+  const captured = await posthogCaptureEvent(
+    email,
+    "Stripe checkout created",
+    checkoutProperties,
+  );
+  if (captured) return;
+
+  try {
+    await redis.del(dedupeKey);
+  } catch (error) {
+    logger.error("Error releasing Stripe checkout creation event lock", {
+      error,
+    });
+  }
 }
 
-export async function trackStripeCheckoutCompleted(email: string) {
-  return posthogCaptureEvent(email, "Stripe checkout completed");
+export async function trackStripeCheckoutCompleted(
+  email: string,
+  properties?: Properties,
+) {
+  return posthogCaptureEvent(email, "Stripe checkout completed", properties);
+}
+
+export function getCheckoutSessionIdHash(checkoutSessionId: string) {
+  return hash(checkoutSessionId);
 }
 
 export async function trackError({
@@ -174,6 +305,7 @@ export async function trackError({
   });
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
 export async function trackTrialStarted(email: string, attributes: any) {
   return posthogCaptureEvent(email, "Premium trial started", {
     ...attributes,
@@ -185,6 +317,7 @@ export async function trackTrialStarted(email: string, attributes: any) {
   });
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
 export async function trackUpgradedToPremium(email: string, attributes: any) {
   return posthogCaptureEvent(email, "Upgraded to premium", {
     ...attributes,
@@ -198,6 +331,7 @@ export async function trackUpgradedToPremium(email: string, attributes: any) {
 
 export async function trackSubscriptionTrialStarted(
   email: string,
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   attributes: any,
 ) {
   return posthogCaptureEvent(email, "Premium subscription trial started", {
@@ -210,9 +344,49 @@ export async function trackSubscriptionTrialStarted(
   });
 }
 
+export async function trackBillingTrialStarted(
+  email: string,
+  attributes: Properties,
+) {
+  return posthogCaptureEvent(email, "billing_trial_started", {
+    ...attributes,
+    $set: {
+      premium: true,
+      premiumTier: "subscription",
+      premiumStatus: "on_trial",
+    },
+  });
+}
+
+export async function trackBillingTrialConverted(
+  email: string,
+  attributes: Properties,
+) {
+  return posthogCaptureEvent(email, "billing_trial_converted", {
+    ...attributes,
+    $set: {
+      premium: true,
+      premiumTier: "subscription",
+      premiumStatus: "active",
+    },
+  });
+}
+
+export async function trackBillingCancellationInitiated(
+  email: string,
+  attributes: Properties,
+) {
+  return posthogCaptureEvent(
+    email,
+    "billing_cancellation_initiated",
+    attributes,
+  );
+}
+
 export async function trackSubscriptionCustom(
   email: string,
   status: string,
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   attributes: any,
 ) {
   const event = `Premium subscription ${status}`;
@@ -229,6 +403,7 @@ export async function trackSubscriptionCustom(
 
 export async function trackSubscriptionStatusChanged(
   email: string,
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   attributes: any,
 ) {
   return posthogCaptureEvent(email, "Subscription status changed", {
@@ -244,6 +419,7 @@ export async function trackSubscriptionStatusChanged(
 export async function trackSubscriptionCancelled(
   email: string,
   status: string,
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   attributes: any,
 ) {
   return posthogCaptureEvent(email, "Cancelled premium subscription", {
@@ -259,6 +435,7 @@ export async function trackSubscriptionCancelled(
 export async function trackSwitchedPremiumPlan(
   email: string,
   status: string,
+  // biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
   attributes: any,
 ) {
   return posthogCaptureEvent(email, "Switched premium plan", {
@@ -289,10 +466,141 @@ export async function trackPaymentSuccess({
   });
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: existing loose external shape
 export async function trackStripeEvent(email: string, data: any) {
   return posthogCaptureEvent(email, "Stripe event", data);
 }
 
+export async function trackUserDeletionRequested(userId: string) {
+  return posthogCaptureEvent(
+    "anonymous",
+    "User deletion requested",
+    { userId },
+    false,
+  );
+}
+
 export async function trackUserDeleted(userId: string) {
   return posthogCaptureEvent("anonymous", "User deleted", { userId }, false);
+}
+
+export const FIRST_TIME_EVENTS = {
+  FIRST_AUTOMATED_RULE_RUN: "First automated rule run",
+  FIRST_DRAFT_SENT: "First AI draft sent",
+  FIRST_CHAT_MESSAGE: "First chat message",
+} as const;
+
+type FirstTimeEvent =
+  (typeof FIRST_TIME_EVENTS)[keyof typeof FIRST_TIME_EVENTS];
+
+const MAX_FIRST_TIME_EVENT_CACHE_SIZE = 1000;
+const firedFirstTimeEvents = new Map<string, true>();
+
+/**
+ * Uses User.email as distinctId (not EmailAccount.email) so the event attaches
+ * to the same PostHog person as signup/billing events.
+ */
+export async function trackFirstTimeEvent({
+  emailAccountId,
+  event,
+  properties,
+}: {
+  emailAccountId: string;
+  event: FirstTimeEvent;
+  properties?: Record<string, unknown>;
+}) {
+  const key = `first-event:${emailAccountId}:${event}`;
+  if (markFirstTimeEventCacheHit(key)) return;
+
+  try {
+    const firstTime = await redis.set(key, "1", { nx: true });
+    addFirstTimeEventCacheKey(key);
+    if (!firstTime) return;
+
+    const emailAccount = await prisma.emailAccount.findUnique({
+      where: { id: emailAccountId },
+      select: { user: { select: { email: true } } },
+    });
+    const userEmail = emailAccount?.user?.email;
+    if (!userEmail) return;
+
+    await posthogCaptureEvent(userEmail, event, {
+      emailAccountId,
+      ...properties,
+    });
+  } catch (error) {
+    logger.error("Error tracking first-time event", { error, event });
+  }
+}
+
+export async function trackOnboardingAnswer(
+  email: string,
+  answers: {
+    surveyFeatures?: string[];
+    surveyRole?: string;
+    surveyGoal?: string;
+    surveyCompanySize?: number;
+    surveySource?: string;
+    surveyImprovements?: string;
+  },
+) {
+  return posthogCaptureEvent(email, "Onboarding answer submitted", {
+    ...answers,
+    $set: answers,
+  });
+}
+
+export async function trackProductFeedback(email: string, feedback: string) {
+  // Regular analytics event so feedback remains queryable even if survey quota is hit
+  await posthogCaptureEvent(email, "Product feedback submitted", {
+    feedback,
+  });
+
+  const surveyId = env.POSTHOG_FEEDBACK_SURVEY_ID;
+  const questionId = env.POSTHOG_FEEDBACK_SURVEY_QUESTION_ID;
+  if (!surveyId || !questionId) {
+    logger.warn(
+      "POSTHOG_FEEDBACK_SURVEY_ID or POSTHOG_FEEDBACK_SURVEY_QUESTION_ID not set",
+    );
+    return;
+  }
+
+  // Surveys API event — ID-based response key (current PostHog recommendation)
+  await posthogCaptureEvent(email, "survey sent", {
+    $survey_id: surveyId,
+    [`$survey_response_${questionId}`]: feedback,
+    $survey_questions: [
+      {
+        id: questionId,
+        question: "What's your feedback?",
+      },
+    ],
+    $survey_completed: true,
+  });
+}
+
+function getPosthogLlmEvalApprovedEmails() {
+  return (
+    env.POSTHOG_LLM_EVALS_APPROVED_EMAILS?.split(",")
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean) ?? []
+  );
+}
+
+function markFirstTimeEventCacheHit(key: string) {
+  if (!firedFirstTimeEvents.has(key)) return false;
+
+  firedFirstTimeEvents.delete(key);
+  firedFirstTimeEvents.set(key, true);
+  return true;
+}
+
+function addFirstTimeEventCacheKey(key: string) {
+  firedFirstTimeEvents.delete(key);
+  firedFirstTimeEvents.set(key, true);
+
+  if (firedFirstTimeEvents.size <= MAX_FIRST_TIME_EVENT_CACHE_SIZE) return;
+
+  const oldestKey = firedFirstTimeEvents.keys().next().value;
+  if (oldestKey) firedFirstTimeEvents.delete(oldestKey);
 }

@@ -1,28 +1,34 @@
 "use client";
 
+import { KeyIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { regenerateWebhookSecretAction } from "@/utils/actions/webhook";
 import { toastError, toastSuccess } from "@/components/Toast";
 import { useAction } from "next-safe-action/hooks";
+import { getActionErrorMessage } from "@/utils/error";
 
 export function RegenerateSecretButton({
   hasSecret,
   mutate,
+  onGenerated,
 }: {
   hasSecret: boolean;
   mutate: () => void;
+  onGenerated: (secret: string) => void;
 }) {
   const { execute, isExecuting } = useAction(regenerateWebhookSecretAction, {
-    onSuccess: () => {
+    onSuccess: ({ data }) => {
+      if (!data?.webhookSecret) return;
+      onGenerated(data.webhookSecret);
       toastSuccess({
-        description: "Webhook secret regenerated",
+        description: hasSecret
+          ? "Webhook secret regenerated. Copy it now, it will not be shown again."
+          : "Webhook secret generated. Copy it now, it will not be shown again.",
       });
     },
     onError: (error) => {
       toastError({
-        description:
-          error.error.serverError ??
-          "An unknown error occurred while regenerating the webhook secret",
+        description: getActionErrorMessage(error.error),
       });
     },
     onSettled: () => {
@@ -37,7 +43,8 @@ export function RegenerateSecretButton({
       loading={isExecuting}
       onClick={() => execute()}
     >
-      {hasSecret ? "Regenerate Secret" : "Generate Secret"}
+      <KeyIcon className="mr-2 size-4" />
+      {hasSecret ? "Regenerate secret" : "Generate secret"}
     </Button>
   );
 }

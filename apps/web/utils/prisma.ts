@@ -2,6 +2,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { env } from "@/env";
 import { PrismaClient } from "@/generated/prisma/client";
 import { encryptedTokens } from "@/utils/prisma-extensions";
+import { auditPrismaQueries } from "@/utils/audit/prisma-extension";
 
 declare global {
   var prisma: PrismaClient | undefined;
@@ -11,8 +12,12 @@ declare global {
 const _prisma =
   global.prisma ||
   (new PrismaClient({
-    adapter: new PrismaPg({ connectionString: env.DATABASE_URL }),
-  }).$extends(encryptedTokens) as unknown as PrismaClient);
+    adapter: new PrismaPg({
+      connectionString: env.PREVIEW_DATABASE_URL ?? env.DATABASE_URL,
+    }),
+  })
+    .$extends(encryptedTokens)
+    .$extends(auditPrismaQueries) as unknown as PrismaClient);
 
 if (env.NODE_ENV === "development") global.prisma = _prisma;
 

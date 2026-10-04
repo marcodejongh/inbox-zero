@@ -1,39 +1,71 @@
 import { z } from "zod";
 import {
   ActionType,
+  CategoryFilterType,
+  DraftReplyConfidence,
   LogicalOperator,
   SystemType,
 } from "@/generated/prisma/enums";
 import { ConditionType } from "@/utils/config";
 import { NINETY_DAYS_MINUTES } from "@/utils/date";
 import { validateLabelNameBasic } from "@/utils/gmail/label-validation";
+import { findIntegration } from "@/utils/mcp/integrations";
+import {
+  getIntegrationArgKeys,
+  getIntegrationToolSpec,
+} from "@/utils/mcp/tool-specs";
+import { addMissingRecipientIssue } from "@/utils/rule/recipient-validation";
+import { attachmentSourceInputSchema } from "@/utils/attachments/source-schema";
+import { addDisabledRuleActionIssue } from "@/utils/rule-action-feature-gates";
 
 export const delayInMinutesSchema = z
   .number()
   .min(1, "Minimum supported delay is 1 minute")
   .max(NINETY_DAYS_MINUTES, "Maximum supported delay is 90 days")
-  .nullish();
+  .nullish()
+  .describe(
+    "Minutes to wait before executing this action. Only add when the user asks for a delay.",
+  );
+
+// LLM-safe version: no .min()/.max() (Anthropic structured output rejects them).
+// Constraints are conveyed via .describe() instead.
+export const delayInMinutesLlmSchema = z
+  .number()
+  .nullish()
+  .describe(
+    `Minutes to wait before executing this action (minimum 1, maximum ${NINETY_DAYS_MINUTES}). Only add when the user asks for a delay.`,
+  );
 
 const zodActionType = z.enum([
   ActionType.ARCHIVE,
   ActionType.DRAFT_EMAIL,
+  ActionType.DRAFT_MESSAGING_CHANNEL,
   ActionType.FORWARD,
   ActionType.LABEL,
   ActionType.MARK_SPAM,
+  ActionType.NOTIFY_MESSAGING_CHANNEL,
   ActionType.REPLY,
   ActionType.SEND_EMAIL,
   ActionType.CALL_WEBHOOK,
   ActionType.MARK_READ,
+  ActionType.STAR,
+  ActionType.DELETE,
   ActionType.DIGEST,
   ActionType.MOVE_FOLDER,
+  ActionType.NOTIFY_SENDER,
+  ActionType.INTEGRATION,
 ]);
+
+// Arg keys are owned and validated by the selected tool spec below.
+const zodIntegrationArgs = z.record(z.string(), z.string().nullish()).nullish();
+export type IntegrationActionArgs = z.infer<typeof zodIntegrationArgs>;
 
 const zodConditionType = z.enum([ConditionType.AI, ConditionType.STATIC]);
 
 const zodSystemRule = z.enum([
   SystemType.TO_REPLY,
-  SystemType.FYI,
   SystemType.AWAITING_REPLY,
+  SystemType.FYI,
   SystemType.ACTIONED,
   SystemType.COLD_EMAIL,
   SystemType.NEWSLETTER,
@@ -41,6 +73,7 @@ const zodSystemRule = z.enum([
   SystemType.CALENDAR,
   SystemType.RECEIPT,
   SystemType.NOTIFICATION,
+  SystemType.OTP,
 ]);
 
 const zodAiCondition = z.object({
@@ -76,6 +109,7 @@ const zodAction = z
   .object({
     id: z.string().optional(),
     type: zodActionType,
+    messagingChannelId: z.string().cuid().nullish(),
     labelId: zodField,
     subject: zodField,
     content: zodField,
@@ -86,8 +120,20 @@ const zodAction = z
     folderName: zodField,
     folderId: zodField,
     delayInMinutes: delayInMinutesSchema,
+    staticAttachments: z.array(attachmentSourceInputSchema).optional(),
+    integrationName: z.string().nullish(),
+    integrationToolName: z.string().nullish(),
+    integrationArgs: zodIntegrationArgs,
   })
   .superRefine((data, ctx) => {
+    if (
+      addDisabledRuleActionIssue(data.type, ctx, {
+        allowExisting: Boolean(data.id),
+      })
+    ) {
+      return;
+    }
+
     if (data.type === ActionType.LABEL) {
       const labelValue =
         data.labelId?.value?.trim() || data.labelId?.name?.trim();
@@ -111,13 +157,16 @@ const zodAction = z
       }
     }
 
-    if (data.type === ActionType.FORWARD && !data.to?.value?.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Please enter an email address to forward to",
-        path: ["to"],
-      });
-    }
+    addRecipientRequirementIssue({
+      actionType: data.type,
+      recipient: data.to?.value,
+      ctx,
+      path: ["to"],
+      forwardMessage: "Please enter an email address to forward to",
+      sendEmailMessage:
+        "Please enter an email address to send to. Use Reply for auto-responses.",
+    });
+
     if (data.type === ActionType.CALL_WEBHOOK && !data.url?.value?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -125,9 +174,35 @@ const zodAction = z
         path: ["url"],
       });
     }
+
+    if (
+      data.type === ActionType.DRAFT_MESSAGING_CHANNEL &&
+      // Persisted legacy rows can be channel-less; keep them editable.
+      !data.messagingChannelId &&
+      !data.id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Please choose a chat destination",
+        path: ["messagingChannelId"],
+      });
+    }
+
+    if (
+      data.type === ActionType.NOTIFY_MESSAGING_CHANNEL &&
+      !data.messagingChannelId
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Please choose a chat destination",
+        path: ["messagingChannelId"],
+      });
+    }
+    // folderId is optional: name-only input (from AI-generated rules) is
+    // resolved to a folder id before the rule is saved.
     if (
       data.type === ActionType.MOVE_FOLDER &&
-      (!data.folderName?.value?.trim() || !data.folderId?.value?.trim())
+      !data.folderName?.value?.trim()
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -135,15 +210,24 @@ const zodAction = z
         path: ["folderName"],
       });
     }
+
+    addIntegrationActionIssues({
+      actionType: data.type,
+      integrationName: data.integrationName,
+      integrationToolName: data.integrationToolName,
+      integrationArgs: data.integrationArgs,
+      ctx,
+    });
   });
 
 export const createRuleBody = z.object({
   id: z.string().optional(),
-  name: z.string().min(1, "Please enter a name"),
+  name: z.string().trim().min(1, "Please enter a name"),
   instructions: z.string().nullish(),
   groupId: z.string().nullish(),
   runOnThreads: z.boolean().nullish(),
   digest: z.boolean().nullish(),
+  notifyMessagingChannelId: z.string().nullish(),
   actions: z.array(zodAction).min(1, "You must have at least one action"),
   conditions: z
     .array(zodCondition)
@@ -165,14 +249,13 @@ export const createRuleBody = z.object({
         );
 
         // Filter out empty static conditions (where the active field has no value)
-        const nonEmptyStaticConditions = staticConditions.filter((c) => {
-          return (
+        const nonEmptyStaticConditions = staticConditions.filter(
+          (c) =>
             c.from?.trim() ||
             c.to?.trim() ||
             c.subject?.trim() ||
-            c.body?.trim()
-          );
-        });
+            c.body?.trim(),
+        );
 
         if (nonEmptyStaticConditions.length <= 1) {
           return true; // No duplicates possible
@@ -198,7 +281,6 @@ export const createRuleBody = z.object({
     ),
   conditionalOperator: z
     .enum([LogicalOperator.AND, LogicalOperator.OR])
-    .default(LogicalOperator.AND)
     .optional(),
   systemType: zodSystemRule.nullish(),
 });
@@ -209,24 +291,19 @@ export type UpdateRuleBody = z.infer<typeof updateRuleBody>;
 
 export const deleteRuleBody = z.object({ id: z.string() });
 
-export const saveRulesPromptBody = z.object({ rulesPrompt: z.string().trim() });
-export type SaveRulesPromptBody = z.infer<typeof saveRulesPromptBody>;
-
-export const createRulesBody = z.object({ prompt: z.string().trim() });
-export type CreateRulesBody = z.infer<typeof createRulesBody>;
-
-export const updateRuleSettingsBody = z.object({
-  id: z.string(),
-  instructions: z.string(),
-});
-export type UpdateRuleSettingsBody = z.infer<typeof updateRuleSettingsBody>;
-
 export const enableDraftRepliesBody = z.object({ enable: z.boolean() });
 export type EnableDraftRepliesBody = z.infer<typeof enableDraftRepliesBody>;
 
 export const enableMultiRuleSelectionBody = z.object({ enable: z.boolean() });
 export type EnableMultiRuleSelectionBody = z.infer<
   typeof enableMultiRuleSelectionBody
+>;
+
+export const updateDraftReplyConfidenceBody = z.object({
+  confidence: z.nativeEnum(DraftReplyConfidence),
+});
+export type UpdateDraftReplyConfidenceBody = z.infer<
+  typeof updateDraftReplyConfidenceBody
 >;
 
 const categoryAction = z.enum([
@@ -278,3 +355,214 @@ export const copyRulesFromAccountBody = z.object({
   ruleIds: z.array(z.string()).min(1, "Select at least one rule to copy"),
 });
 export type CopyRulesFromAccountBody = z.infer<typeof copyRulesFromAccountBody>;
+
+// Schema for importing rules from JSON export
+const importedAction = z
+  .object({
+    type: zodActionType,
+    label: z.string().nullish(),
+    to: z.string().nullish(),
+    cc: z.string().nullish(),
+    bcc: z.string().nullish(),
+    subject: z.string().nullish(),
+    content: z.string().nullish(),
+    folderName: z.string().nullish(),
+    url: z.string().nullish(),
+    delayInMinutes: delayInMinutesSchema,
+    integrationName: z.string().nullish(),
+    integrationToolName: z.string().nullish(),
+    integrationArgs: zodIntegrationArgs,
+  })
+  .superRefine((data, ctx) => {
+    if (addDisabledRuleActionIssue(data.type, ctx)) return;
+
+    if (data.type === ActionType.LABEL) {
+      const labelValue = data.label?.trim();
+
+      if (!labelValue) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Label action requires a label name",
+          path: ["label"],
+        });
+        return;
+      }
+
+      const validation = validateLabelNameBasic(labelValue);
+      if (!validation.valid) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: validation.error!,
+          path: ["label"],
+        });
+      }
+    }
+
+    addRecipientRequirementIssue({
+      actionType: data.type,
+      recipient: data.to,
+      ctx,
+      path: ["to"],
+      forwardMessage: "Forward action requires a recipient email address",
+      sendEmailMessage:
+        "Send email action requires a recipient email address. Use Reply for auto-responses.",
+    });
+
+    if (data.type === ActionType.CALL_WEBHOOK && !data.url?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Webhook action requires a URL",
+        path: ["url"],
+      });
+    }
+
+    if (data.type === ActionType.MOVE_FOLDER && !data.folderName?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Move folder action requires a folder name",
+        path: ["folderName"],
+      });
+    }
+
+    addIntegrationActionIssues({
+      actionType: data.type,
+      integrationName: data.integrationName,
+      integrationToolName: data.integrationToolName,
+      integrationArgs: data.integrationArgs,
+      ctx,
+    });
+  });
+
+const importedRule = z
+  .object({
+    name: z.string().min(1),
+    instructions: z.string().nullish(),
+    enabled: z.boolean().optional().default(true),
+    automate: z.boolean().optional().default(true),
+    runOnThreads: z.boolean().optional().default(false),
+    systemType: zodSystemRule.nullish(),
+    conditionalOperator: z
+      .enum([LogicalOperator.AND, LogicalOperator.OR])
+      .optional()
+      .default(LogicalOperator.AND),
+    from: z.string().nullish(),
+    to: z.string().nullish(),
+    subject: z.string().nullish(),
+    body: z.string().nullish(),
+    categoryFilterType: z
+      .enum([CategoryFilterType.INCLUDE, CategoryFilterType.EXCLUDE])
+      .nullish(),
+    actions: z.array(importedAction).min(1),
+    group: z.string().nullish(),
+  })
+  .refine(
+    (data) =>
+      data.systemType ||
+      data.from?.trim() ||
+      data.to?.trim() ||
+      data.subject?.trim() ||
+      data.body?.trim() ||
+      data.instructions?.trim(),
+    {
+      message:
+        "At least one condition (from, to, subject, body, or instructions) must be provided",
+    },
+  );
+
+export const importRulesBody = z.object({
+  rules: z.array(importedRule).min(1, "No rules to import"),
+});
+export type ImportRulesBody = z.infer<typeof importRulesBody>;
+export type ImportedRule = z.infer<typeof importedRule>;
+
+function addIntegrationActionIssues({
+  actionType,
+  integrationName,
+  integrationToolName,
+  integrationArgs,
+  ctx,
+}: {
+  actionType: ActionType;
+  integrationName: string | null | undefined;
+  integrationToolName: string | null | undefined;
+  integrationArgs: IntegrationActionArgs;
+  ctx: z.RefinementCtx;
+}) {
+  if (actionType !== ActionType.INTEGRATION) return;
+
+  const integration = integrationName
+    ? findIntegration(integrationName)
+    : undefined;
+  if (!integration) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Unknown integration",
+      path: ["integrationName"],
+    });
+    return;
+  }
+
+  const spec = getIntegrationToolSpec(integrationName, integrationToolName);
+  if (
+    !spec ||
+    !integrationToolName ||
+    !integration.ruleActionWriteTools?.includes(integrationToolName)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Unsupported integration tool",
+      path: ["integrationToolName"],
+    });
+    return;
+  }
+
+  const args = (integrationArgs ?? {}) as Record<string, unknown>;
+  const knownKeys = new Set(getIntegrationArgKeys(spec));
+  for (const key of Object.keys(args)) {
+    if (args[key] == null || knownKeys.has(key)) continue;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Unknown argument for this integration tool: ${key}`,
+      path: ["integrationArgs", key],
+    });
+  }
+
+  for (const arg of spec.args) {
+    if (!arg.required) continue;
+    const value =
+      typeof args[arg.key] === "string" ? (args[arg.key] as string) : "";
+    // Empty is valid when the AI fills the value at execution time.
+    if (value.trim() || arg.aiPrompt) continue;
+
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Please enter a value for ${arg.label.toLowerCase()}`,
+      path: ["integrationArgs", arg.key],
+    });
+  }
+}
+
+function addRecipientRequirementIssue({
+  actionType,
+  recipient,
+  ctx,
+  path,
+  forwardMessage,
+  sendEmailMessage,
+}: {
+  actionType: ActionType;
+  recipient: string | null | undefined;
+  ctx: z.RefinementCtx;
+  path: (string | number)[];
+  forwardMessage: string;
+  sendEmailMessage: string;
+}) {
+  addMissingRecipientIssue({
+    actionType,
+    recipient,
+    ctx,
+    path,
+    forwardMessage,
+    sendEmailMessage,
+  });
+}

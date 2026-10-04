@@ -4,7 +4,7 @@ import type { EmailForLLM } from "@/utils/types";
 import { stringifyEmailSimple } from "@/utils/stringify-email";
 import { formatDateForLLM, formatRelativeTimeForLLM } from "@/utils/date";
 import { preprocessBooleanLike } from "@/utils/zod";
-import { getModel } from "@/utils/llms/model";
+import { getModelForUseCase, LlmUseCase } from "@/utils/llms/use-cases";
 import { createGenerateObject } from "@/utils/llms";
 // import { Braintrust } from "@/utils/braintrust";
 
@@ -90,17 +90,21 @@ The current date is ${currentDate}.
 
   // ${user.about ? `<user_background_information>${user.about}</user_background_information>` : ""}
 
-  const modelOptions = getModel(emailAccount.user);
+  const modelOptions = getModelForUseCase(
+    emailAccount.user,
+    LlmUseCase.CleanInbox,
+  );
 
   const generateObject = createGenerateObject({
     emailAccount,
     label: "Clean",
     modelOptions,
+    promptHardening: { trust: "untrusted", level: "compact" },
   });
 
   const aiResponse = await generateObject({
     ...modelOptions,
-    system,
+    instructions: system,
     prompt,
     schema,
   });

@@ -3,36 +3,121 @@
 import {
   createApiKeyBody,
   deactivateApiKeyBody,
+  revokeMcpConnectionBody,
+  updateMcpServerAccessBody,
 } from "@/utils/actions/api-key.validation";
+import { revokeMcpConnection } from "@/utils/mcp/connections";
 import prisma from "@/utils/prisma";
 import { generateSecureToken, hashApiKey } from "@/utils/api-key";
-import { actionClientUser } from "@/utils/actions/safe-action";
+import { actionClient, actionClientUser } from "@/utils/actions/safe-action";
+import { SafeError } from "@/utils/error";
+import { env } from "@/env";
+import { isMcpServerAvailable } from "@/utils/mcp/config";
+import type { ApiKeyExpiryValue } from "@/utils/api-key-scopes";
 
-export const createApiKeyAction = actionClientUser
+const apiKeyActionClient = actionClient.use(async ({ ctx, next }) => {
+  if (ctx.session.session.emailOtp) {
+    throw new SafeError(
+      "Sign in with your connected provider to manage API keys.",
+    );
+  }
+  return next();
+});
+
+export const createApiKeyAction = apiKeyActionClient
   .metadata({ name: "createApiKey" })
   .inputSchema(createApiKeyBody)
-  .action(async ({ ctx: { userId }, parsedInput: { name } }) => {
-    const secretKey = generateSecureToken();
-    const hashedKey = hashApiKey(secretKey);
+  .action(
+    async ({
+      ctx: { userId, emailAccountId },
+      parsedInput: { name, scopes, expiresIn },
+    }) => {
+      if (!env.NEXT_PUBLIC_EXTERNAL_API_ENABLED) {
+        throw new SafeError("External API is not enabled");
+      }
+      const secretKey = generateSecureToken();
+      const hashedKey = hashApiKey(secretKey);
 
-    await prisma.apiKey.create({
-      data: {
-        userId,
-        name: name || "Secret key",
-        hashedKey,
-        isActive: true,
-      },
-    });
+      await prisma.apiKey.create({
+        data: {
+          userId,
+          emailAccountId,
+          name: name || "Management key",
+          hashedKey,
+          isActive: true,
+          scopes,
+          expiresAt: getApiKeyExpiryDate(expiresIn),
+        },
+      });
 
-    return { secretKey };
-  });
+      return { secretKey };
+    },
+  );
 
-export const deactivateApiKeyAction = actionClientUser
+export const deactivateApiKeyAction = apiKeyActionClient
   .metadata({ name: "deactivateApiKey" })
   .inputSchema(deactivateApiKeyBody)
-  .action(async ({ ctx: { userId }, parsedInput: { id } }) => {
+  .action(async ({ ctx: { userId, emailAccountId }, parsedInput: { id } }) => {
     await prisma.apiKey.update({
-      where: { id, userId },
+      where: { id, userId, emailAccountId },
       data: { isActive: false },
     });
   });
+
+export const updateMcpServerAccessAction = actionClientUser
+  .metadata({ name: "updateMcpServerAccess" })
+  .inputSchema(updateMcpServerAccessBody)
+  .action(async ({ ctx: { userId, session }, parsedInput: { enabled } }) => {
+    if (session.session.emailOtp) {
+      throw new SafeError(
+        "Sign in with your connected provider to manage MCP access.",
+      );
+    }
+    if (enabled && !isMcpServerAvailable()) {
+      throw new SafeError("MCP server is not enabled");
+    }
+
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: userId },
+        data: {
+          mcpServerEnabled: enabled,
+          ...(!enabled && { mcpTokenVersion: { increment: 1 } }),
+        },
+      }),
+      ...(!enabled
+        ? [
+            prisma.oauthAccessToken.deleteMany({ where: { userId } }),
+            prisma.oauthRefreshToken.deleteMany({ where: { userId } }),
+            prisma.oauthConsent.deleteMany({ where: { userId } }),
+          ]
+        : []),
+    ]);
+
+    return { enabled };
+  });
+
+export const revokeMcpConnectionAction = actionClientUser
+  .metadata({ name: "revokeMcpConnection" })
+  .inputSchema(revokeMcpConnectionBody)
+  .action(async ({ ctx: { userId, session }, parsedInput: { clientId } }) => {
+    if (session.session.emailOtp) {
+      throw new SafeError(
+        "Sign in with your connected provider to manage MCP access.",
+      );
+    }
+
+    await revokeMcpConnection({ userId, clientId });
+    return { clientId };
+  });
+
+function getApiKeyExpiryDate(expiresIn: ApiKeyExpiryValue): Date | null {
+  if (expiresIn === "never") return null;
+
+  const days = Number.parseInt(expiresIn, 10);
+  if (Number.isNaN(days)) return null;
+
+  const expiryDate = new Date();
+  expiryDate.setDate(expiryDate.getDate() + days);
+  return expiryDate;
+}

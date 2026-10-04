@@ -58,13 +58,13 @@ export const TestCustomEmailForm = () => {
         />
         <Button type="submit" loading={isSubmitting} size="sm">
           <SparklesIcon className="mr-2 size-4" />
-          Test
+          <span>Test</span>
         </Button>
       </form>
       {testResults && (
         <Card className="mt-4">
           <CardHeader>
-            <CardTitle>Test Result</CardTitle>
+            <CardTitle>Test result</CardTitle>
           </CardHeader>
           <CardContent>
             <ResultsDisplay results={testResults} showFullContent={true} />

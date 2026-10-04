@@ -3,14 +3,15 @@
 import { BotIcon, CoinsIcon, CpuIcon } from "lucide-react";
 import { formatStat } from "@/utils/stats";
 import { StatsCards } from "@/components/StatsCards";
-import { usePremium } from "@/components/PremiumAlert";
+import { usePremium } from "@/hooks/usePremium";
 import { LoadingContent } from "@/components/LoadingContent";
 import { env } from "@/env";
-import { isPremium } from "@/utils/premium";
+import { isPremiumRecord } from "@/utils/premium";
 import type { RedisUsage } from "@/utils/redis/usage";
 
 export function Usage(props: { usage: RedisUsage | null }) {
-  const { premium, isLoading, error } = usePremium();
+  const { premium, unsubscribeCreditsRemaining, isLoading, error } =
+    usePremium();
 
   return (
     <LoadingContent loading={isLoading} error={error}>
@@ -18,13 +19,10 @@ export function Usage(props: { usage: RedisUsage | null }) {
         stats={[
           {
             name: "Unsubscribe Credits",
-            value: isPremium(
-              premium?.lemonSqueezyRenewsAt || null,
-              premium?.stripeSubscriptionStatus || null,
-            )
+            value: isPremiumRecord(premium)
               ? "Unlimited"
               : formatStat(
-                  premium?.unsubscribeCredits ??
+                  unsubscribeCreditsRemaining ??
                     env.NEXT_PUBLIC_FREE_UNSUBSCRIBE_CREDITS,
                 ),
             subvalue: "credits",
@@ -32,13 +30,13 @@ export function Usage(props: { usage: RedisUsage | null }) {
           },
           {
             name: "LLM API Calls",
-            value: formatStat(props.usage?.openaiCalls),
+            value: formatStat(props.usage?.calls),
             subvalue: "calls",
             icon: <BotIcon className="h-4 w-4" />,
           },
           {
             name: "LLM Tokens Used",
-            value: formatStat(props.usage?.openaiTokensUsed),
+            value: formatStat(props.usage?.tokensUsed),
             subvalue: "tokens",
             icon: <CpuIcon className="h-4 w-4" />,
           },

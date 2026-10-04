@@ -1,33 +1,30 @@
 "use client";
 
 import type React from "react";
-import clsx from "clsx";
+import { useState } from "react";
 import Link from "next/link";
 import {
   ArchiveIcon,
-  ArchiveXIcon,
-  BadgeCheckIcon,
+  ArchiveRestoreIcon,
+  CheckIcon,
   ChevronDownIcon,
   ChevronUpIcon,
-  ChevronsUpDownIcon,
   ExpandIcon,
   ExternalLinkIcon,
-  MailMinusIcon,
+  MailXIcon,
   MoreHorizontalIcon,
   TagIcon,
+  ThumbsUpIcon,
   TrashIcon,
 } from "lucide-react";
 import { type PostHog, usePostHog } from "posthog-js/react";
 import type { UserResponse } from "@/app/api/user/me/route";
 import { Button } from "@/components/ui/button";
 import { ButtonLoader } from "@/components/Loading";
-import { Tooltip } from "@/components/Tooltip";
-import { Separator } from "@/components/ui/separator";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuPortal,
   DropdownMenuSeparator,
   DropdownMenuSub,
@@ -35,26 +32,35 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  PremiumTooltip,
-  PremiumTooltipContent,
-} from "@/components/PremiumAlert";
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { PremiumTooltip } from "@/components/PremiumAlert";
 import { NewsletterStatus } from "@/generated/prisma/enums";
 import { toastError, toastSuccess } from "@/components/Toast";
-import { createFilterAction } from "@/utils/actions/mail";
+import { createFilterAction, deleteFilterAction } from "@/utils/actions/mail";
 import { getGmailSearchUrl } from "@/utils/url";
+import { extractNameFromEmail } from "@/utils/email";
+import { Badge } from "@/components/ui/badge";
 import type { Row } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/types";
+import type { NewsletterFilterType } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/types";
 import {
   useUnsubscribe,
-  useAutoArchive,
   useApproveButton,
   useBulkArchive,
   useBulkDelete,
+  useBulkAutoArchive,
 } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/hooks";
+import { ResubscribeDialog } from "@/app/(app)/[emailAccountId]/bulk-unsubscribe/ResubscribeDialog";
 import { LabelsSubMenu } from "@/components/LabelsSubMenu";
-import type { EmailLabel } from "@/providers/EmailProvider";
+import type { EmailLabel } from "@/providers/email-label-types";
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { isGoogleProvider } from "@/utils/email/provider-types";
 import { getEmailTerminology } from "@/utils/terminology";
+import { Tooltip } from "@/components/Tooltip";
 
 export function ActionCell<T extends Row>({
   item,
@@ -66,6 +72,7 @@ export function ActionCell<T extends Row>({
   openPremiumModal,
   userEmail,
   emailAccountId,
+  filter,
 }: {
   item: T;
   hasUnsubscribeAccess: boolean;
@@ -77,11 +84,29 @@ export function ActionCell<T extends Row>({
   openPremiumModal: () => void;
   userEmail: string;
   emailAccountId: string;
+  filter: NewsletterFilterType;
 }) {
   const posthog = usePostHog();
 
+  const isUnsubscribed = item.status === NewsletterStatus.UNSUBSCRIBED;
+
   return (
     <>
+      {isUnsubscribed ? (
+        <Badge variant="red" className="gap-1">
+          <MailXIcon className="size-3" />
+          Unsubscribed
+        </Badge>
+      ) : (
+        <ApproveButton
+          item={item}
+          hasUnsubscribeAccess={hasUnsubscribeAccess}
+          mutate={mutate}
+          posthog={posthog}
+          emailAccountId={emailAccountId}
+          filter={filter}
+        />
+      )}
       <PremiumTooltip
         showTooltip={!hasUnsubscribeAccess}
         openModal={openPremiumModal}
@@ -95,48 +120,6 @@ export function ActionCell<T extends Row>({
           emailAccountId={emailAccountId}
         />
       </PremiumTooltip>
-      <Tooltip
-        contentComponent={
-          !hasUnsubscribeAccess ? (
-            <PremiumTooltipContent openModal={openPremiumModal} />
-          ) : undefined
-        }
-        content={
-          hasUnsubscribeAccess
-            ? "Auto archive emails using Gmail filters."
-            : undefined
-        }
-      >
-        <AutoArchiveButton
-          item={item}
-          hasUnsubscribeAccess={hasUnsubscribeAccess}
-          mutate={mutate}
-          posthog={posthog}
-          refetchPremium={refetchPremium}
-          labels={labels}
-          emailAccountId={emailAccountId}
-        />
-      </Tooltip>
-      <Tooltip
-        contentComponent={
-          !hasUnsubscribeAccess ? (
-            <PremiumTooltipContent openModal={openPremiumModal} />
-          ) : undefined
-        }
-        content={
-          hasUnsubscribeAccess
-            ? "Approve to filter it from the list."
-            : undefined
-        }
-      >
-        <ApproveButton
-          item={item}
-          hasUnsubscribeAccess={hasUnsubscribeAccess}
-          mutate={mutate}
-          posthog={posthog}
-          emailAccountId={emailAccountId}
-        />
-      </Tooltip>
       <MoreDropdown
         onOpenNewsletter={onOpenNewsletter}
         item={item}
@@ -145,6 +128,10 @@ export function ActionCell<T extends Row>({
         labels={labels}
         posthog={posthog}
         mutate={mutate}
+        hasUnsubscribeAccess={hasUnsubscribeAccess}
+        refetchPremium={refetchPremium}
+        filter={filter}
+        openPremiumModal={openPremiumModal}
       />
     </>
   );
@@ -165,78 +152,14 @@ function UnsubscribeButton<T extends Row>({
   posthog: PostHog;
   emailAccountId: string;
 }) {
-  const { unsubscribeLoading, onUnsubscribe, unsubscribeLink } = useUnsubscribe(
-    {
-      item,
-      hasUnsubscribeAccess,
-      mutate,
-      posthog,
-      refetchPremium,
-      emailAccountId,
-    },
-  );
+  const [resubscribeDialogOpen, setResubscribeDialogOpen] = useState(false);
 
-  const hasUnsubscribeLink = unsubscribeLink !== "#";
-
-  return (
-    <Button
-      size="sm"
-      variant={
-        item.status === NewsletterStatus.UNSUBSCRIBED ? "red" : "secondary"
-      }
-      asChild
-    >
-      <Link
-        href={unsubscribeLink}
-        target={hasUnsubscribeLink ? "_blank" : undefined}
-        onClick={onUnsubscribe}
-        rel="noreferrer"
-      >
-        {unsubscribeLoading && <ButtonLoader />}
-        <span className="hidden xl:block">
-          {hasUnsubscribeLink ? "Unsubscribe" : "Block"}
-        </span>
-        <span className="block xl:hidden">
-          <Tooltip
-            content={
-              hasUnsubscribeLink
-                ? "Unsubscribe from emails from this sender"
-                : "This sender does not have an unsubscribe link, but we can still block all emails from this sender and automatically archive them for you."
-            }
-          >
-            <MailMinusIcon className="size-4" />
-          </Tooltip>
-        </span>
-      </Link>
-    </Button>
-  );
-}
-
-function AutoArchiveButton<T extends Row>({
-  item,
-  hasUnsubscribeAccess,
-  mutate,
-  posthog,
-  refetchPremium,
-  labels,
-  emailAccountId,
-}: {
-  item: T;
-  hasUnsubscribeAccess: boolean;
-  mutate: () => Promise<void>;
-  posthog: PostHog;
-  refetchPremium: () => Promise<UserResponse | null | undefined>;
-  labels: EmailLabel[];
-  emailAccountId: string;
-}) {
-  const { provider } = useAccount();
-  const terminology = getEmailTerminology(provider);
   const {
-    autoArchiveLoading,
-    onAutoArchive,
-    onAutoArchiveAndLabel,
-    onDisableAutoArchive,
-  } = useAutoArchive({
+    unsubscribeLoading,
+    onUnsubscribe,
+    unsubscribeLink,
+    hasAutomaticUnsubscribe,
+  } = useUnsubscribe({
     item,
     hasUnsubscribeAccess,
     mutate,
@@ -245,99 +168,74 @@ function AutoArchiveButton<T extends Row>({
     emailAccountId,
   });
 
-  return (
-    <div
-      className={clsx(
-        "flex h-min items-center gap-1 rounded-md text-secondary-foreground",
-        item.autoArchived ? "bg-blue-100 dark:bg-blue-800" : "bg-secondary",
-      )}
-    >
-      <Button
-        variant={
-          item.status === NewsletterStatus.AUTO_ARCHIVED || item.autoArchived
-            ? "blue"
-            : "secondary"
-        }
-        className="px-3 shadow-none"
-        size="sm"
-        onClick={onAutoArchive}
-        disabled={!hasUnsubscribeAccess}
-      >
-        {autoArchiveLoading && <ButtonLoader />}
-        <span className="hidden xl:block">Skip Inbox</span>
-        <span className="block xl:hidden">
-          <Tooltip content="Skip Inbox">
-            <ArchiveIcon className="size-4" />
-          </Tooltip>
-        </span>
-      </Button>
-      <Separator orientation="vertical" className="h-[20px]" />
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant={
-              item.status === NewsletterStatus.AUTO_ARCHIVED ||
-              item.autoArchived
-                ? "blue"
-                : "secondary"
-            }
-            className="px-2 shadow-none"
-            size="sm"
-            disabled={!hasUnsubscribeAccess}
-          >
-            <ChevronDownIcon className="size-4 text-secondary-foreground" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          alignOffset={-5}
-          className="max-h-[415px] w-[220px] overflow-auto"
-          forceMount
-          onKeyDown={(e) => {
-            e.stopPropagation();
-          }}
-        >
-          {item.autoArchived?.id && (
-            <>
-              <DropdownMenuItem
-                onClick={async () => {
-                  posthog.capture("Clicked Disable Auto Archive");
-                  onDisableAutoArchive();
-                }}
-              >
-                <ArchiveXIcon className="mr-2 size-4" /> Disable Skip Inbox
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-            </>
-          )}
+  const hasUnsubscribeLink = unsubscribeLink !== "#";
+  const isUnsubscribed = item.status === NewsletterStatus.UNSUBSCRIBED;
 
-          <DropdownMenuLabel>
-            Skip Inbox and {terminology.label.action}
-          </DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          {labels.map((label) => {
-            return (
-              <DropdownMenuItem
-                key={label.id}
-                onClick={async () => {
-                  posthog.capture("Clicked Auto Archive and Label");
-                  await onAutoArchiveAndLabel(label.id!, label.name!);
-                }}
-              >
-                {label.name}
-              </DropdownMenuItem>
-            );
-          })}
-          {!labels.length && (
-            <DropdownMenuItem>
-              You do not have any {terminology.label.plural}. Create one in your
-              email client first to auto
-              {terminology.label.action} emails.
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
+  const buttonText = isUnsubscribed
+    ? "Resubscribe"
+    : hasUnsubscribeLink
+      ? "Unsubscribe"
+      : "Block";
+
+  const senderName = item.fromName || extractNameFromEmail(item.name);
+
+  // Show Resubscribe button if unsubscribed, otherwise show Unsubscribe/Block button
+  const button =
+    isUnsubscribed || resubscribeDialogOpen ? (
+      <Button
+        size="sm"
+        variant="outline"
+        className="w-[110px] justify-center"
+        onClick={() => setResubscribeDialogOpen(true)}
+      >
+        {unsubscribeLoading && <ButtonLoader />}
+        Resubscribe
+      </Button>
+    ) : hasAutomaticUnsubscribe ? (
+      // Unsubscribing happens here, so opening the sender's page would only
+      // hand the reader work we are about to do for them.
+      <Button
+        size="sm"
+        variant="outline"
+        className="w-[110px] justify-center"
+        onClick={onUnsubscribe}
+        disabled={unsubscribeLoading}
+      >
+        {unsubscribeLoading && <ButtonLoader />}
+        {buttonText}
+      </Button>
+    ) : (
+      <Button
+        size="sm"
+        variant="outline"
+        className="w-[110px] justify-center"
+        asChild
+      >
+        <Link
+          href={unsubscribeLink}
+          target={hasUnsubscribeLink ? "_blank" : undefined}
+          onClick={onUnsubscribe}
+          rel="noopener noreferrer"
+        >
+          {unsubscribeLoading && <ButtonLoader />}
+          {buttonText}
+        </Link>
+      </Button>
+    );
+
+  return (
+    <>
+      {button}
+
+      <ResubscribeDialog
+        open={resubscribeDialogOpen}
+        onOpenChange={setResubscribeDialogOpen}
+        senderName={senderName}
+        senderEmail={item.name}
+        emailAccountId={emailAccountId}
+        mutate={mutate}
+      />
+    </>
   );
 }
 
@@ -347,37 +245,42 @@ function ApproveButton<T extends Row>({
   mutate,
   posthog,
   emailAccountId,
+  filter,
 }: {
   item: T;
   hasUnsubscribeAccess: boolean;
   mutate: () => Promise<void>;
   posthog: PostHog;
   emailAccountId: string;
+  filter: NewsletterFilterType;
 }) {
-  const { approveLoading, onApprove } = useApproveButton({
+  const { onApprove, isApproved } = useApproveButton({
     item,
     mutate,
     posthog,
     emailAccountId,
+    filter,
   });
 
   return (
-    <Button
-      size="sm"
-      variant={
-        item.status === NewsletterStatus.APPROVED ? "green" : "secondary"
+    <Tooltip
+      content={
+        isApproved
+          ? "Approved sender. Keep these emails in your inbox."
+          : "Approve sender to keep these emails in your inbox."
       }
-      onClick={onApprove}
-      disabled={!hasUnsubscribeAccess}
-      loading={approveLoading}
     >
-      <span className="hidden 2xl:block">Keep</span>
-      <span className="block 2xl:hidden">
-        <Tooltip content="Keep">
-          <BadgeCheckIcon className="size-4" />
-        </Tooltip>
-      </span>
-    </Button>
+      <Button
+        size="sm"
+        variant={isApproved ? "green" : "ghost"}
+        onClick={onApprove}
+        disabled={!hasUnsubscribeAccess}
+      >
+        <ThumbsUpIcon
+          className={`size-5 ${isApproved ? "" : "text-gray-400"}`}
+        />
+      </Button>
+    </Tooltip>
   );
 }
 
@@ -389,6 +292,10 @@ export function MoreDropdown<T extends Row>({
   labels,
   posthog,
   mutate,
+  hasUnsubscribeAccess,
+  refetchPremium,
+  filter,
+  openPremiumModal,
 }: {
   onOpenNewsletter?: (row: T) => void;
   item: T;
@@ -396,114 +303,212 @@ export function MoreDropdown<T extends Row>({
   emailAccountId: string;
   labels: EmailLabel[];
   posthog: PostHog;
-  mutate: () => Promise<void>;
+  mutate: () => Promise<unknown>;
+  hasUnsubscribeAccess?: boolean;
+  refetchPremium?: () => Promise<UserResponse | null | undefined>;
+  filter?: NewsletterFilterType;
+  openPremiumModal?: () => void;
 }) {
   const { provider } = useAccount();
   const terminology = getEmailTerminology(provider);
+  const isMobile = useIsMobile();
+  const [labelSheetOpen, setLabelSheetOpen] = useState(false);
   const { onBulkArchive, isBulkArchiving } = useBulkArchive({
-    mutate,
     posthog,
     emailAccountId,
+    mutate,
   });
   const { onBulkDelete, isBulkDeleting } = useBulkDelete({
     mutate,
     posthog,
     emailAccountId,
   });
+  const { onBulkAutoArchive } = useBulkAutoArchive({
+    hasUnsubscribeAccess: hasUnsubscribeAccess ?? false,
+    mutate,
+    refetchPremium: refetchPremium ?? noopRefetchPremium,
+    emailAccountId,
+    filter: filter ?? "all",
+  });
+  const showAutoArchive = typeof hasUnsubscribeAccess === "boolean";
+
+  const handleLabelClick = async (label: EmailLabel) => {
+    const activeFilter = getActiveLabelFilter(item, label);
+
+    if (activeFilter) {
+      const res = await deleteFilterAction(emailAccountId, {
+        id: activeFilter.id,
+      });
+      if (res?.serverError) {
+        toastError({
+          title: "Error",
+          description: `Failed to stop labeling ${item.name} as ${label.name}. ${res.serverError || ""}`,
+        });
+      } else {
+        toastSuccess({
+          title: "Success!",
+          description: `Stopped labeling ${item.name} as ${label.name}`,
+        });
+        await mutate();
+      }
+      return;
+    }
+
+    const res = await createFilterAction(emailAccountId, {
+      from: item.name,
+      gmailLabelId: label.id,
+    });
+    if (res?.serverError) {
+      toastError({
+        title: "Error",
+        description: `Failed to add ${item.name} to ${label.name}. ${res.serverError || ""}`,
+      });
+    } else {
+      toastSuccess({
+        title: "Success!",
+        description: `Added ${item.name} to ${label.name}`,
+      });
+      await mutate();
+    }
+  };
+
+  const labelMenuLabel = `${terminology.label.action} future emails`;
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button aria-haspopup="true" size="icon" variant="ghost">
-          <MoreHorizontalIcon className="size-4" />
-          <span className="sr-only">Toggle menu</span>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {!!onOpenNewsletter && (
-          <DropdownMenuItem onClick={() => onOpenNewsletter(item)}>
-            <ExpandIcon className="mr-2 size-4" />
-            <span>View stats</span>
-          </DropdownMenuItem>
-        )}
-        {isGoogleProvider(provider) && (
-          <DropdownMenuItem asChild>
-            <Link
-              href={getGmailSearchUrl(item.name, userEmail)}
-              target="_blank"
-            >
-              <ExternalLinkIcon className="mr-2 size-4" />
-              <span>View in Gmail</span>
-            </Link>
-          </DropdownMenuItem>
-        )}
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button aria-haspopup="true" size="icon" variant="ghost">
+            <MoreHorizontalIcon className="size-4" />
+            <span className="sr-only">Toggle menu</span>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {/* View section */}
+          {!!onOpenNewsletter && (
+            <DropdownMenuItem onClick={() => onOpenNewsletter(item)}>
+              <ExpandIcon className="mr-2 size-4" />
+              <span>View stats</span>
+            </DropdownMenuItem>
+          )}
+          {isGoogleProvider(provider) && (
+            <DropdownMenuItem asChild>
+              <Link
+                href={getGmailSearchUrl(item.name, userEmail)}
+                target="_blank"
+              >
+                <ExternalLinkIcon className="mr-2 size-4" />
+                <span>View in Gmail</span>
+              </Link>
+            </DropdownMenuItem>
+          )}
 
-        {/* <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <UserPlus className="mr-2 size-4" />
-            <span>Add sender to rule</span>
-          </DropdownMenuSubTrigger>
-          <DropdownMenuPortal>
-            <GroupsSubMenu sender={item.name} />
-          </DropdownMenuPortal>
-        </DropdownMenuSub> */}
+          <DropdownMenuSeparator />
 
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <TagIcon className="mr-2 size-4" />
-            <span>{terminology.label.action} future emails</span>
-          </DropdownMenuSubTrigger>
-          <DropdownMenuPortal>
-            <LabelsSubMenu
-              labels={labels}
-              onClick={async (label) => {
-                const res = await createFilterAction(emailAccountId, {
-                  from: item.name,
-                  gmailLabelId: label.id,
-                });
-                if (res?.serverError) {
-                  toastError({
-                    title: "Error",
-                    description: `Failed to add ${item.name} to ${label.name}. ${res.serverError || ""}`,
-                  });
-                } else {
-                  toastSuccess({
-                    title: "Success!",
-                    description: `Added ${item.name} to ${label.name}`,
-                  });
+          {/* Organization section */}
+          {isMobile ? (
+            <DropdownMenuItem onSelect={() => setLabelSheetOpen(true)}>
+              <TagIcon className="mr-2 size-4" />
+              <span>{labelMenuLabel}</span>
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <TagIcon className="mr-2 size-4" />
+                <span>{labelMenuLabel}</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuPortal>
+                <LabelsSubMenu
+                  labels={labels}
+                  onClick={handleLabelClick}
+                  isLabelActive={(label) =>
+                    Boolean(getActiveLabelFilter(item, label))
+                  }
+                />
+              </DropdownMenuPortal>
+            </DropdownMenuSub>
+          )}
+
+          <DropdownMenuSeparator />
+
+          {/* Bulk actions section */}
+          {showAutoArchive && (
+            <DropdownMenuItem
+              onClick={() => {
+                if (!hasUnsubscribeAccess) {
+                  openPremiumModal?.();
+                  return;
                 }
+
+                onBulkAutoArchive([item]);
               }}
-            />
-          </DropdownMenuPortal>
-        </DropdownMenuSub>
-
-        <DropdownMenuItem onClick={() => onBulkArchive([item])}>
-          {isBulkArchiving ? (
-            <ButtonLoader />
-          ) : (
-            <ArchiveIcon className="mr-2 size-4" />
+            >
+              <ArchiveRestoreIcon className="mr-2 size-4" />
+              <span>Auto archive</span>
+            </DropdownMenuItem>
           )}
-          <span>Archive all</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onClick={() => {
-            const yes = confirm(
-              `Are you sure you want to delete all emails from ${item.name}?`,
-            );
-            if (!yes) return;
+          <DropdownMenuItem onClick={() => onBulkArchive([item])}>
+            {isBulkArchiving ? (
+              <ButtonLoader />
+            ) : (
+              <ArchiveIcon className="mr-2 size-4" />
+            )}
+            <span>Archive all</span>
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => {
+              const yes = confirm(
+                `Are you sure you want to delete all emails from ${item.name}?`,
+              );
+              if (!yes) return;
 
-            onBulkDelete([item]);
-          }}
-        >
-          {isBulkDeleting ? (
-            <ButtonLoader />
-          ) : (
-            <TrashIcon className="mr-2 size-4" />
-          )}
-          <span>Delete all</span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+              onBulkDelete([item]);
+            }}
+          >
+            {isBulkDeleting ? (
+              <ButtonLoader />
+            ) : (
+              <TrashIcon className="mr-2 size-4" />
+            )}
+            <span>Delete all</span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <Sheet open={labelSheetOpen} onOpenChange={setLabelSheetOpen}>
+        <SheetContent side="bottom" className="max-h-[80vh]">
+          <SheetHeader>
+            <SheetTitle>{labelMenuLabel}</SheetTitle>
+          </SheetHeader>
+          <div className="mt-4 max-h-[60vh] space-y-1 overflow-y-auto">
+            {labels.length ? (
+              labels.map((label) => {
+                const active = Boolean(getActiveLabelFilter(item, label));
+
+                return (
+                  <button
+                    key={label.id}
+                    type="button"
+                    className="flex w-full items-center justify-between gap-3 rounded-sm px-3 py-2 text-left text-sm hover:bg-accent"
+                    onClick={async () => {
+                      setLabelSheetOpen(false);
+                      await handleLabelClick(label);
+                    }}
+                  >
+                    <span className="truncate">{label.name}</span>
+                    {active && <CheckIcon className="size-4 text-primary" />}
+                  </button>
+                );
+              })
+            ) : (
+              <p className="px-3 py-2 text-sm text-muted-foreground">
+                You don't have any {terminology.label.plural} yet.
+              </p>
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
+    </>
   );
 }
 
@@ -520,66 +525,36 @@ export function HeaderButton(props: {
       className="-ml-3 h-8 data-[state=open]:bg-accent"
       onClick={props.onClick}
     >
-      <span>{props.children}</span>
+      <span className="text-muted-foreground">{props.children}</span>
       {props.sorted ? (
         props.sortDirection === "asc" ? (
-          <ChevronUpIcon className="ml-2 size-4" />
+          <ChevronUpIcon className="ml-2 size-4 text-muted-foreground" />
         ) : (
-          <ChevronDownIcon className="ml-2 size-4" />
+          <ChevronDownIcon className="ml-2 size-4 text-muted-foreground" />
         )
       ) : (
-        <ChevronsUpDownIcon className="ml-2 size-4" />
+        <ChevronDownIcon className="ml-2 size-4 text-muted-foreground" />
       )}
     </Button>
   );
 }
 
-// function GroupsSubMenu({ sender }: { sender: string }) {
-//   const { data, isLoading, error } = useSWR<GroupsResponse>("/api/user/group");
+async function noopRefetchPremium() {
+  return null;
+}
 
-//   return (
-//     <DropdownMenuSubContent>
-//       {data &&
-//         (data.groups.length ? (
-//           data?.groups.map((group) => {
-//             return (
-//               <DropdownMenuItem
-//                 key={group.id}
-//                 onClick={async () => {
-//                   const result = await addGroupItemAction(emailAccountId, {
-//                     groupId: group.id,
-//                     type: GroupItemType.FROM,
-//                     value: sender,
-//                   });
+function getActiveLabelFilter<T extends Row>(item: T, label: EmailLabel) {
+  const labelId = normalizeLabelValue(label.id);
+  const labelName = normalizeLabelValue(label.name);
 
-//                   if (result?.serverError) {
-//                     toastError({
-//                       description: `Failed to add ${sender} to ${group.name}. ${result.error}`,
-//                     });
-//                   } else {
-//                     toastSuccess({
-//                       title: "Success!",
-//                       description: `Added ${sender} to ${group.name}`,
-//                     });
-//                   }
-//                 }}
-//               >
-//                 {group.name}
-//               </DropdownMenuItem>
-//             );
-//           })
-//         ) : (
-//           <DropdownMenuItem>{`You don't have any groups yet.`}</DropdownMenuItem>
-//         ))}
-//       {isLoading && <DropdownMenuItem>Loading...</DropdownMenuItem>}
-//       {error && <DropdownMenuItem>Error loading groups</DropdownMenuItem>}
-//       <DropdownMenuSeparator />
-//       <DropdownMenuItem asChild>
-//         <Link href={prefixPath(emailAccountId, "/automation?tab=groups")} target="_blank">
-//           <PlusCircle className="mr-2 size-4" />
-//           <span>New Group</span>
-//         </Link>
-//       </DropdownMenuItem>
-//     </DropdownMenuSubContent>
-//   );
-// }
+  return item.labelFilters?.find((filter) => {
+    if (!filter.id) return false;
+
+    const filterLabelId = normalizeLabelValue(filter.labelId);
+    return filterLabelId === labelId || filterLabelId === labelName;
+  });
+}
+
+function normalizeLabelValue(value: string) {
+  return value.trim().toLowerCase();
+}

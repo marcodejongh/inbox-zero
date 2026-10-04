@@ -2,65 +2,166 @@ import type { PremiumTier } from "@/generated/prisma/enums";
 import type { Premium } from "@/generated/prisma/client";
 import { env } from "@/env";
 
+const APPLE_ACTIVE_STATUSES = new Set([
+  "ACTIVE",
+  "BILLING_GRACE_PERIOD",
+  "BILLING_RETRY",
+]);
+
+export const premiumEntitlementSelect = {
+  appleExpiresAt: true,
+  appleRevokedAt: true,
+  appleSubscriptionStatus: true,
+  adminGrantExpiresAt: true,
+  adminGrantTier: true,
+  lemonSqueezyRenewsAt: true,
+  stripeSubscriptionStatus: true,
+  tier: true,
+} as const;
+
 function isPremiumStripe(stripeSubscriptionStatus: string | null): boolean {
   if (!stripeSubscriptionStatus) return false;
   const activeStatuses = ["active", "trialing"];
   return activeStatuses.includes(stripeSubscriptionStatus);
 }
 
-function isPremiumLemonSqueezy(lemonSqueezyRenewsAt: Date | null): boolean {
+function isActiveStripe(stripeSubscriptionStatus: string | null): boolean {
+  return stripeSubscriptionStatus === "active";
+}
+
+function isPremiumLemonSqueezy(
+  lemonSqueezyRenewsAt: Date | string | null,
+): boolean {
   if (!lemonSqueezyRenewsAt) return false;
   return new Date(lemonSqueezyRenewsAt) > new Date();
 }
 
+function isPremiumAdminGrant(
+  adminGrantExpiresAt: Date | string | null,
+): boolean {
+  if (!adminGrantExpiresAt) return false;
+  return new Date(adminGrantExpiresAt) > new Date();
+}
+
+export function hasActiveAppleSubscription(
+  appleExpiresAt: Date | string | null,
+  appleRevokedAt: Date | string | null,
+  appleSubscriptionStatus?: string | null,
+): boolean {
+  if (appleRevokedAt) return false;
+
+  if (
+    appleSubscriptionStatus &&
+    APPLE_ACTIVE_STATUSES.has(appleSubscriptionStatus)
+  ) {
+    return true;
+  }
+
+  if (!appleExpiresAt) return false;
+
+  return new Date(appleExpiresAt) > new Date();
+}
+
 export const isPremium = (
-  lemonSqueezyRenewsAt: Date | null,
+  lemonSqueezyRenewsAt: Date | string | null,
   stripeSubscriptionStatus: string | null,
+  appleExpiresAt?: Date | string | null,
+  appleRevokedAt?: Date | string | null,
+  appleSubscriptionStatus?: string | null,
+  adminGrantExpiresAt?: Date | string | null,
 ): boolean => {
   if (env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) return true;
 
   return (
     isPremiumStripe(stripeSubscriptionStatus) ||
-    isPremiumLemonSqueezy(lemonSqueezyRenewsAt)
+    isPremiumLemonSqueezy(lemonSqueezyRenewsAt) ||
+    isPremiumAdminGrant(adminGrantExpiresAt || null) ||
+    hasActiveAppleSubscription(
+      appleExpiresAt || null,
+      appleRevokedAt || null,
+      appleSubscriptionStatus,
+    )
+  );
+};
+
+type PremiumStatusRecord = {
+  appleExpiresAt?: Date | string | null;
+  appleRevokedAt?: Date | string | null;
+  appleSubscriptionStatus?: string | null;
+  adminGrantExpiresAt?: Date | string | null;
+  adminGrantTier?: PremiumTier | null;
+  lemonSqueezyRenewsAt?: Date | string | null;
+  stripeSubscriptionStatus?: string | null;
+  tier?: PremiumTier | null;
+};
+
+export const isPremiumRecord = (
+  premium?: PremiumStatusRecord | null,
+): boolean => {
+  if (env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) return true;
+  if (!premium) return false;
+
+  return (
+    hasProcessorPremiumEntitlement(premium) ||
+    hasAdminGrantPremiumEntitlement(premium)
   );
 };
 
 export const isActivePremium = (
-  premium: Pick<
-    Premium,
-    "lemonSqueezyRenewsAt" | "stripeSubscriptionStatus"
-  > | null,
+  premium?: PremiumStatusRecord | null,
 ): boolean => {
   if (env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) return true;
 
   if (!premium) return false;
 
   return (
-    premium.stripeSubscriptionStatus === "active" ||
-    isPremiumLemonSqueezy(premium.lemonSqueezyRenewsAt)
+    hasActiveProcessorPremiumEntitlement(premium) ||
+    hasAdminGrantPremiumEntitlement(premium)
   );
 };
 
 export const getUserTier = (
   premium?: Pick<
     Premium,
-    "tier" | "lemonSqueezyRenewsAt" | "stripeSubscriptionStatus"
+    | "appleExpiresAt"
+    | "appleRevokedAt"
+    | "appleSubscriptionStatus"
+    | "adminGrantExpiresAt"
+    | "adminGrantTier"
+    | "tier"
+    | "lemonSqueezyRenewsAt"
+    | "stripeSubscriptionStatus"
   > | null,
 ) => {
   if (env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) {
-    return "BUSINESS_PLUS_ANNUALLY" as const;
+    return "PROFESSIONAL_ANNUALLY" as const;
   }
 
   if (!premium) return null;
 
-  const isActive = isPremium(
-    premium.lemonSqueezyRenewsAt || null,
-    premium.stripeSubscriptionStatus || null,
-  );
+  const hasActiveProcessorEntitlement =
+    isPremiumStripe(premium.stripeSubscriptionStatus ?? null) ||
+    isPremiumLemonSqueezy(premium.lemonSqueezyRenewsAt ?? null) ||
+    hasActiveAppleSubscription(
+      premium.appleExpiresAt ?? null,
+      premium.appleRevokedAt ?? null,
+      premium.appleSubscriptionStatus,
+    );
+  const processorTier = hasActiveProcessorEntitlement
+    ? premium.tier || null
+    : null;
+  const adminGrantTier = isPremiumAdminGrant(
+    premium.adminGrantExpiresAt ?? null,
+  )
+    ? premium.adminGrantTier || null
+    : null;
 
-  if (!isActive) return null;
+  if (!processorTier) return adminGrantTier;
+  if (!adminGrantTier) return processorTier;
 
-  return premium.tier || null;
+  return isOnHigherTier(adminGrantTier, processorTier)
+    ? adminGrantTier
+    : processorTier;
 };
 
 export const isAdminForPremium = (
@@ -77,13 +178,41 @@ const tierRanking = {
   BASIC_ANNUALLY: 2,
   PRO_MONTHLY: 3,
   PRO_ANNUALLY: 4,
-  BUSINESS_MONTHLY: 5,
-  BUSINESS_ANNUALLY: 6,
-  BUSINESS_PLUS_MONTHLY: 7,
-  BUSINESS_PLUS_ANNUALLY: 8,
-  COPILOT_MONTHLY: 9,
-  LIFETIME: 10,
+  STARTER_MONTHLY: 5,
+  STARTER_ANNUALLY: 6,
+  PLUS_MONTHLY: 7,
+  PLUS_ANNUALLY: 8,
+  PROFESSIONAL_MONTHLY: 9,
+  PROFESSIONAL_ANNUALLY: 10,
+  COPILOT_MONTHLY: 11,
+  LIFETIME: 12,
 };
+
+function getTiersAtOrAbove(minimumTier: PremiumTier): PremiumTier[] {
+  const minimumRanking = tierRanking[minimumTier];
+
+  return Object.entries(tierRanking)
+    .filter(([, ranking]) => ranking >= minimumRanking)
+    .map(([tier]) => tier as PremiumTier);
+}
+
+// Legacy rows hold a bare 1-12 month, which never matches a period, so they
+// get one reset on next use.
+export const getUnsubscribePeriod = (now = new Date()): number =>
+  now.getFullYear() * 100 + now.getMonth() + 1;
+
+export const getRemainingUnsubscribeCredits = ({
+  unsubscribeCredits,
+  unsubscribeMonth,
+  now = new Date(),
+}: {
+  unsubscribeCredits?: number | null;
+  unsubscribeMonth?: number | null;
+  now?: Date;
+}): number =>
+  unsubscribeMonth === getUnsubscribePeriod(now)
+    ? (unsubscribeCredits ?? 0)
+    : env.NEXT_PUBLIC_FREE_UNSUBSCRIBE_CREDITS;
 
 export const hasUnsubscribeAccess = (
   tier: PremiumTier | null,
@@ -92,13 +221,12 @@ export const hasUnsubscribeAccess = (
   if (env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) return true;
 
   if (tier) return true;
-  if (unsubscribeCredits && unsubscribeCredits > 0) return true;
-  return false;
+  return (unsubscribeCredits ?? 0) > 0;
 };
 
 export const hasAiAccess = (
   tier: PremiumTier | null,
-  aiApiKey?: string | null,
+  hasApiKey?: boolean | null,
 ) => {
   if (env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) return true;
 
@@ -107,8 +235,8 @@ export const hasAiAccess = (
   const ranking = tierRanking[tier];
 
   const hasAiAccess = !!(
-    ranking >= tierRanking.BUSINESS_MONTHLY ||
-    (ranking >= tierRanking.PRO_MONTHLY && aiApiKey)
+    ranking >= tierRanking.STARTER_MONTHLY ||
+    (ranking >= tierRanking.PRO_MONTHLY && hasApiKey)
   );
 
   return hasAiAccess;
@@ -142,17 +270,84 @@ export function isOnHigherTier(
   return tier1Rank > tier2Rank;
 }
 
-export function getPremiumUserFilter() {
+export function getPremiumUserFilter({
+  minimumTier,
+}: {
+  minimumTier?: PremiumTier;
+} = {}) {
   if (env.NEXT_PUBLIC_BYPASS_PREMIUM_CHECKS) return {};
+
+  const minimumTiers = minimumTier ? getTiersAtOrAbove(minimumTier) : undefined;
+  const tierFilter = minimumTiers
+    ? [{ tier: { in: minimumTiers } }]
+    : [{ tier: { not: null } }];
+  const adminGrantTierFilter = minimumTiers
+    ? [{ adminGrantTier: { in: minimumTiers } }]
+    : [{ adminGrantTier: { not: null } }];
+  const now = new Date();
 
   return {
     user: {
       premium: {
         OR: [
-          { lemonSqueezyRenewsAt: { gt: new Date() } },
-          { stripeSubscriptionStatus: { in: ["active", "trialing"] } },
+          {
+            AND: [
+              { appleExpiresAt: { gt: now } },
+              { appleRevokedAt: null },
+              ...tierFilter,
+            ],
+          },
+          {
+            AND: [{ lemonSqueezyRenewsAt: { gt: now } }, ...tierFilter],
+          },
+          {
+            AND: [
+              { stripeSubscriptionStatus: { in: ["active", "trialing"] } },
+              ...tierFilter,
+            ],
+          },
+          {
+            AND: [
+              { adminGrantExpiresAt: { gt: now } },
+              ...adminGrantTierFilter,
+            ],
+          },
         ],
       },
     },
   };
+}
+
+function hasProcessorPremiumEntitlement(premium: PremiumStatusRecord) {
+  if (!premium.tier) return false;
+
+  return (
+    isPremiumStripe(premium.stripeSubscriptionStatus ?? null) ||
+    isPremiumLemonSqueezy(premium.lemonSqueezyRenewsAt ?? null) ||
+    hasActiveAppleSubscription(
+      premium.appleExpiresAt ?? null,
+      premium.appleRevokedAt ?? null,
+      premium.appleSubscriptionStatus,
+    )
+  );
+}
+
+function hasActiveProcessorPremiumEntitlement(premium: PremiumStatusRecord) {
+  if (!premium.tier) return false;
+
+  return (
+    isActiveStripe(premium.stripeSubscriptionStatus ?? null) ||
+    isPremiumLemonSqueezy(premium.lemonSqueezyRenewsAt ?? null) ||
+    hasActiveAppleSubscription(
+      premium.appleExpiresAt ?? null,
+      premium.appleRevokedAt ?? null,
+      premium.appleSubscriptionStatus,
+    )
+  );
+}
+
+function hasAdminGrantPremiumEntitlement(premium: PremiumStatusRecord) {
+  if (!premium.adminGrantTier) return false;
+
+  return isPremiumAdminGrant(premium.adminGrantExpiresAt ?? null);
 }

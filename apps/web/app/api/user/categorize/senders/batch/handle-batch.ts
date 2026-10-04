@@ -1,18 +1,17 @@
 import { NextResponse } from "next/server";
-import { aiCategorizeSendersSchema } from "@/app/api/user/categorize/senders/batch/handle-batch-validation";
-import { getThreadsFromSenderWithSubject } from "@/utils/gmail/thread";
+import { aiCategorizeSendersSchema } from "@/utils/categorize/senders/batch-validation";
 import {
   categorizeWithAi,
   getCategories,
   updateSenderCategory,
 } from "@/utils/categorize/senders/categorize";
 import { validateUserAndAiAccess } from "@/utils/user/validate";
-import { getGmailClientWithRefresh } from "@/utils/gmail/client";
 import { UNKNOWN_CATEGORY } from "@/utils/ai/categorize-sender/ai-categorize-senders";
 import prisma from "@/utils/prisma";
 import { saveCategorizationProgress } from "@/utils/redis/categorization-progress";
 import { SafeError } from "@/utils/error";
 import type { RequestWithLogger } from "@/utils/middleware";
+import { createEmailProvider } from "@/utils/email/provider";
 
 export async function handleBatchRequest(
   request: RequestWithLogger,
@@ -21,7 +20,11 @@ export async function handleBatchRequest(
     await handleBatchInternal(request);
     return NextResponse.json({ ok: true });
   } catch (error) {
-    request.logger.error("Handle batch request error", { error });
+    if (error instanceof SafeError) {
+      request.logger.warn("Handle batch request error", { error });
+    } else {
+      request.logger.error("Handle batch request error", { error });
+    }
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
@@ -47,9 +50,6 @@ async function handleBatchInternal(request: RequestWithLogger) {
     select: {
       account: {
         select: {
-          access_token: true,
-          refresh_token: true,
-          expires_at: true,
           provider: true,
         },
       },
@@ -59,29 +59,26 @@ async function handleBatchInternal(request: RequestWithLogger) {
   const account = emailAccountWithAccount?.account;
 
   if (!account) throw new SafeError("No account found");
-  if (!account.access_token || !account.refresh_token)
-    throw new SafeError("No access or refresh token");
 
-  const gmail = await getGmailClientWithRefresh({
-    accessToken: account.access_token,
-    refreshToken: account.refresh_token,
-    expiresAt: account.expires_at?.getTime() || null,
+  const emailProvider = await createEmailProvider({
     emailAccountId,
+    provider: account.provider,
     logger: request.logger,
   });
 
   const sendersWithEmails: Map<string, { subject: string; snippet: string }[]> =
     new Map();
 
+  const senderNameMap = new Map<string, string | null>();
+  for (const sender of senders) {
+    senderNameMap.set(sender.email, sender.name);
+  }
+
   // 1. fetch 3 messages for each sender
   for (const sender of senders) {
-    const threadsFromSender = await getThreadsFromSenderWithSubject(
-      gmail,
-      account.access_token,
-      sender,
-      3,
-    );
-    sendersWithEmails.set(sender, threadsFromSender);
+    const threadsFromSender =
+      await emailProvider.getThreadsFromSenderWithSubject(sender.email, 3);
+    sendersWithEmails.set(sender.email, threadsFromSender);
   }
 
   // 2. categorize senders with ai
@@ -95,13 +92,22 @@ async function handleBatchInternal(request: RequestWithLogger) {
   });
 
   // 3. save categorized senders to db
+  // One unsaveable sender (e.g. an unparseable email address) must not abort
+  // the rest of the batch — progress would stall and every retry would fail
+  // the same way.
   for (const result of results) {
-    await updateSenderCategory({
-      sender: result.sender,
-      categories,
-      categoryName: result.category ?? UNKNOWN_CATEGORY,
-      emailAccountId,
-    });
+    try {
+      await updateSenderCategory({
+        sender: result.sender,
+        senderName: senderNameMap.get(result.sender),
+        categories,
+        categoryName: result.category ?? UNKNOWN_CATEGORY,
+        emailAccountId,
+      });
+    } catch (error) {
+      request.logger.error("Failed to save sender category", { error });
+      request.logger.trace("Failed sender", { sender: result.sender });
+    }
   }
 
   // // 4. categorize senders that were not categorized

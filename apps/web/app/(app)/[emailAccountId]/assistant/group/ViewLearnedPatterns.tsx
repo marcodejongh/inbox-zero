@@ -3,8 +3,7 @@
 import useSWR, { type KeyedMutator } from "swr";
 import sortBy from "lodash/sortBy";
 import groupBy from "lodash/groupBy";
-import Link from "next/link";
-import { PlusIcon, ExternalLinkIcon, TrashIcon } from "lucide-react";
+import { PlusIcon, TrashIcon } from "lucide-react";
 import {
   useState,
   useCallback,
@@ -26,7 +25,7 @@ import {
   TableHeader,
   TableHead,
 } from "@/components/ui/table";
-import { MessageText } from "@/components/Typography";
+import { MessageText, MutedText } from "@/components/Typography";
 import {
   addGroupItemAction,
   deleteGroupItemAction,
@@ -44,7 +43,6 @@ import { Badge } from "@/components/ui/badge";
 import { formatShortDate } from "@/utils/date";
 import { Tooltip } from "@/components/Tooltip";
 import { useAccount } from "@/providers/EmailAccountProvider";
-import { prefixPath } from "@/utils/path";
 import { Toggle } from "@/components/Toggle";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 
@@ -57,7 +55,6 @@ export function ViewLearnedPatterns({ groupId }: { groupId: string }) {
 }
 
 function ViewGroupInner({ groupId }: { groupId: string }) {
-  const { emailAccountId } = useAccount();
   const { data, isLoading, error, mutate } = useSWR<GroupItemsResponse>(
     `/api/user/group/${groupId}/items`,
   );
@@ -96,21 +93,6 @@ function ViewGroupInner({ groupId }: { groupId: string }) {
                 <PlusIcon className="mr-2 h-4 w-4" />
                 Add pattern
               </Button>
-
-              {!!group?.items?.length && (
-                <Button variant="outline" size="sm" asChild>
-                  <Link
-                    href={prefixPath(
-                      emailAccountId,
-                      `/assistant/group/${groupId}/examples`,
-                    )}
-                    target="_blank"
-                  >
-                    <ExternalLinkIcon className="mr-2 size-4" />
-                    Matches
-                  </Link>
-                </Button>
-              )}
             </div>
           </div>
         )}
@@ -317,16 +299,16 @@ function GroupItemList({
                       </Badge>
                     ))}
 
-                  <div className="text-wrap break-words">
+                  <div className="break-all">
                     <GroupItemDisplay item={item} />
                   </div>
                 </div>
               </TableCell>
               <TableCell className="flex items-center justify-end gap-4 py-2 text-right">
                 <Tooltip content="Date added">
-                  <span className="text-sm text-muted-foreground">
+                  <MutedText className="hidden sm:block">
                     {formatShortDate(new Date(item.createdAt))}
-                  </span>
+                  </MutedText>
                 </Tooltip>
 
                 <Button

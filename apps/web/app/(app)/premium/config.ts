@@ -21,10 +21,12 @@ const pricing: Record<PremiumTier, number> = {
   BASIC_ANNUALLY: 8,
   PRO_MONTHLY: 16,
   PRO_ANNUALLY: 10,
-  BUSINESS_MONTHLY: 20,
-  BUSINESS_ANNUALLY: 18,
-  BUSINESS_PLUS_MONTHLY: 50,
-  BUSINESS_PLUS_ANNUALLY: 42,
+  STARTER_MONTHLY: 20,
+  STARTER_ANNUALLY: 18,
+  PLUS_MONTHLY: 35,
+  PLUS_ANNUALLY: 28,
+  PROFESSIONAL_MONTHLY: 50,
+  PROFESSIONAL_ANNUALLY: 42,
   COPILOT_MONTHLY: 500,
   LIFETIME: 299,
 };
@@ -34,10 +36,20 @@ const variantIdToTier: Record<number, PremiumTier> = {
   [env.NEXT_PUBLIC_BASIC_ANNUALLY_VARIANT_ID]: "BASIC_ANNUALLY",
   [env.NEXT_PUBLIC_PRO_MONTHLY_VARIANT_ID]: "PRO_MONTHLY",
   [env.NEXT_PUBLIC_PRO_ANNUALLY_VARIANT_ID]: "PRO_ANNUALLY",
-  [env.NEXT_PUBLIC_BUSINESS_MONTHLY_VARIANT_ID]: "BUSINESS_MONTHLY",
-  [env.NEXT_PUBLIC_BUSINESS_ANNUALLY_VARIANT_ID]: "BUSINESS_ANNUALLY",
+  [env.NEXT_PUBLIC_BUSINESS_MONTHLY_VARIANT_ID]: "STARTER_MONTHLY",
+  [env.NEXT_PUBLIC_BUSINESS_ANNUALLY_VARIANT_ID]: "STARTER_ANNUALLY",
   [env.NEXT_PUBLIC_COPILOT_MONTHLY_VARIANT_ID]: "COPILOT_MONTHLY",
 };
+
+export const BRIEF_MY_MEETING_PRICE_ID_MONTHLY =
+  "price_1SjoaXKGf8mwZWHnOdyaf2IN";
+export const BRIEF_MY_MEETING_PRICE_ID_ANNUALLY =
+  "price_1SjoawKGf8mwZWHnfAeShYhb";
+
+const INCLUDED_EMAIL_ACCOUNT_PRICE_IDS = [
+  env.NEXT_PUBLIC_STRIPE_PLUS_MONTHLY_PRICE_ID,
+  env.NEXT_PUBLIC_STRIPE_BUSINESS_PLUS_MONTHLY_PRICE_ID,
+];
 
 const STRIPE_PRICE_ID_CONFIG: Record<
   PremiumTier,
@@ -52,9 +64,10 @@ const STRIPE_PRICE_ID_CONFIG: Record<
   BASIC_ANNUALLY: { priceId: "price_1RfeDLKGf8mwZWHn5kfC8gcM" },
   PRO_MONTHLY: {},
   PRO_ANNUALLY: {},
-  BUSINESS_MONTHLY: {
+  STARTER_MONTHLY: {
     priceId: env.NEXT_PUBLIC_STRIPE_BUSINESS_MONTHLY_PRICE_ID,
     oldPriceIds: [
+      "price_1T9FhCKGf8mwZWHn1olNzv6X",
       "price_1S5u73KGf8mwZWHn8VYFdALA",
       "price_1RMSnIKGf8mwZWHnlHP0212n",
       "price_1RfoILKGf8mwZWHnDiUMj6no",
@@ -63,25 +76,34 @@ const STRIPE_PRICE_ID_CONFIG: Record<
       "price_1Rg0QfKGf8mwZWHnDsiocBVD",
       "price_1Rg0LEKGf8mwZWHndYXYg7ie",
       "price_1Rg03pKGf8mwZWHnWMNeQzLc",
+      BRIEF_MY_MEETING_PRICE_ID_MONTHLY,
     ],
   },
-  BUSINESS_ANNUALLY: {
+  STARTER_ANNUALLY: {
     priceId: env.NEXT_PUBLIC_STRIPE_BUSINESS_ANNUALLY_PRICE_ID,
     oldPriceIds: [
       "price_1S5u6uKGf8mwZWHnEvPWuQzG",
       "price_1S1QGGKGf8mwZWHnYpUcqNua",
       "price_1RMSnIKGf8mwZWHnymtuW2s0",
       "price_1RfSoxKGf8mwZWHngHcug4YM",
+      // brief my meeting
+      BRIEF_MY_MEETING_PRICE_ID_ANNUALLY,
     ],
   },
-  BUSINESS_PLUS_MONTHLY: {
+  PLUS_MONTHLY: {
+    priceId: env.NEXT_PUBLIC_STRIPE_PLUS_MONTHLY_PRICE_ID,
+  },
+  PLUS_ANNUALLY: {
+    priceId: env.NEXT_PUBLIC_STRIPE_PLUS_ANNUALLY_PRICE_ID,
+  },
+  PROFESSIONAL_MONTHLY: {
     priceId: env.NEXT_PUBLIC_STRIPE_BUSINESS_PLUS_MONTHLY_PRICE_ID,
     oldPriceIds: [
       "price_1S5u6NKGf8mwZWHnZCfy4D5n",
       "price_1RMSoMKGf8mwZWHn5fAKBT19",
     ],
   },
-  BUSINESS_PLUS_ANNUALLY: {
+  PROFESSIONAL_ANNUALLY: {
     priceId: env.NEXT_PUBLIC_STRIPE_BUSINESS_PLUS_ANNUALLY_PRICE_ID,
     oldPriceIds: [
       "price_1S5u6XKGf8mwZWHnba8HX1H2",
@@ -90,6 +112,21 @@ const STRIPE_PRICE_ID_CONFIG: Record<
   },
   COPILOT_MONTHLY: {},
   LIFETIME: {},
+};
+
+const APPLE_PRODUCT_ID_CONFIG: Partial<Record<PremiumTier, string>> = {
+  STARTER_MONTHLY: env.NEXT_PUBLIC_APPLE_IAP_STARTER_MONTHLY_PRODUCT_ID,
+  STARTER_ANNUALLY: env.NEXT_PUBLIC_APPLE_IAP_STARTER_ANNUALLY_PRODUCT_ID,
+};
+
+/**
+ * App Store products sold by the native iOS app. Both grant the `pro`
+ * Superwall entitlement, which is the Starter tier (the same tier Stripe's
+ * business prices and Lemon's business variants map to).
+ */
+const APPLE_STARTER_PRODUCT_IDS: Record<string, PremiumTier> = {
+  "com.getinboxzero.starter.monthly.v2": "STARTER_MONTHLY",
+  "com.getinboxzero.starter.annual.v2": "STARTER_ANNUALLY",
 };
 
 export function getStripeSubscriptionTier({
@@ -115,25 +152,116 @@ export function getStripePriceId({
   return STRIPE_PRICE_ID_CONFIG[tier]?.priceId ?? null;
 }
 
+export function hasIncludedEmailAccountsStripePriceId(
+  priceId: string | null | undefined,
+): boolean {
+  if (!priceId) return false;
+
+  return INCLUDED_EMAIL_ACCOUNT_PRICE_IDS?.includes(priceId) ?? false;
+}
+
+export function getAppleSubscriptionTier({
+  productId,
+}: {
+  productId: string;
+}): PremiumTier | null {
+  const starterTier = APPLE_STARTER_PRODUCT_IDS[productId];
+  if (starterTier) return starterTier;
+
+  for (const [tier, configuredProductId] of Object.entries(
+    APPLE_PRODUCT_ID_CONFIG,
+  )) {
+    if (configuredProductId === productId) {
+      return tier as PremiumTier;
+    }
+  }
+
+  return null;
+}
+
+export function hasLegacyStripePriceId({
+  tier,
+  priceId,
+}: {
+  tier: PremiumTier | null | undefined;
+  priceId: string | null | undefined;
+}): boolean {
+  if (!priceId) return false;
+
+  const resolvedTier = tier || getStripeSubscriptionTier({ priceId });
+  if (!resolvedTier) return false;
+
+  const tierConfig = STRIPE_PRICE_ID_CONFIG[resolvedTier];
+  if (!tierConfig) return false;
+  // We sometimes reuse a historical price as the active price again.
+  if (tierConfig.priceId === priceId) return false;
+
+  return tierConfig.oldPriceIds?.includes(priceId) ?? false;
+}
+
+export function shouldShowLegacyStripePricingNotice(
+  premium:
+    | {
+        tier: PremiumTier | null | undefined;
+        stripePriceId: string | null | undefined;
+        stripeSubscriptionStatus: string | null | undefined;
+      }
+    | null
+    | undefined,
+): boolean {
+  if (!premium?.stripeSubscriptionStatus) return false;
+  if (!["active", "trialing"].includes(premium.stripeSubscriptionStatus)) {
+    return false;
+  }
+
+  return hasLegacyStripePriceId({
+    tier: premium.tier,
+    priceId: premium.stripePriceId,
+  });
+}
+
+export function getPremiumTierName(
+  tier: PremiumTier | null | undefined,
+): string {
+  if (!tier) return "Premium";
+
+  const tierMap: Partial<Record<PremiumTier, string>> = {
+    STARTER_MONTHLY: "Starter",
+    STARTER_ANNUALLY: "Starter",
+    PLUS_MONTHLY: "Plus",
+    PLUS_ANNUALLY: "Plus",
+    PROFESSIONAL_MONTHLY: "Professional",
+    PROFESSIONAL_ANNUALLY: "Professional",
+    COPILOT_MONTHLY: "Enterprise",
+    BASIC_MONTHLY: "Basic",
+    BASIC_ANNUALLY: "Basic",
+    PRO_MONTHLY: "Pro",
+    PRO_ANNUALLY: "Pro",
+    LIFETIME: "Lifetime",
+  };
+
+  return tierMap[tier] ?? "Premium";
+}
+
 function discount(monthly: number, annually: number) {
   return ((monthly - annually) / monthly) * 100;
 }
 
-export const businessTierName = "Starter";
+export const starterTierName = "Starter";
 
-const businessTier: Tier = {
-  name: businessTierName,
+const starterTier: Tier = {
+  name: starterTierName,
   tiers: {
-    monthly: "BUSINESS_MONTHLY",
-    annually: "BUSINESS_ANNUALLY",
+    monthly: "STARTER_MONTHLY",
+    annually: "STARTER_ANNUALLY",
   },
   price: {
-    monthly: pricing.BUSINESS_MONTHLY,
-    annually: pricing.BUSINESS_ANNUALLY,
+    monthly: pricing.STARTER_MONTHLY,
+    annually: pricing.STARTER_ANNUALLY,
   },
   discount: {
     monthly: 0,
-    annually: discount(pricing.BUSINESS_MONTHLY, pricing.BUSINESS_ANNUALLY),
+    annually: discount(pricing.STARTER_MONTHLY, pricing.STARTER_ANNUALLY),
   },
   description:
     "For individuals, entrepreneurs, and executives looking to buy back their time.",
@@ -153,37 +281,97 @@ const businessTier: Tier = {
     {
       text: "Email analytics",
     },
+    {
+      text: "Pre-meeting briefings",
+      tooltip:
+        "Get AI briefings before every meeting with research on attendees and context from your inbox.",
+    },
+  ],
+  cta: "Try free for 7 days",
+  mostPopular: false,
+};
+
+const plusTier: Tier = {
+  name: "Plus",
+  tiers: {
+    monthly: "PLUS_MONTHLY",
+    annually: "PLUS_ANNUALLY",
+  },
+  price: {
+    monthly: pricing.PLUS_MONTHLY,
+    annually: pricing.PLUS_ANNUALLY,
+  },
+  discount: {
+    monthly: 0,
+    annually: discount(pricing.PLUS_MONTHLY, pricing.PLUS_ANNUALLY),
+  },
+  description:
+    "For power users who need integrations and deeper knowledge base support.",
+  features: [
+    {
+      text: "Everything in Starter, plus:",
+    },
+    {
+      text: "2 email accounts included per user",
+      tooltip:
+        "Each user gets 2 email accounts included. Additional email accounts are billed at the standard per-seat rate.",
+    },
+    {
+      text: "AI meeting notetaker",
+      tooltip:
+        "A notetaker joins your video calls and turns them into transcripts, summaries, recap emails, and follow-up drafts.",
+    },
+    {
+      text: "Slack integration",
+      tooltip:
+        "Forward important emails and notifications to your Slack channels automatically.",
+    },
+    {
+      text: "App integrations",
+      tooltip:
+        "Connect Notion, Stripe, Monday.com, and more so the AI can use data from your tools when drafting replies and meeting briefs.",
+    },
+    {
+      text: "Email digests",
+      tooltip:
+        "Group emails from selected rules into a scheduled summary instead of reading each message individually.",
+    },
+    {
+      text: "Auto-file attachments",
+      tooltip:
+        "Automatically organize and file email attachments to your preferred storage.",
+    },
+    {
+      text: "Unlimited knowledge base",
+      tooltip:
+        "The knowledge base is used to help draft responses. Store unlimited content in your knowledge base.",
+    },
   ],
   cta: "Try free for 7 days",
   mostPopular: true,
 };
 
-const businessPlusTier: Tier = {
+const professionalTier: Tier = {
   name: "Professional",
   tiers: {
-    monthly: "BUSINESS_PLUS_MONTHLY",
-    annually: "BUSINESS_PLUS_ANNUALLY",
+    monthly: "PROFESSIONAL_MONTHLY",
+    annually: "PROFESSIONAL_ANNUALLY",
   },
   price: {
-    monthly: pricing.BUSINESS_PLUS_MONTHLY,
-    annually: pricing.BUSINESS_PLUS_ANNUALLY,
+    monthly: pricing.PROFESSIONAL_MONTHLY,
+    annually: pricing.PROFESSIONAL_ANNUALLY,
   },
   discount: {
     monthly: 0,
     annually: discount(
-      pricing.BUSINESS_PLUS_MONTHLY,
-      pricing.BUSINESS_PLUS_ANNUALLY,
+      pricing.PROFESSIONAL_MONTHLY,
+      pricing.PROFESSIONAL_ANNUALLY,
     ),
   },
   description: "For teams and growing businesses handling high email volumes.",
   features: [
     {
-      text: "Everything in Individual, plus:",
-    },
-    {
-      text: "Unlimited knowledge base",
-      tooltip:
-        "The knowledge base is used to help draft responses. Store up to unlimited content in your knowledge base.",
+      text: "Everything in Plus, plus:",
     },
     { text: "Team-wide analytics" },
     { text: "Priority support" },
@@ -215,6 +403,9 @@ const enterpriseTier: Tier = {
       text: "SSO login",
     },
     {
+      text: "SCIM user provisioning",
+    },
+    {
       text: "On-premise deployment (optional)",
     },
     {
@@ -239,4 +430,5 @@ export function getLemonSubscriptionTier({
   return tier;
 }
 
-export const tiers: Tier[] = [businessTier, businessPlusTier, enterpriseTier];
+export const tiers: Tier[] = [starterTier, plusTier, professionalTier];
+export { enterpriseTier };

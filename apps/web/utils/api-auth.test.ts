@@ -1,185 +1,278 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { NextRequest } from "next/server";
+import prisma from "@/utils/__mocks__/prisma";
 import {
-  validateApiKey,
   getUserFromApiKey,
+  validateAccountApiKey,
+  validateApiKey,
   validateApiKeyAndGetEmailProvider,
 } from "./api-auth";
-import prisma from "@/utils/__mocks__/prisma";
 import { hashApiKey } from "@/utils/api-key";
 import { SafeError } from "@/utils/error";
-import type { NextRequest } from "next/server";
+import { createEmailProvider } from "@/utils/email/provider";
 
-// Mock dependencies
 vi.mock("@/utils/prisma");
 vi.mock("@/utils/api-key");
-vi.mock("@/utils/gmail/client");
-vi.mock("server-only", () => ({}));
-
-// Create a type that matches what our test expects to be returned from prisma.apiKey.findUnique
-type MockApiKeyResult = {
-  user: {
-    id: string;
-    accounts: Array<any>;
-  };
-  isActive: boolean;
-};
+vi.mock("@/utils/email/provider");
 
 describe("api-auth", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prisma.apiKey.update.mockResolvedValue({} as never);
   });
 
   describe("validateApiKey", () => {
-    it("should throw an error if API key is missing", async () => {
-      // Create a mock request with no API key
-      const request = {
-        headers: {
-          get: vi.fn().mockReturnValue(null),
-        },
-      } as unknown as NextRequest;
-
-      await expect(validateApiKey(request)).rejects.toThrow(SafeError);
-      await expect(validateApiKey(request)).rejects.toThrow("Missing API key");
-    });
-
-    it("should throw an error if API key is invalid", async () => {
-      // Create a mock request with an API key
-      const request = {
-        headers: {
-          get: vi.fn().mockReturnValue("test-api-key"),
-        },
-      } as unknown as NextRequest;
-
-      // Mock getUserFromApiKey to return null (invalid API key)
-      vi.mocked(hashApiKey).mockReturnValue("hashed-key");
-      prisma.apiKey.findUnique.mockResolvedValue(null);
-
-      await expect(validateApiKey(request)).rejects.toThrow(SafeError);
-      await expect(validateApiKey(request)).rejects.toThrow("Invalid API key");
-    });
-
-    it("should return user if API key is valid", async () => {
-      // Create a mock request with a valid API key
-      const request = {
-        headers: {
-          get: vi.fn().mockReturnValue("valid-api-key"),
-        },
-      } as unknown as NextRequest;
-
-      // Mock getUserFromApiKey to return a user
-      const mockUser = {
-        id: "user-id",
-        accounts: [],
-      };
-
-      vi.mocked(hashApiKey).mockReturnValue("hashed-key");
-      (prisma.apiKey.findUnique as any).mockResolvedValue({
-        user: mockUser,
-        isActive: true,
-      } as MockApiKeyResult);
-
-      const result = await validateApiKey(request);
-      expect(result).toEqual({ user: mockUser });
-    });
-  });
-
-  describe("getUserFromApiKey", () => {
-    it("should return null if API key is not found", async () => {
-      vi.mocked(hashApiKey).mockReturnValue("hashed-key");
-      prisma.apiKey.findUnique.mockResolvedValue(null);
-
-      const result = await getUserFromApiKey("invalid-key");
-      expect(result).toBeNull();
-    });
-
-    it("should return user if API key is valid", async () => {
-      const mockUser = {
-        id: "user-id",
-        accounts: [],
-      };
-
-      vi.mocked(hashApiKey).mockReturnValue("hashed-key");
-      (prisma.apiKey.findUnique as any).mockResolvedValue({
-        user: mockUser,
-        isActive: true,
-      } as MockApiKeyResult);
-
-      const result = await getUserFromApiKey("valid-key");
-      expect(result).toEqual(mockUser);
-    });
-  });
-
-  describe("validateApiKeyAndGetGmailClient", () => {
-    it("should throw an error if API key is invalid", async () => {
-      const request = {
-        headers: {
-          get: vi.fn().mockReturnValue(null),
-        },
-      } as unknown as NextRequest;
-
-      await expect(validateApiKeyAndGetEmailProvider(request)).rejects.toThrow(
-        SafeError,
-      );
-      await expect(validateApiKeyAndGetEmailProvider(request)).rejects.toThrow(
+    it("throws when the key is missing", async () => {
+      await expect(validateApiKey(getRequest(null))).rejects.toThrow(SafeError);
+      await expect(validateApiKey(getRequest(null))).rejects.toThrow(
         "Missing API key",
       );
     });
 
-    it("should throw an error if user has no Google account", async () => {
-      const request = {
-        headers: {
-          get: vi.fn().mockReturnValue("valid-api-key"),
-        },
-      } as unknown as NextRequest;
+    it("throws when the key is invalid", async () => {
+      mockApiKeyLookup(null);
 
-      const mockUser = {
-        id: "user-id",
-        accounts: [], // Empty accounts array
-      };
+      await expect(
+        validateApiKey(getRequest("invalid-api-key")),
+      ).rejects.toThrow("Invalid API key");
+    });
 
-      vi.mocked(hashApiKey).mockReturnValue("hashed-key");
-      (prisma.apiKey.findUnique as any).mockResolvedValue({
-        user: mockUser,
-        isActive: true,
-      } as MockApiKeyResult);
+    it("rejects inactive keys", async () => {
+      mockApiKeyLookup(null);
 
-      await expect(validateApiKeyAndGetEmailProvider(request)).rejects.toThrow(
-        SafeError,
-      );
-      await expect(validateApiKeyAndGetEmailProvider(request)).rejects.toThrow(
-        "Missing account",
+      await expect(
+        validateApiKey(getRequest("inactive-api-key")),
+      ).rejects.toThrow("Invalid API key");
+      expect(prisma.apiKey.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { hashedKey: "hashed-key", isActive: true },
+        }),
       );
     });
 
-    it("should throw an error if account is missing tokens", async () => {
-      const request = {
-        headers: {
-          get: vi.fn().mockReturnValue("valid-api-key"),
-        },
-      } as unknown as NextRequest;
+    it("rejects expired keys", async () => {
+      mockApiKeyLookup(
+        buildApiKeyRecord({ expiresAt: new Date("2020-01-01T00:00:00Z") }),
+      );
 
-      const mockUser = {
+      await expect(
+        validateApiKey(getRequest("expired-api-key")),
+      ).rejects.toThrow("Invalid API key");
+      expect(prisma.apiKey.update).not.toHaveBeenCalled();
+    });
+
+    it("returns the scoped api key and records last use", async () => {
+      mockApiKeyLookup(buildApiKeyRecord());
+
+      const result = await validateApiKey(getRequest("valid-api-key"));
+
+      expect(result).toEqual({
+        apiKey: expect.objectContaining({
+          id: "key-id",
+          userId: "user-id",
+          emailAccountId: "email-account-id",
+          scopes: ["RULES_READ"],
+        }),
+      });
+      expect(prisma.apiKey.update).toHaveBeenCalledWith({
+        where: { id: "key-id" },
+        data: { lastUsedAt: expect.any(Date) },
+      });
+    });
+  });
+
+  describe("getUserFromApiKey", () => {
+    it("returns null for invalid keys", async () => {
+      mockApiKeyLookup(null);
+
+      await expect(getUserFromApiKey("invalid-key")).resolves.toBeNull();
+    });
+
+    it("returns the scoped user shape for valid keys", async () => {
+      mockApiKeyLookup(
+        buildApiKeyRecord({
+          scopes: ["RULES_READ", "RULES_WRITE"],
+        }),
+      );
+
+      await expect(getUserFromApiKey("valid-key")).resolves.toEqual({
         id: "user-id",
-        accounts: [
-          {
-            // Missing tokens
-            providerAccountId: "google-account-id",
-          },
-        ],
-      };
+        emailAccountId: "email-account-id",
+        scopes: ["RULES_READ", "RULES_WRITE"],
+      });
+    });
 
-      vi.mocked(hashApiKey).mockReturnValue("hashed-key");
-      (prisma.apiKey.findUnique as any).mockResolvedValue({
-        user: mockUser,
-        isActive: true,
-      } as MockApiKeyResult);
+    it("returns null when the scoped inbox relation is missing", async () => {
+      mockApiKeyLookup(buildApiKeyRecord({ emailAccount: null }));
 
-      await expect(validateApiKeyAndGetEmailProvider(request)).rejects.toThrow(
-        SafeError,
+      await expect(getUserFromApiKey("orphaned-key")).resolves.toBeNull();
+    });
+
+    it("returns null for keys without an inbox scope", async () => {
+      mockApiKeyLookup(
+        buildApiKeyRecord({
+          emailAccountId: null,
+          emailAccount: null,
+        }),
       );
-      await expect(validateApiKeyAndGetEmailProvider(request)).rejects.toThrow(
-        "Missing access token",
+
+      await expect(getUserFromApiKey("legacy-key")).resolves.toBeNull();
+    });
+  });
+
+  describe("validateAccountApiKey", () => {
+    it("rejects keys without the required scopes", async () => {
+      mockApiKeyLookup(buildApiKeyRecord());
+
+      await expect(
+        validateAccountApiKey(getRequest("valid-key"), ["RULES_WRITE"]),
+      ).rejects.toThrow("API key does not have required permissions");
+    });
+
+    it("returns an account-scoped principal", async () => {
+      mockApiKeyLookup(
+        buildApiKeyRecord({
+          scopes: ["RULES_READ", "RULES_WRITE"],
+        }),
       );
+
+      await expect(
+        validateAccountApiKey(getRequest("valid-key"), ["RULES_WRITE"]),
+      ).resolves.toEqual({
+        apiKeyId: "key-id",
+        userId: "user-id",
+        emailAccountId: "email-account-id",
+        email: "user@example.com",
+        provider: "google",
+        accountId: "account-id",
+        scopes: ["RULES_READ", "RULES_WRITE"],
+      });
+    });
+
+    it("rejects a key whose user no longer owns the email account", async () => {
+      mockApiKeyLookup(
+        buildApiKeyRecord({
+          emailAccount: buildEmailAccountRecord({
+            userId: "new-owner-id",
+          }),
+        }),
+      );
+
+      await expect(
+        validateAccountApiKey(getRequest("stale-key"), ["RULES_READ"]),
+      ).rejects.toThrow("Invalid API key");
+      expect(prisma.apiKey.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects a key whose user no longer owns the provider account", async () => {
+      mockApiKeyLookup(
+        buildApiKeyRecord({
+          emailAccount: buildEmailAccountRecord({
+            accountUserId: "new-owner-id",
+          }),
+        }),
+      );
+
+      await expect(
+        validateAccountApiKey(getRequest("stale-key"), ["RULES_READ"]),
+      ).rejects.toThrow("Invalid API key");
+      expect(prisma.apiKey.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects keys without an account scope", async () => {
+      mockApiKeyLookup(
+        buildApiKeyRecord({
+          emailAccountId: null,
+          emailAccount: null,
+        }),
+      );
+
+      await expect(
+        validateAccountApiKey(getRequest("legacy-key"), ["RULES_READ"]),
+      ).rejects.toThrow("Account-scoped API key required");
+    });
+  });
+
+  describe("validateApiKeyAndGetEmailProvider", () => {
+    it("creates the provider for account-scoped keys", async () => {
+      vi.mocked(createEmailProvider).mockResolvedValue("provider" as never);
+      mockApiKeyLookup(
+        buildApiKeyRecord({
+          scopes: ["STATS_READ"],
+        }),
+      );
+
+      await expect(
+        validateApiKeyAndGetEmailProvider(getRequest("valid-key") as any),
+      ).resolves.toEqual({
+        apiKeyId: "key-id",
+        emailProvider: "provider",
+        userId: "user-id",
+        accountId: "account-id",
+        emailAccountId: "email-account-id",
+        provider: "google",
+        scopes: ["STATS_READ"],
+        authType: "account-scoped",
+      });
+    });
+
+    it("rejects keys without an inbox scope", async () => {
+      mockApiKeyLookup(
+        buildApiKeyRecord({
+          emailAccountId: null,
+          scopes: ["STATS_READ"],
+          emailAccount: null,
+        }),
+      );
+
+      await expect(
+        validateApiKeyAndGetEmailProvider(getRequest("legacy-key") as any),
+      ).rejects.toThrow("Account-scoped API key required");
     });
   });
 });
+
+function getRequest(apiKey: string | null) {
+  return {
+    headers: {
+      get: vi.fn().mockReturnValue(apiKey),
+    },
+    logger: {},
+  } as unknown as NextRequest;
+}
+
+function mockApiKeyLookup(record: ReturnType<typeof buildApiKeyRecord> | null) {
+  vi.mocked(hashApiKey).mockReturnValue("hashed-key");
+  prisma.apiKey.findUnique.mockResolvedValue(record as never);
+}
+
+function buildApiKeyRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "key-id",
+    userId: "user-id",
+    emailAccountId: "email-account-id",
+    expiresAt: null,
+    scopes: ["RULES_READ"],
+    emailAccount: buildEmailAccountRecord(),
+    ...overrides,
+  };
+}
+
+function buildEmailAccountRecord({
+  userId = "user-id",
+  accountUserId = "user-id",
+}: {
+  userId?: string;
+  accountUserId?: string;
+} = {}) {
+  return {
+    id: "email-account-id",
+    userId,
+    email: "user@example.com",
+    account: {
+      id: "account-id",
+      userId: accountUserId,
+      provider: "google",
+    },
+  };
+}

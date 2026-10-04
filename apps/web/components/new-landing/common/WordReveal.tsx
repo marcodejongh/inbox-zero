@@ -1,12 +1,12 @@
-import { BlurFade } from "@/components/new-landing/common/BlurFade";
 import { cn } from "@/utils";
+import { HeroReveal } from "@/components/new-landing/common/HeroReveal";
 
 interface WordRevealProps {
   children?: string;
-  words?: React.ReactNode[];
-  duration?: number;
   delay?: number;
+  duration?: number;
   spaceBetween?: string;
+  words?: readonly React.ReactNode[];
 }
 
 export function WordReveal({
@@ -21,17 +21,12 @@ export function WordReveal({
   return (
     <>
       {wordsToReveal.map((word, index) => (
-        <BlurFade
-          delay={delay + duration * index}
-          inView
-          as="span"
-          key={`${word}-${index}`}
-        >
+        <HeroReveal as="span" blur delay={delay + duration * index} key={index}>
           {word}
           {index < wordsToReveal.length - 1 && (
             <span className={cn("inline-block", spaceBetween)}> </span>
           )}
-        </BlurFade>
+        </HeroReveal>
       ))}
     </>
   );

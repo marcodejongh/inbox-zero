@@ -1,25 +1,16 @@
-# Fastmail EventSource Daemon
-# This daemon connects to Fastmail's EventSource API for real-time email notifications
-
-FROM node:20-alpine
-
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
+FROM node:24-alpine AS build
 WORKDIR /app
-
-# Copy package files and prisma schema
-COPY package.json pnpm-lock.yaml* ./
-COPY prisma ./prisma/
-
-# Install dependencies (this also runs prisma generate via postinstall)
-RUN pnpm install --frozen-lockfile
-
-# Copy source files
+ENV pnpm_config_verify_deps_before_run=false
+RUN npm install -g pnpm@11.19.0
 COPY . .
+RUN pnpm --filter inbox-zero-fastmail-eventsource-daemon install --frozen-lockfile --ignore-scripts --config.enableGlobalVirtualStore=false
+RUN pnpm --filter inbox-zero-fastmail-eventsource-daemon build
+RUN pnpm --filter inbox-zero-fastmail-eventsource-daemon deploy --legacy --prod --config.enableGlobalVirtualStore=false /daemon
 
-# Build TypeScript
-RUN pnpm build
-
-# Run the daemon
-CMD ["pnpm", "start"]
+FROM node:24-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build --chown=node:node /daemon .
+COPY --from=build --chown=node:node /app/apps/fastmail-eventsource-daemon/dist ./dist
+USER node
+CMD ["node", "dist/index.js"]

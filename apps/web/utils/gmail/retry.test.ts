@@ -1,11 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   extractErrorInfo,
   isRetryableError,
   calculateRetryDelay,
+  withGmailRetry,
+  withGmailNonIdempotentWriteRetry,
+  MAX_GMAIL_BLOCKING_RETRY_DELAY_MS,
 } from "./retry";
+import { sleep } from "@/utils/sleep";
+
+vi.mock("@/utils/sleep", () => ({
+  sleep: vi.fn().mockResolvedValue(undefined),
+}));
 
 describe("Gmail retry helpers", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   describe("isRetryableError", () => {
     it("should identify 502 status code as retryable server error", () => {
       const errorInfo = { status: 502, errorMessage: "Server Error" };
@@ -69,6 +81,18 @@ describe("Gmail retry helpers", () => {
       expect(result.isServerError).toBe(false);
     });
 
+    it("should identify RESOURCE_EXHAUSTED concurrent request errors as retryable", () => {
+      const errorInfo = {
+        googleErrorStatus: "RESOURCE_EXHAUSTED",
+        errorMessage: "Too many concurrent requests for user",
+      };
+      const result = isRetryableError(errorInfo);
+
+      expect(result.retryable).toBe(true);
+      expect(result.isRateLimit).toBe(true);
+      expect(result.isServerError).toBe(false);
+    });
+
     it("should identify fetch failed as network error", () => {
       const errorInfo = { errorMessage: "fetch failed" };
       const result = isRetryableError(errorInfo);
@@ -116,12 +140,29 @@ describe("Gmail retry helpers", () => {
       expect(result.isServerError).toBe(false);
       expect(result.isFailedPrecondition).toBe(true);
     });
+
+    it("should not retry duplicate Gmail push client errors", () => {
+      const errorInfo = {
+        status: 400,
+        reason: "failedPrecondition",
+        errorMessage:
+          "Only one user push notification client allowed per developer (call /stop then try again)",
+      };
+      const result = isRetryableError(errorInfo);
+
+      expect(result.retryable).toBe(false);
+      expect(result.isRateLimit).toBe(false);
+      expect(result.isServerError).toBe(false);
+      expect(result.isFailedPrecondition).toBe(false);
+    });
   });
 
   describe("calculateRetryDelay", () => {
-    it("should return 30 seconds for rate limit errors", () => {
-      const delay = calculateRetryDelay(true, false, false, 1);
-      expect(delay).toBe(30_000);
+    it("should use short exponential backoff for rate limit errors", () => {
+      expect(calculateRetryDelay(true, false, false, 1)).toBe(1000);
+      expect(calculateRetryDelay(true, false, false, 2)).toBe(2000);
+      expect(calculateRetryDelay(true, false, false, 4)).toBe(8000);
+      expect(calculateRetryDelay(true, false, false, 5)).toBe(10_000);
     });
 
     it("should use exponential backoff for server errors", () => {
@@ -134,7 +175,7 @@ describe("Gmail retry helpers", () => {
       const pastDate = new Date(Date.now() - 10_000).toISOString();
       const errorMessage = `Rate limit exceeded. Retry after ${pastDate}`;
 
-      // Should fall back to 30s for rate limit
+      // Should fall back to rate-limit backoff
       const delay = calculateRetryDelay(
         true,
         false,
@@ -143,16 +184,7 @@ describe("Gmail retry helpers", () => {
         undefined,
         errorMessage,
       );
-      expect(delay).toBe(30_000);
-    });
-
-    it("should use fallback delay when Retry-After header is stale", () => {
-      // Use HTTP-date format (like "Wed, 21 Oct 2015 07:28:00 GMT")
-      const pastDate = new Date(Date.now() - 5000).toUTCString();
-
-      // Should fall back to exponential backoff for server error
-      const delay = calculateRetryDelay(false, true, false, 2, pastDate);
-      expect(delay).toBe(10_000); // 2nd attempt = 10s
+      expect(delay).toBe(1000);
     });
 
     it("should use retry time from error message when valid", () => {
@@ -211,6 +243,29 @@ describe("Gmail retry helpers", () => {
       expect(info.errorMessage).toBe("Invalid label: FAKE_LABEL_ID_123");
     });
 
+    it("should extract numeric status from RESOURCE_EXHAUSTED payloads", () => {
+      const error = {
+        cause: {
+          response: {
+            data: {
+              error: {
+                code: "429",
+                status: "RESOURCE_EXHAUSTED",
+                message: "Too many concurrent requests for user",
+              },
+            },
+          },
+        },
+      };
+
+      const info = extractErrorInfo(error);
+
+      expect(info.status).toBe(429);
+      expect(info.code).toBe("429");
+      expect(info.googleErrorStatus).toBe("RESOURCE_EXHAUSTED");
+      expect(info.errorMessage).toBe("Too many concurrent requests for user");
+    });
+
     it("should fall back to top-level error string when message missing", () => {
       const error = {
         error: "Some top-level error",
@@ -221,6 +276,68 @@ describe("Gmail retry helpers", () => {
       expect(info.status).toBeUndefined();
       expect(info.reason).toBeUndefined();
       expect(info.errorMessage).toBe("Some top-level error");
+    });
+  });
+
+  describe("withGmailRetry", () => {
+    it("aborts retry loop when backoff exceeds serverless cap", async () => {
+      const retryAt = new Date(
+        Date.now() + MAX_GMAIL_BLOCKING_RETRY_DELAY_MS + 60_000,
+      ).toISOString();
+      const error = Object.assign(
+        new Error(`User-rate limit exceeded. Retry after ${retryAt}`),
+        {
+          cause: {
+            status: 429,
+            message: `User-rate limit exceeded. Retry after ${retryAt}`,
+          },
+        },
+      );
+      const operation = vi.fn().mockRejectedValue(error);
+
+      await expect(withGmailRetry(operation, 5)).rejects.toBe(error);
+
+      expect(operation).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+    });
+
+    it("rethrows original non-retryable errors", async () => {
+      const error = Object.assign(new Error("Not Found"), { status: 404 });
+      const operation = vi.fn().mockRejectedValue(error);
+
+      await expect(withGmailRetry(operation, 5)).rejects.toBe(error);
+
+      expect(operation).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("withGmailNonIdempotentWriteRetry", () => {
+    it("retries an explicit throttle rejection", async () => {
+      const error = Object.assign(new Error("rate limit exceeded"), {
+        status: 429,
+      });
+      const operation = vi
+        .fn()
+        .mockRejectedValueOnce(error)
+        .mockResolvedValue("sent");
+
+      await expect(
+        withGmailNonIdempotentWriteRetry(operation, 1),
+      ).resolves.toBe("sent");
+      expect(operation).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      Object.assign(new Error("service unavailable"), { status: 503 }),
+      Object.assign(new Error("fetch failed"), { code: "ECONNRESET" }),
+    ])("does not retry an ambiguous failure", async (error) => {
+      const operation = vi.fn().mockRejectedValue(error);
+
+      await expect(withGmailNonIdempotentWriteRetry(operation, 5)).rejects.toBe(
+        error,
+      );
+      expect(operation).toHaveBeenCalledOnce();
     });
   });
 });
