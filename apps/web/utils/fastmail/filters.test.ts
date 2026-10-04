@@ -48,6 +48,13 @@ describe("Fastmail managed sender filters", () => {
     expect(ids[0]).toBe(ids[1]);
     expect(ids[2]).not.toBe(ids[0]);
   });
+  it("leaves action ownership to the parent rule, which Prisma requires for nested writes", async () => {
+    await saveFastmailFilter("a", "sender@example.com", ["label"], true);
+    const { create, update } = prisma.rule.upsert.mock.calls[0][0];
+    const actions = [{ type: "LABEL", labelId: "label" }, { type: "ARCHIVE" }];
+    expect(create.actions).toEqual({ create: actions });
+    expect(update.actions).toEqual({ deleteMany: {}, create: actions });
+  });
   it("refuses to delete rules owned by another feature", async () => {
     await expect(
       deleteFastmailFilter("account", "assistant-rule"),
