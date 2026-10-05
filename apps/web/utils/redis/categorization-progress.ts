@@ -14,8 +14,12 @@ local current = tonumber(progress.completedItems) or 0
 local newCompleted = current + increment
 if newCompleted > totalItems then newCompleted = totalItems end
 
+local failed = (tonumber(progress.failedItems) or 0) + tonumber(ARGV[4])
+if failed > totalItems - newCompleted then failed = totalItems - newCompleted end
+
 progress.completedItems = newCompleted
-if newCompleted >= totalItems then
+progress.failedItems = failed
+if newCompleted + failed >= totalItems then
   progress.status = "completed"
 else
   progress.status = "running"
@@ -30,6 +34,7 @@ return cjson.encode(progress)
 const categorizationProgressCountsSchema = z.object({
   totalItems: z.number().int().min(0),
   completedItems: z.number().int().min(0),
+  failedItems: z.number().int().min(0).optional(),
 });
 
 const categorizationProgressSchema = categorizationProgressCountsSchema.extend({
@@ -49,6 +54,7 @@ export type CategorizationStatusSnapshot = {
   status: "idle" | "running" | "completed";
   totalItems: number;
   completedItems: number;
+  failedItems?: number;
   remainingItems: number;
   message: string;
 };
@@ -90,6 +96,9 @@ export async function saveCategorizationTotalItems({
     {
       totalItems,
       completedItems: existingProgress?.completedItems || 0,
+      ...(existingProgress?.failedItems
+        ? { failedItems: existingProgress.failedItems }
+        : {}),
       status: "running",
       startedAt: existingProgress?.startedAt || timestamp,
       updatedAt: timestamp,
@@ -100,10 +109,12 @@ export async function saveCategorizationTotalItems({
 
 export async function saveCategorizationProgress({
   emailAccountId,
-  incrementCompleted,
+  incrementCompleted = 0,
+  incrementFailed = 0,
 }: {
   emailAccountId: string;
-  incrementCompleted: number;
+  incrementCompleted?: number;
+  incrementFailed?: number;
 }) {
   const key = getKey({ emailAccountId });
   const result = await redis.eval<string[], string | null>(
@@ -113,6 +124,7 @@ export async function saveCategorizationProgress({
       incrementCompleted.toString(),
       new Date().toISOString(),
       CATEGORIZATION_PROGRESS_TTL_SECONDS.toString(),
+      incrementFailed.toString(),
     ],
   );
 
@@ -148,7 +160,22 @@ export function getCategorizationStatusSnapshot(
   }
 
   const completedItems = Math.min(progress.completedItems, progress.totalItems);
-  const remainingItems = Math.max(progress.totalItems - completedItems, 0);
+  const failedItems = progress.failedItems ?? 0;
+  const remainingItems = Math.max(
+    progress.totalItems - completedItems - failedItems,
+    0,
+  );
+
+  if (failedItems > 0 && remainingItems === 0) {
+    return {
+      status: "completed",
+      totalItems: progress.totalItems,
+      completedItems,
+      failedItems,
+      remainingItems: 0,
+      message: `Sender categorization finished: ${completedItems} senders categorized, ${failedItems} failed. Starting categorization again retries the failed senders.`,
+    };
+  }
 
   if (progress.status === "completed" || remainingItems === 0) {
     return {

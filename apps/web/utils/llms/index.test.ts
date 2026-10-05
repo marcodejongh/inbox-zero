@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { RetryError } from "ai";
 import { isTransientNetworkError, withNetworkRetry } from "./retry";
 
 // Mock sleep to avoid waiting in tests
@@ -60,6 +61,37 @@ describe("isTransientNetworkError", () => {
     );
 
     expect(isTransientNetworkError(error)).toBe(true);
+  });
+
+  it("should return true when a successful provider response is not a completion", () => {
+    const error = new Error("Invalid JSON response");
+    error.name = "AI_APICallError";
+    error.cause = new Error("Type validation failed: choices is required");
+
+    expect(isTransientNetworkError(error)).toBe(true);
+  });
+
+  it("should return true when the SDK gave up on an invalid provider response", () => {
+    const lastError = new Error("Invalid JSON response");
+    lastError.name = "AI_APICallError";
+    const error = new RetryError({
+      message:
+        "Failed after 2 attempts with non-retryable error: 'AI_APICallError'",
+      reason: "errorNotRetryable",
+      errors: [lastError],
+    });
+
+    expect(isTransientNetworkError(error)).toBe(true);
+  });
+
+  it("should return false when the SDK gave up on a non-network error", () => {
+    const error = new RetryError({
+      message: "Failed after 1 attempts with non-retryable error",
+      reason: "errorNotRetryable",
+      errors: [new Error("Invalid API key")],
+    });
+
+    expect(isTransientNetworkError(error)).toBe(false);
   });
 
   it("should return true for nested network error (AI SDK format with Error instances)", () => {

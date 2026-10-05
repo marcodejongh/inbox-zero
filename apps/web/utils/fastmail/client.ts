@@ -2,6 +2,8 @@ import { recordProviderRequest } from "@/utils/request-timing";
 import PQueue from "p-queue";
 import { createScopedLogger } from "@/utils/logger";
 import { SafeError } from "@/utils/error";
+import { getRetryAfterDelayMs } from "@/utils/retry/provider-retry";
+import { sleep } from "@/utils/sleep";
 
 const logger = createScopedLogger("fastmail/client");
 
@@ -10,6 +12,10 @@ const MAX_RETRIES = 3;
 
 /** Base delay in ms for exponential backoff */
 const BASE_RETRY_DELAY = 1000;
+
+const MAX_RETRY_DELAY = 30_000;
+
+const MAX_RETRY_JITTER = 1000;
 
 // Clients are created per request, so the limit is shared per account.
 const requestQueues = new Map<string, PQueue>();
@@ -46,47 +52,31 @@ async function fetchWithRetry(
 
       lastResponse = response;
 
-      // Check for Retry-After header (can be seconds or HTTP-date per RFC 7231)
-      const retryAfter = response.headers.get("Retry-After");
-      let delay = BASE_RETRY_DELAY * 2 ** attempt;
-      if (retryAfter) {
-        const parsedSeconds = Number.parseInt(retryAfter, 10);
-        if (!Number.isNaN(parsedSeconds)) {
-          delay = parsedSeconds * 1000;
-        } else {
-          // Try parsing as HTTP-date
-          const retryDate = Date.parse(retryAfter);
-          if (!Number.isNaN(retryDate)) {
-            delay = Math.max(0, retryDate - Date.now());
-          }
-        }
-      }
-
       if (attempt < retries) {
+        const delayMs = getRetryDelayMs(
+          attempt,
+          response.headers.get("Retry-After"),
+        );
         logger.warn("Transient error, retrying", {
           status: response.status,
           attempt: attempt + 1,
           maxRetries: retries,
-          delayMs: delay,
+          delayMs,
         });
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(delay, 30_000)),
-        );
+        await sleep(delayMs);
       }
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
 
       if (attempt < retries) {
-        const delay = BASE_RETRY_DELAY * 2 ** attempt;
+        const delayMs = getRetryDelayMs(attempt);
         logger.warn("Network error, retrying", {
           error: lastError.message,
           attempt: attempt + 1,
           maxRetries: retries,
-          delayMs: delay,
+          delayMs,
         });
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(delay, 30_000)),
-        );
+        await sleep(delayMs);
       }
     }
   }
@@ -422,4 +412,14 @@ function getRequestQueue(session: JMAPSession, accountId: string) {
     requestQueues.set(accountId, queue);
   }
   return queue;
+}
+
+// Requests that are rate limited together would otherwise all retry at the
+// same instant and be rate limited again.
+function getRetryDelayMs(attempt: number, retryAfterHeader?: string | null) {
+  const delayMs =
+    getRetryAfterDelayMs(retryAfterHeader ?? undefined) ||
+    BASE_RETRY_DELAY * 2 ** attempt;
+  const jitterMs = Math.floor(Math.random() * (MAX_RETRY_JITTER + 1));
+  return Math.min(delayMs, MAX_RETRY_DELAY) + jitterMs;
 }

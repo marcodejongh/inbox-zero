@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import { aiCategorizeSendersSchema } from "@/utils/categorize/senders/batch-validation";
+import {
+  type AiCategorizeSenders,
+  aiCategorizeSendersSchema,
+} from "@/utils/categorize/senders/batch-validation";
 import {
   categorizeWithAi,
   getCategories,
@@ -12,12 +15,16 @@ import { saveCategorizationProgress } from "@/utils/redis/categorization-progres
 import { SafeError } from "@/utils/error";
 import type { RequestWithLogger } from "@/utils/middleware";
 import { createEmailProvider } from "@/utils/email/provider";
+import { QSTASH_RETRIED_HEADER } from "@/utils/upstash";
+import { CATEGORIZE_SENDERS_BATCH_RETRIES } from "@/utils/upstash/categorize-senders";
 
 export async function handleBatchRequest(
   request: RequestWithLogger,
 ): Promise<NextResponse> {
+  let body: AiCategorizeSenders | undefined;
   try {
-    await handleBatchInternal(request);
+    body = aiCategorizeSendersSchema.parse(await request.json());
+    await handleBatchInternal(request, body);
     return NextResponse.json({ ok: true });
   } catch (error) {
     if (error instanceof SafeError) {
@@ -25,6 +32,17 @@ export async function handleBatchRequest(
     } else {
       request.logger.error("Handle batch request error", { error });
     }
+
+    // Nothing redelivers this batch after the last attempt, so its senders
+    // have to be counted or the run never reports as finished.
+    const attempt = Number(request.headers.get(QSTASH_RETRIED_HEADER) ?? 0);
+    if (body && attempt >= CATEGORIZE_SENDERS_BATCH_RETRIES) {
+      await saveCategorizationProgress({
+        emailAccountId: body.emailAccountId,
+        incrementFailed: body.senders.length,
+      });
+    }
+
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
@@ -32,9 +50,10 @@ export async function handleBatchRequest(
   }
 }
 
-async function handleBatchInternal(request: RequestWithLogger) {
-  const json = await request.json();
-  const body = aiCategorizeSendersSchema.parse(json);
+async function handleBatchInternal(
+  request: RequestWithLogger,
+  body: AiCategorizeSenders,
+) {
   const { emailAccountId, senders } = body;
 
   request.logger.info("Handle batch request", { senders: senders.length });

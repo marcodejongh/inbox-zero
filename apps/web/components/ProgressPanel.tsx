@@ -11,16 +11,21 @@ export function ProgressPanel({
   inProgressText,
   completedText,
   itemLabel,
+  hasFailures = false,
 }: {
   totalItems: number;
   remainingItems: number;
   inProgressText: string;
   completedText: string;
   itemLabel: string;
+  hasFailures?: boolean;
 }) {
   const totalProcessed = totalItems - remainingItems;
   const progress = (totalProcessed / totalItems) * 100;
   const isCompleted = progress === 100;
+  const completedColor = hasFailures
+    ? { bar: "bg-amber-500", text: "text-amber-600" }
+    : { bar: "bg-green-500", text: "text-green-500" };
 
   if (!totalItems) return null;
 
@@ -35,13 +40,13 @@ export function ProgressPanel({
         >
           <Progress
             value={progress}
-            innerClassName={isCompleted ? "bg-green-500" : "bg-blue-500"}
+            innerClassName={isCompleted ? completedColor.bar : "bg-blue-500"}
           />
           <div className="mt-2 flex justify-between text-sm" aria-live="polite">
             <span
               className={cn(
                 "text-muted-foreground",
-                isCompleted ? "text-green-500" : "",
+                isCompleted ? completedColor.text : "",
               )}
             >
               {isCompleted ? (

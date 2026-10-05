@@ -4,6 +4,7 @@ import {
   GroupItemType,
   SystemType,
 } from "@/generated/prisma/enums";
+import { Prisma } from "@/generated/prisma/client";
 import { createTestLogger } from "@/__tests__/helpers";
 import { createRuleTool } from "./tools/rules/create-rule-tool";
 import { updateRuleTool } from "./tools/rules/update-rule-tool";
@@ -211,6 +212,38 @@ describe("createRuleTool overlap guard", () => {
       }),
     );
     expect(mockCreateRule).toHaveBeenCalledOnce();
+  });
+
+  it("reports an existing rule name instead of the raw database error", async () => {
+    mockCreateRule.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError(
+        "Invalid `prisma.rule.create()` invocation: Unique constraint failed",
+        {
+          code: "P2002",
+          clientVersion: "7.8.0",
+          meta: { modelName: "Rule", target: ["name", "emailAccountId"] },
+        },
+      ),
+    );
+
+    const result = await createRuleTool({
+      email: "user@example.com",
+      emailAccountId: "email-account-id",
+      provider: "google",
+      logger,
+    }).execute({
+      name: "Newsletters & Marketing",
+      condition: {
+        aiInstructions: "Newsletters and marketing emails",
+        static: null,
+        conditionalOperator: null,
+      },
+      actions: defaultActions,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Newsletters & Marketing");
+    expect(JSON.stringify(result)).not.toContain("prisma");
   });
 });
 

@@ -313,9 +313,12 @@ describe("createGenerateObject repairText", () => {
     });
   });
 
-  it("adds stricter JSON-only instructions for Ollama object generation", async () => {
+  it.each([
+    "ollama",
+    "openai-compatible",
+  ])("adds stricter JSON-only instructions for %s object generation", async (provider) => {
     const generateObject = await createTestGenerateObject({
-      provider: "ollama",
+      provider,
       modelName: "gemma4:e2b",
     });
 

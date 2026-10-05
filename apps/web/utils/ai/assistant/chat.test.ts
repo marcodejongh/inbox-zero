@@ -5,6 +5,8 @@ import {
   buildResolvedSystemPrompt,
   loadFreshRuleContext,
 } from "@/utils/ai/assistant/chat";
+import { fastmailChatProviderConfig } from "@/utils/ai/assistant/chat-provider-fastmail";
+import { googleChatProviderConfig } from "@/utils/ai/assistant/chat-provider-google";
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/utils/prisma");
@@ -15,6 +17,15 @@ describe("buildResolvedSystemPrompt", () => {
 
     expect(prompt).toContain("category");
     expect(prompt).not.toMatch(/\blabels?\b/i);
+  });
+
+  it("gives Fastmail accounts Fastmail search guidance instead of Gmail's", () => {
+    const prompt = buildPrompt({ provider: "fastmail" });
+
+    expect(prompt).toContain(fastmailChatProviderConfig.searchSyntaxPolicy);
+    expect(prompt).toContain(fastmailChatProviderConfig.inboxTriagePolicy);
+    expect(prompt).not.toContain(googleChatProviderConfig.searchSyntaxPolicy);
+    expect(prompt).not.toContain(googleChatProviderConfig.inboxTriagePolicy);
   });
 
   it("adds a connect-calendar tip only when disconnection is confirmed", () => {

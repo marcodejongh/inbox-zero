@@ -60,10 +60,7 @@ import {
 } from "@/utils/llms/model-usage-guard";
 import { Provider } from "@/utils/llms/config";
 import { createClaudeCodeLanguageModelWithBridgedTools } from "@/utils/llms/cli-provider";
-import {
-  appendOllamaOnlySystemGuidance,
-  OLLAMA_STRUCTURED_OUTPUT_GUIDANCE,
-} from "@/utils/llms/ollama-guidance";
+import { appendStructuredOutputGuidance } from "@/utils/llms/ollama-guidance";
 import { createScopedLogger } from "@/utils/logger";
 import { getPosthogLlmClient, isPosthogLlmEvalApproved } from "@/utils/posthog";
 import {
@@ -483,7 +480,7 @@ export function createGenerateObject({
             : undefined,
         promptHardening,
       });
-      const protectedOptions = appendOllamaOnlySystemGuidance(
+      const protectedOptions = appendStructuredOutputGuidance(
         enforceSensitiveDataPolicy({
           options: { ...options, instructions: systemText },
           policy: emailAccount.sensitiveDataPolicy,
@@ -493,7 +490,6 @@ export function createGenerateObject({
           emailAccountId: emailAccount.id,
         }),
         candidate,
-        OLLAMA_STRUCTURED_OUTPUT_GUIDANCE,
       );
 
       logger.trace("Generating object", {

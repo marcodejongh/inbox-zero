@@ -23,6 +23,26 @@ export function appendOllamaOnlySystemGuidance<
   };
 }
 
+// Local OpenAI-compatible servers drift out of JSON mode the same way Ollama
+// does when the prompt never asks for JSON.
+export function appendStructuredOutputGuidance<
+  OPTIONS extends { instructions?: unknown },
+>(options: OPTIONS, modelOptions: ProviderLike): OPTIONS {
+  if (
+    modelOptions.provider !== Provider.OLLAMA &&
+    modelOptions.provider !== Provider.OPENAI_COMPATIBLE
+  )
+    return options;
+
+  return {
+    ...options,
+    instructions: appendSystemGuidance(
+      options.instructions,
+      STRUCTURED_OUTPUT_GUIDANCE,
+    ),
+  };
+}
+
 function appendSystemGuidance(
   system: unknown,
   guidance: readonly string[],
@@ -33,7 +53,7 @@ function appendSystemGuidance(
   return currentSystem ? `${currentSystem}\n\n${extraGuidance}` : extraGuidance;
 }
 
-export const OLLAMA_STRUCTURED_OUTPUT_GUIDANCE = [
+const STRUCTURED_OUTPUT_GUIDANCE = [
   "Return only valid JSON that matches the requested schema.",
   "The top-level JSON value must match the schema root exactly; do not return a nested item by itself.",
   "Do not include markdown, bullets, code fences, explanations, or any text outside the JSON.",

@@ -80,7 +80,7 @@ describe("categorization progress", () => {
     expect(redis.eval).toHaveBeenCalledWith(
       expect.stringContaining("cjson.decode"),
       ["categorization-progress:account-1"],
-      ["2", "2026-04-16T12:00:00.000Z", "900"],
+      ["2", "2026-04-16T12:00:00.000Z", "900", "0"],
     );
   });
 
@@ -197,5 +197,61 @@ describe("categorization progress", () => {
       remainingItems: 0,
       message: "Sender categorization has not started.",
     });
+  });
+
+  it("records failed senders alongside completed ones", async () => {
+    vi.mocked(redis.eval).mockResolvedValueOnce(
+      JSON.stringify({
+        totalItems: 4,
+        completedItems: 2,
+        failedItems: 2,
+        status: "completed",
+        startedAt: "2026-04-16T11:55:00.000Z",
+        updatedAt: "2026-04-16T12:00:00.000Z",
+      }),
+    );
+
+    const progress = await saveCategorizationProgress({
+      emailAccountId: "account-1",
+      incrementFailed: 2,
+    });
+
+    expect(progress).toMatchObject({ failedItems: 2, status: "completed" });
+    expect(redis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      ["categorization-progress:account-1"],
+      ["0", "2026-04-16T12:00:00.000Z", "900", "2"],
+    );
+  });
+
+  it("reports a run as finished once every sender is categorized or failed", () => {
+    const snapshot = getCategorizationStatusSnapshot({
+      totalItems: 10,
+      completedItems: 7,
+      failedItems: 3,
+      status: "completed",
+      startedAt: "2026-04-16T11:55:00.000Z",
+      updatedAt: "2026-04-16T12:00:00.000Z",
+    });
+
+    expect(snapshot).toMatchObject({
+      status: "completed",
+      completedItems: 7,
+      failedItems: 3,
+      remainingItems: 0,
+    });
+  });
+
+  it("keeps a run with failures running while senders are still pending", () => {
+    const snapshot = getCategorizationStatusSnapshot({
+      totalItems: 10,
+      completedItems: 4,
+      failedItems: 3,
+      status: "running",
+      startedAt: "2026-04-16T11:55:00.000Z",
+      updatedAt: "2026-04-16T12:00:00.000Z",
+    });
+
+    expect(snapshot).toMatchObject({ status: "running", remainingItems: 3 });
   });
 });
