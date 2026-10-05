@@ -54,7 +54,13 @@ export async function withRetry<T>(
  * The AI SDK incorrectly marks these as non-retryable when they occur during
  * response body parsing (after HTTP 200).
  */
-export function isTransientNetworkError(error: unknown): boolean {
+export function isTransientNetworkError(wrappedError: unknown): boolean {
+  // The SDK reports a non-retryable final attempt as a RetryError, which
+  // carries the real failure in lastError and has no cause chain.
+  const error = RetryError.isInstance(wrappedError)
+    ? wrappedError.lastError
+    : wrappedError;
+
   // JSON.stringify doesn't capture Error's non-enumerable properties (message, name),
   // so we need to extract text from Error objects explicitly
   let errorText: string;
@@ -86,6 +92,8 @@ export function isTransientNetworkError(error: unknown): boolean {
     "fetch failed",
     "terminated",
     "Unexpected end of JSON input",
+    // The provider answered 200 with a body that is not a completion.
+    "Invalid JSON response",
   ];
 
   return (

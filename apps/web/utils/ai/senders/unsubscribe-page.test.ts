@@ -44,6 +44,20 @@ describe("aiCheckUnsubscribePageState", () => {
     );
   });
 
+  it("sends its classification instructions to the model", async () => {
+    mockGenerateObject.mockResolvedValue({ object: { state: "confirmed" } });
+
+    await aiCheckUnsubscribePageState({
+      pageText: "You have been removed from this list.",
+      emailAccount: getEmailAccount(),
+    });
+
+    // The LLM wrapper only forwards `instructions`; a `system` key is dropped.
+    const call = mockGenerateObject.mock.calls[0]?.[0];
+    expect(call.instructions).toEqual(expect.stringContaining("unsubscribe"));
+    expect(call).not.toHaveProperty("system");
+  });
+
   it("returns the model's answer for a page still awaiting a confirmation", async () => {
     mockGenerateObject.mockResolvedValue({
       object: { state: "not_confirmed" },
