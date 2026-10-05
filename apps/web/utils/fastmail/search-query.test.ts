@@ -57,6 +57,113 @@ describe("Fastmail search query translation", () => {
     });
   });
 
+  it("matches either side of an OR", () => {
+    expect(
+      parseFastmailSearchQuery(
+        "from:a@example.com OR from:b@example.com",
+        mailboxes,
+        now,
+      ).filter,
+    ).toEqual({
+      operator: "AND",
+      conditions: [
+        {
+          operator: "OR",
+          conditions: [{ from: "a@example.com" }, { from: "b@example.com" }],
+        },
+      ],
+    });
+  });
+
+  it("binds OR tighter than the surrounding terms", () => {
+    expect(
+      parseFastmailSearchQuery(
+        "is:unread subject:invoice OR subject:receipt OR -in:inbox has:attachment",
+        mailboxes,
+        now,
+      ).filter,
+    ).toEqual({
+      operator: "AND",
+      conditions: [
+        { notKeyword: "$seen" },
+        {
+          operator: "OR",
+          conditions: [
+            { subject: "invoice" },
+            { subject: "receipt" },
+            { operator: "NOT", conditions: [{ inMailbox: "inbox-id" }] },
+          ],
+        },
+        { hasAttachment: true },
+      ],
+    });
+  });
+
+  it("groups alternatives in parentheses", () => {
+    expect(
+      parseFastmailSearchQuery(
+        "(from:a@example.com is:unread) OR (subject:invoice) in:inbox",
+        mailboxes,
+        now,
+      ).filter,
+    ).toEqual({
+      operator: "AND",
+      conditions: [
+        {
+          operator: "OR",
+          conditions: [
+            {
+              operator: "AND",
+              conditions: [{ from: "a@example.com" }, { notKeyword: "$seen" }],
+            },
+            { subject: "invoice" },
+          ],
+        },
+        { inMailbox: "inbox-id" },
+      ],
+    });
+  });
+
+  it("negates a whole group without searching the trash it excludes", () => {
+    expect(
+      parseFastmailSearchQuery(
+        "is:unread -(from:a@example.com OR in:trash)",
+        mailboxes,
+        now,
+      ),
+    ).toEqual({
+      filter: {
+        operator: "AND",
+        conditions: [
+          { notKeyword: "$seen" },
+          {
+            operator: "NOT",
+            conditions: [
+              {
+                operator: "OR",
+                conditions: [
+                  { from: "a@example.com" },
+                  { inMailbox: "trash-id" },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      includeSpamTrash: false,
+    });
+  });
+
+  it.each([
+    "(in:anywhere) from:a@example.com",
+    "from:a@example.com AND in:anywhere",
+  ])("keeps the remaining terms when the scope is widened (%s)", (query) => {
+    expect(parseFastmailSearchQuery(query, mailboxes, now)).toEqual({
+      filter: { operator: "AND", conditions: [{ from: "a@example.com" }] },
+      includeSpamTrash: true,
+    });
+  });
+
   it("supports absolute date boundaries and text", () => {
     expect(
       parseFastmailSearchQuery(
@@ -90,7 +197,15 @@ describe("Fastmail search query translation", () => {
     "after:2026/02/31",
     'label:"Missing"',
     'subject:"unclosed',
-    "one OR two",
+    "one OR",
+    "OR two",
+    "one OR OR two",
+    "in:anywhere OR from:a@example.com",
+    "(one OR two",
+    "one OR two)",
+    "()",
+    "from:(a@example.com OR b@example.com)",
+    "{one two}",
   ])("rejects unsupported or malformed queries instead of silently changing their meaning (%s)", (query) => {
     expect(() => parseFastmailSearchQuery(query, mailboxes, now)).toThrow();
   });

@@ -1,3 +1,4 @@
+import { recordProviderRequest } from "@/utils/request-timing";
 import PQueue from "p-queue";
 import { createScopedLogger } from "@/utils/logger";
 import { SafeError } from "@/utils/error";
@@ -346,10 +347,21 @@ export async function createFastmailClient(
     session,
     accessToken,
     accountId,
-    request: (methodCalls: JMAPMethodCall[]) =>
-      queue.add(() =>
-        makeJMAPRequest(session.apiUrl, accessToken, methodCalls),
-      ),
+    request: async (methodCalls: JMAPMethodCall[]) => {
+      const queuedAt = Date.now();
+      let startedAt = queuedAt;
+      try {
+        return await queue.add(() => {
+          startedAt = Date.now();
+          return makeJMAPRequest(session.apiUrl, accessToken, methodCalls);
+        });
+      } finally {
+        recordProviderRequest({
+          queueWaitMs: startedAt - queuedAt,
+          durationMs: Date.now() - startedAt,
+        });
+      }
+    },
     getAccessToken: () => accessToken,
   };
 }
