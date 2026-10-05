@@ -395,7 +395,11 @@ export async function createRule({
 
     return rule;
   } catch (error) {
-    logger.error("Error creating rule", { error });
+    if (isDuplicateError(error, "name")) {
+      logger.warn("Rule name already exists");
+    } else {
+      logger.error("Error creating rule", { error });
+    }
     throw error;
   }
 }

@@ -137,6 +137,7 @@ export async function publishToQstashQueue<T>({
   headers,
   deduplicationId,
   retries,
+  onUndelivered,
 }: {
   queueName: string;
   parallelism: number;
@@ -145,6 +146,8 @@ export async function publishToQstashQueue<T>({
   headers?: HeadersInit;
   deduplicationId?: string;
   retries?: number;
+  /** Fallback only: runs when no attempt reached the destination. */
+  onUndelivered?: () => Promise<void>;
 }) {
   const client = getQstashClient();
   if (client) {
@@ -177,6 +180,7 @@ export async function publishToQstashQueue<T>({
     body,
     headers,
     retries,
+    onUndelivered,
   });
 }
 
@@ -226,6 +230,7 @@ function publishToFallbackQueue<T>({
   body,
   headers,
   retries = 0,
+  onUndelivered,
 }: {
   queueName: string;
   parallelism: number;
@@ -233,6 +238,7 @@ function publishToFallbackQueue<T>({
   body: T;
   headers?: HeadersInit;
   retries?: number;
+  onUndelivered?: () => Promise<void>;
 }) {
   logger.warn("Qstash client not found");
 
@@ -243,6 +249,7 @@ function publishToFallbackQueue<T>({
 
   after(async () => {
     await queue.add(async () => {
+      let reachedDestination = false;
       for (let attempt = 0; attempt <= retries; attempt++) {
         // The slot stays held while waiting, so a struggling backend gets
         // less traffic, not the same burst again.
@@ -257,6 +264,7 @@ function publishToFallbackQueue<T>({
             body: JSON.stringify(body),
           });
           if (response.ok) return;
+          reachedDestination = true;
           logger.warn("Fallback queue delivery failed", {
             url,
             queueName,
@@ -266,13 +274,24 @@ function publishToFallbackQueue<T>({
           });
         } catch (error) {
           logger.error("Fallback QStash fetch failed", { url, error });
+          // The destination is still working on it; posting it again would
+          // run the job twice.
+          if (isResponseTimeout(error)) return;
+          reachedDestination = false;
         }
       }
+
+      if (!reachedDestination) await onUndelivered?.();
     });
 
     if (queue.size === 0 && queue.pending === 0)
       fallbackQueues.delete(queueName);
   });
+}
+
+function isResponseTimeout(error: unknown) {
+  const code = (error as { cause?: { code?: string } } | null)?.cause?.code;
+  return code === "UND_ERR_HEADERS_TIMEOUT" || code === "UND_ERR_BODY_TIMEOUT";
 }
 
 function createFallbackHeaders(

@@ -2,6 +2,7 @@ import chunk from "lodash/chunk";
 import { deleteQueue, listQueues, publishToQstashQueue } from "@/utils/upstash";
 import type { AiCategorizeSenders } from "@/utils/categorize/senders/batch-validation";
 import { createScopedLogger } from "@/utils/logger";
+import { saveCategorizationProgress } from "@/utils/redis/categorization-progress";
 
 const logger = createScopedLogger("upstash");
 
@@ -45,6 +46,14 @@ export async function publishToAiCategorizeSendersQueue(
         parallelism: 3, // Allow up to 3 concurrent jobs from this queue
         path: "/api/user/categorize/senders/batch",
         retries: CATEGORIZE_SENDERS_BATCH_RETRIES,
+        // The batch handler counts its own failures; this covers a batch
+        // that never got to it.
+        onUndelivered: async () => {
+          await saveCategorizationProgress({
+            emailAccountId: body.emailAccountId,
+            incrementFailed: senderChunk.length,
+          });
+        },
         body: {
           emailAccountId: body.emailAccountId,
           senders: senderChunk,

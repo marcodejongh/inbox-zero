@@ -18,7 +18,7 @@ local failed = (tonumber(progress.failedItems) or 0) + tonumber(ARGV[4])
 if failed > totalItems - newCompleted then failed = totalItems - newCompleted end
 
 progress.completedItems = newCompleted
-if failed > 0 then progress.failedItems = failed end
+progress.failedItems = failed
 if newCompleted + failed >= totalItems then
   progress.status = "completed"
 else
@@ -219,10 +219,7 @@ function normalizeCategorizationProgress(
   return {
     totalItems: progress.totalItems,
     completedItems,
-    status:
-      completedItems + (progress.failedItems ?? 0) >= progress.totalItems
-        ? "completed"
-        : "running",
+    status: completedItems >= progress.totalItems ? "completed" : "running",
     startedAt: timestamp,
     updatedAt: timestamp,
   };

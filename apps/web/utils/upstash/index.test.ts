@@ -463,4 +463,78 @@ describe("publishToQstashQueue", () => {
     // Two attempts for the retried job, then the queue moves on to the next.
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
   });
+
+  it("does not redeliver a job the destination is still working on", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(
+      new TypeError("fetch failed", {
+        cause: { code: "UND_ERR_HEADERS_TIMEOUT" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onUndelivered = vi.fn();
+    const upstash = await loadUpstashModule({ qstashToken: undefined });
+
+    await upstash.publishToQstashQueue({
+      queueName: "slow",
+      parallelism: 1,
+      path: "/api/task",
+      body: { id: "a" },
+      retries: 2,
+      onUndelivered,
+    });
+    await upstash.publishToQstashQueue({
+      queueName: "slow",
+      parallelism: 1,
+      path: "/api/task",
+      body: { id: "b" },
+    });
+
+    // One attempt each: the timed-out job is not posted a second time.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(onUndelivered).not.toHaveBeenCalled();
+  });
+
+  it("reports a job that never reached the destination", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(
+        new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const onUndelivered = vi.fn().mockResolvedValue(undefined);
+    const upstash = await loadUpstashModule({ qstashToken: undefined });
+
+    await upstash.publishToQstashQueue({
+      queueName: "unreachable",
+      parallelism: 1,
+      path: "/api/task",
+      body: { id: "a" },
+      retries: 1,
+      onUndelivered,
+    });
+
+    await vi.waitFor(() => expect(onUndelivered).toHaveBeenCalledOnce());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves failure reporting to a destination that answered", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async () => new Response(null, { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const onUndelivered = vi.fn();
+    const upstash = await loadUpstashModule({ qstashToken: undefined });
+
+    await upstash.publishToQstashQueue({
+      queueName: "answered",
+      parallelism: 1,
+      path: "/api/task",
+      body: { id: "a" },
+      retries: 1,
+      onUndelivered,
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(onUndelivered).not.toHaveBeenCalled();
+  });
 });

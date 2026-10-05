@@ -61,15 +61,20 @@ export function CategorizeSendersProgress({
   const retryFailed = async () => {
     setIsRetrying(true);
     setIsBulkCategorizing(true);
-    const result = await bulkCategorizeSendersAction(emailAccountId);
-    setIsRetrying(false);
-    if (result?.serverError) {
+    try {
+      const result = await bulkCategorizeSendersAction(emailAccountId);
+      if (result?.serverError) throw new Error(result.serverError);
+      if (!result?.data?.totalUncategorizedSenders)
+        setIsBulkCategorizing(false);
+      mutate();
+    } catch (error) {
       setIsBulkCategorizing(false);
-      toastError({ description: result.serverError });
-      return;
+      toastError({
+        description: error instanceof Error ? error.message : "Failed to retry",
+      });
+    } finally {
+      setIsRetrying(false);
     }
-    if (!result?.data?.totalUncategorizedSenders) setIsBulkCategorizing(false);
-    mutate();
   };
 
   return (

@@ -101,8 +101,6 @@ export const createRuleTool = ({
         };
       } catch (error) {
         if (isDuplicateError(error, "name")) {
-          logger.warn("Rule name already exists");
-
           return {
             success: false,
             error: `No rule was created. A rule named "${name}" already exists. Update that rule or use a different name.`,
