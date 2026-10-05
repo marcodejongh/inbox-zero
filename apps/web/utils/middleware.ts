@@ -27,7 +27,11 @@ import { isAdmin } from "@/utils/admin";
 import prisma from "@/utils/prisma";
 import { createEmailProvider } from "@/utils/email/provider";
 import type { EmailProvider } from "@/utils/email/types";
-import { startRequestTimer } from "@/utils/request-timing";
+import {
+  measureRequestStage,
+  runWithRequestTimer,
+  startRequestTimer,
+} from "@/utils/request-timing";
 import {
   type AuditActorType,
   runWithAuditContext,
@@ -109,183 +113,187 @@ function withMiddleware<T extends NextRequest>(
         requestId,
         source: scope || new URL(req.url).pathname,
       },
-      async () => {
-        try {
-          // Apply middleware if provided
-          let enhancedReq = reqWithLogger;
-          if (middleware) {
-            const middlewareResult = await middleware(reqWithLogger, options);
+      () =>
+        runWithRequestTimer(requestTimer, async () => {
+          try {
+            // Apply middleware if provided
+            let enhancedReq = reqWithLogger;
+            if (middleware) {
+              const middlewareResult = await middleware(reqWithLogger, options);
 
-            // If middleware returned a Response, return it directly
-            if (middlewareResult instanceof Response) {
-              flushLogger(reqWithLogger);
-              return middlewareResult;
-            }
-
-            // Otherwise, continue with the enhanced request
-            enhancedReq = middlewareResult;
-          }
-          requestForError = enhancedReq;
-
-          // Execute the handler with the (potentially) enhanced request
-          const response = await handler(enhancedReq as T, context);
-
-          flushLogger(enhancedReq);
-
-          return response;
-        } catch (error) {
-          flushLogger(requestForError);
-
-          // redirects work by throwing an error. allow these
-          if (error instanceof Error && error.message === "NEXT_REDIRECT") {
-            throw error;
-          }
-
-          const requestPath = getRequestPath(requestForError);
-          const publicApiRequest = isPublicApiPath(
-            new URL(requestForError.url).pathname,
-          );
-
-          if (error instanceof SafeError) {
-            if (error.message === "No refresh token") {
-              if (publicApiRequest) {
-                return publicApiErrorResponse({
-                  status: 401,
-                  code: "UNAUTHORIZED",
-                  message: "Authorization required. Please grant permissions.",
-                });
+              // If middleware returned a Response, return it directly
+              if (middlewareResult instanceof Response) {
+                flushLogger(reqWithLogger);
+                return middlewareResult;
               }
 
-              return NextResponse.json(
-                {
-                  error: "Authorization required. Please grant permissions.",
-                  errorCode: NO_REFRESH_TOKEN_ERROR_CODE,
-                  isKnownError: true,
-                },
-                { status: 401 },
-              );
+              // Otherwise, continue with the enhanced request
+              enhancedReq = middlewareResult;
+            }
+            requestForError = enhancedReq;
+
+            // Execute the handler with the (potentially) enhanced request
+            const response = await handler(enhancedReq as T, context);
+
+            flushLogger(enhancedReq);
+
+            return response;
+          } catch (error) {
+            flushLogger(requestForError);
+
+            // redirects work by throwing an error. allow these
+            if (error instanceof Error && error.message === "NEXT_REDIRECT") {
+              throw error;
             }
 
-            if (error.message.includes("Microsoft authorization has expired")) {
-              if (publicApiRequest) {
-                return publicApiErrorResponse({
-                  status: 401,
-                  code: "UNAUTHORIZED",
-                  message:
-                    error.safeMessage ||
-                    "Microsoft authorization has expired. Please reconnect.",
-                });
-              }
-
-              return NextResponse.json(
-                {
-                  error: error.safeMessage,
-                  errorCode: MICROSOFT_AUTH_EXPIRED_ERROR_CODE,
-                  isKnownError: true,
-                },
-                { status: 401 },
-              );
-            }
-          }
-
-          const reqLogger = getLogger(requestForError);
-
-          if (error instanceof ZodError) {
-            if (!env.DISABLE_LOG_ZOD_ERRORS) {
-              reqLogger.error("Zod validation error", { error });
-            }
-            if (publicApiRequest) {
-              return publicApiErrorFromUnknown(error);
-            }
-            return NextResponse.json(
-              { error: { issues: error.issues }, isKnownError: true },
-              { status: 400 },
+            const requestPath = getRequestPath(requestForError);
+            const publicApiRequest = isPublicApiPath(
+              new URL(requestForError.url).pathname,
             );
-          }
 
-          const apiError = checkCommonErrors(error, requestPath, reqLogger);
-          if (apiError) {
-            await recordRateLimitFromApiError({
-              apiErrorType: apiError.type,
-              error,
-              emailAccountId: getEmailAccountId(requestForError),
-              logger: reqLogger,
-              source: scope || new URL(requestForError.url).pathname,
+            if (error instanceof SafeError) {
+              if (error.message === "No refresh token") {
+                if (publicApiRequest) {
+                  return publicApiErrorResponse({
+                    status: 401,
+                    code: "UNAUTHORIZED",
+                    message:
+                      "Authorization required. Please grant permissions.",
+                  });
+                }
+
+                return NextResponse.json(
+                  {
+                    error: "Authorization required. Please grant permissions.",
+                    errorCode: NO_REFRESH_TOKEN_ERROR_CODE,
+                    isKnownError: true,
+                  },
+                  { status: 401 },
+                );
+              }
+
+              if (
+                error.message.includes("Microsoft authorization has expired")
+              ) {
+                if (publicApiRequest) {
+                  return publicApiErrorResponse({
+                    status: 401,
+                    code: "UNAUTHORIZED",
+                    message:
+                      error.safeMessage ||
+                      "Microsoft authorization has expired. Please reconnect.",
+                  });
+                }
+
+                return NextResponse.json(
+                  {
+                    error: error.safeMessage,
+                    errorCode: MICROSOFT_AUTH_EXPIRED_ERROR_CODE,
+                    isKnownError: true,
+                  },
+                  { status: 401 },
+                );
+              }
+            }
+
+            const reqLogger = getLogger(requestForError);
+
+            if (error instanceof ZodError) {
+              if (!env.DISABLE_LOG_ZOD_ERRORS) {
+                reqLogger.error("Zod validation error", { error });
+              }
+              if (publicApiRequest) {
+                return publicApiErrorFromUnknown(error);
+              }
+              return NextResponse.json(
+                { error: { issues: error.issues }, isKnownError: true },
+                { status: 400 },
+              );
+            }
+
+            const apiError = checkCommonErrors(error, requestPath, reqLogger);
+            if (apiError) {
+              await recordRateLimitFromApiError({
+                apiErrorType: apiError.type,
+                error,
+                emailAccountId: getEmailAccountId(requestForError),
+                logger: reqLogger,
+                source: scope || new URL(requestForError.url).pathname,
+              });
+
+              await logErrorToPosthog(
+                "api",
+                requestPath,
+                apiError.type,
+                "unknown",
+                reqLogger,
+              ); // TODO: add emailAccountId
+
+              if (publicApiRequest) {
+                return publicApiErrorResponse({
+                  status: apiError.code,
+                  message: apiError.message || "Request failed",
+                });
+              }
+
+              return NextResponse.json(
+                { error: apiError.message, isKnownError: true },
+                { status: apiError.code },
+              );
+            }
+
+            if (isErrorWithConfigAndHeaders(error)) {
+              error.config.headers = undefined;
+            }
+
+            if (error instanceof SafeError) {
+              if (publicApiRequest) {
+                return publicApiErrorFromUnknown(error);
+              }
+
+              return NextResponse.json(
+                { error: error.safeMessage, isKnownError: true },
+                { status: getSafeErrorStatusCode(error.statusCode) },
+              );
+            }
+
+            // Quick fix: log full error in development. TODO: handle properly
+            if (env.NODE_ENV === "development") {
+              // biome-ignore lint/suspicious/noConsole: helpful for debugging
+              console.error(error);
+            }
+
+            reqLogger.error("Unhandled error", {
+              error: error instanceof Error ? error.message : error,
+              cause:
+                error instanceof Error && error.cause
+                  ? error.cause instanceof Error
+                    ? error.cause.message
+                    : error.cause
+                  : undefined,
+              stack: error instanceof Error ? error.stack : undefined,
             });
-
-            await logErrorToPosthog(
-              "api",
-              requestPath,
-              apiError.type,
-              "unknown",
-              reqLogger,
-            ); // TODO: add emailAccountId
+            captureException(error, {
+              extra: { url: requestPath },
+            });
 
             if (publicApiRequest) {
               return publicApiErrorResponse({
-                status: apiError.code,
-                message: apiError.message || "Request failed",
+                status: 500,
+                code: "INTERNAL_ERROR",
+                message: "An unexpected error occurred",
               });
             }
 
             return NextResponse.json(
-              { error: apiError.message, isKnownError: true },
-              { status: apiError.code },
+              { error: "An unexpected error occurred" },
+              { status: 500 },
             );
+          } finally {
+            requestTimer?.logSlowCompletion();
+            requestTimer?.stop();
           }
-
-          if (isErrorWithConfigAndHeaders(error)) {
-            error.config.headers = undefined;
-          }
-
-          if (error instanceof SafeError) {
-            if (publicApiRequest) {
-              return publicApiErrorFromUnknown(error);
-            }
-
-            return NextResponse.json(
-              { error: error.safeMessage, isKnownError: true },
-              { status: getSafeErrorStatusCode(error.statusCode) },
-            );
-          }
-
-          // Quick fix: log full error in development. TODO: handle properly
-          if (env.NODE_ENV === "development") {
-            // biome-ignore lint/suspicious/noConsole: helpful for debugging
-            console.error(error);
-          }
-
-          reqLogger.error("Unhandled error", {
-            error: error instanceof Error ? error.message : error,
-            cause:
-              error instanceof Error && error.cause
-                ? error.cause instanceof Error
-                  ? error.cause.message
-                  : error.cause
-                : undefined,
-            stack: error instanceof Error ? error.stack : undefined,
-          });
-          captureException(error, {
-            extra: { url: requestPath },
-          });
-
-          if (publicApiRequest) {
-            return publicApiErrorResponse({
-              status: 500,
-              code: "INTERNAL_ERROR",
-              message: "An unexpected error occurred",
-            });
-          }
-
-          return NextResponse.json(
-            { error: "An unexpected error occurred" },
-            { status: 500 },
-          );
-        } finally {
-          requestTimer?.logSlowCompletion();
-          requestTimer?.stop();
-        }
-      },
+        }),
     );
   };
 }
@@ -773,7 +781,7 @@ async function runTimedMiddlewareStep<T>({
   }, SLOW_MIDDLEWARE_STEP_MS);
 
   try {
-    return await operation();
+    return await measureRequestStage(step, operation);
   } finally {
     clearTimeout(slowStepLogTimeout);
     const durationMs = Date.now() - startedAt;

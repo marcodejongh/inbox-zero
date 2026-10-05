@@ -1,3 +1,4 @@
+import { measureRequestStage } from "@/utils/request-timing";
 import type { EmailProvider } from "@/utils/email/types";
 import { isIgnoredSender } from "@/utils/filter-ignored-senders";
 import { isDefined } from "@/utils/types";
@@ -37,25 +38,31 @@ export async function loadThreads({
 }) {
   const maxResults = query.limit || 50;
   const pageToken = query.nextPageToken || undefined;
-  const { threads, nextPageToken } = await fetchThreadsPage({
-    emailAccountId,
-    query,
-    emailProvider,
-    maxResults,
-    pageToken,
-    messageFormat,
-  });
+  const { threads, nextPageToken } = await measureRequestStage(
+    "fetch-threads",
+    () =>
+      fetchThreadsPage({
+        emailAccountId,
+        query,
+        emailProvider,
+        maxResults,
+        pageToken,
+        messageFormat,
+      }),
+  );
 
   const threadIds = threads.map((thread) => thread.id);
-  const executedRules = await prisma.executedRule.findMany({
-    where: {
-      emailAccountId,
-      threadId: { in: threadIds },
-    },
-    select: executedRulePlanSelect,
-    // The aggregation below keeps the first execution of each rule per message.
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-  });
+  const executedRules = await measureRequestStage("load-executed-rules", () =>
+    prisma.executedRule.findMany({
+      where: {
+        emailAccountId,
+        threadId: { in: threadIds },
+      },
+      select: executedRulePlanSelect,
+      // The aggregation below keeps the first execution of each rule per message.
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    }),
+  );
 
   const executedRulesByThreadId = new Map<
     string,

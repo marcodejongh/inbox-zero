@@ -153,7 +153,7 @@ async function loadAssistantChatModule({
 
 async function captureToolSet(
   emailSend = true,
-  provider: "google" | "microsoft" = "google",
+  provider: "google" | "microsoft" | "fastmail" = "google",
   messages: ModelMessage[] = baseMessages,
 ) {
   const { aiProcessAssistantChat } = await loadAssistantChatModule({
@@ -407,6 +407,17 @@ describe("aiProcessAssistantChat", () => {
 
     expect(args.tools.getCalendarEvents).toBeUndefined();
     expect(systemPrompt).toContain("connect a calendar in settings");
+  });
+
+  it("gives Fastmail accounts Fastmail search guidance instead of Gmail's", async () => {
+    await captureToolSet(true, "fastmail");
+    const systemPrompt = String(
+      mockToolCallAgentStream.mock.calls[0][0].messages[0].content,
+    );
+
+    expect(systemPrompt).toContain("Use Fastmail search syntax");
+    expect(systemPrompt).not.toContain("Gmail search syntax");
+    expect(systemPrompt).not.toContain("category:promotions");
   });
 
   it("tells the model when the calendar connection lookup fails", async () => {

@@ -41,6 +41,25 @@ describe("Fastmail mail operations", () => {
     });
   });
 
+  it.each([
+    "searchMessages",
+    "getMessagesWithPagination",
+  ] as const)("%s searches for either alternative of an OR query", async (method) => {
+    const { provider, calls } = createProvider();
+    const result = await provider[method]({
+      query: "from:a@example.com OR from:b@example.com",
+      maxResults: 20,
+    });
+    expect(result.messages).toHaveLength(1);
+    const query = calls.find(([name]) => name === "Email/query");
+    expect(JSON.stringify(query?.[1].filter)).toContain(
+      JSON.stringify({
+        operator: "OR",
+        conditions: [{ from: "a@example.com" }, { from: "b@example.com" }],
+      }),
+    );
+  });
+
   it("fetches inbox messages without requesting a forbidden parsed unsubscribe header", async () => {
     const { provider, calls } = createProvider();
 
@@ -175,6 +194,75 @@ describe("Fastmail mail operations", () => {
     await expect(
       source.enumerate({ ...input, page: first.value.nextPage }),
     ).resolves.toMatchObject({ status: "paused" });
+  });
+
+  it("loads a page of threads without a request per thread", async () => {
+    const { provider, calls, request } = createProvider({
+      threads: {
+        first: ["first-reply", "first-original"],
+        second: ["second-only"],
+        third: ["third-only"],
+      },
+    });
+
+    const page = await provider.getThreadsWithQuery({
+      query: {
+        type: "inbox",
+        isUnread: true,
+        after: new Date("2026-09-01T00:00:00Z"),
+        before: new Date("2026-10-02T00:00:00Z"),
+      },
+      maxResults: 25,
+    });
+
+    expect(
+      page.threads.map((thread) => [
+        thread.id,
+        thread.messages.map((message) => message.id),
+      ]),
+    ).toEqual([
+      ["first", ["first-original", "first-reply"]],
+      ["second", ["second-only"]],
+      ["third", ["third-only"]],
+    ]);
+    expect(page.nextPageToken).toBe("anchor:third-only");
+    // Mailbox/get, the page query, Thread/get, and Email/get.
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(calls.filter(([name]) => name === "Thread/get")).toHaveLength(1);
+    const [query, pageEmails] = calls.filter(([name]) =>
+      ["Email/query", "Email/get"].includes(name),
+    );
+    expect(pageEmails[1].properties).toEqual(["threadId"]);
+    expect(query[1].filter).toMatchObject({
+      conditions: expect.arrayContaining([
+        { after: "2026-09-01T00:00:00.000Z" },
+        { before: "2026-10-02T00:00:00.000Z" },
+        { notKeyword: "$seen" },
+      ]),
+    });
+  });
+
+  it("searches threads without downloading the matching emails twice", async () => {
+    const { provider, calls } = createProvider({
+      threads: { first: ["first-reply", "first-original"], second: ["only"] },
+    });
+
+    const page = await provider.searchThreads({
+      query: "from:a@example.com OR from:b@example.com",
+      maxResults: 20,
+    });
+
+    expect(page.threads.map((thread) => thread.id)).toEqual([
+      "first",
+      "second",
+    ]);
+    expect(page.threads[0].messages).toHaveLength(2);
+    expect(calls.filter(([name]) => name === "Thread/get")).toHaveLength(1);
+    expect(
+      calls
+        .filter(([name]) => name === "Email/get")
+        .map(([, args]) => (args.properties as string[]).length === 1),
+    ).toEqual([true, false]);
   });
 
   it("continues thread paging after the anchor email left the result set", async () => {
@@ -438,8 +526,16 @@ function createProvider(
     draft?: boolean;
     emailAccountId?: string;
     forwardedAttachments?: boolean;
+    // Thread ID to the IDs of its emails, oldest first.
+    threads?: Record<string, string[]>;
   } = {},
 ) {
+  const threads = options.threads ?? { thread: ["message"] };
+  const threadIdByEmailId = new Map(
+    Object.entries(threads).flatMap(([threadId, emailIds]) =>
+      emailIds.map((emailId) => [emailId, threadId] as const),
+    ),
+  );
   const calls: JMAPMethodCall[] = [];
   const request = vi.fn(async (methods: JMAPMethodCall[]) => {
     calls.push(...methods);
@@ -464,10 +560,19 @@ function createProvider(
             result = { list: [{ id: "identity", email: "owner@example.com" }] };
             break;
           case "Thread/get":
-            result = { list: [{ id: "thread", emailIds: ["message"] }] };
+            result = {
+              list: (args.ids as string[]).map((id) => ({
+                id,
+                emailIds: threads[id] ?? ["message"],
+              })),
+            };
             break;
           case "Email/query":
-            result = { ids: ["message"], position: 0, total: 2 };
+            result = {
+              ids: Object.values(threads).map((emailIds) => emailIds[0]),
+              position: 0,
+              total: Object.keys(threads).length + 1,
+            };
             break;
           case "Email/get":
             if (
@@ -481,38 +586,41 @@ function createProvider(
             }
             result = {
               state: "s1",
-              list: ((args.ids as string[] | undefined) ?? ["message"]).map(
-                (messageId) => ({
-                  id: messageId,
-                  threadId: "thread",
-                  mailboxIds: { [options.draft ? "drafts" : "inbox"]: true },
-                  keywords: options.draft ? { $draft: true } : {},
-                  receivedAt: "2026-10-01T12:00:00Z",
-                  from: [{ email: "owner@example.com" }],
-                  to: [{ email: "to@example.com" }],
-                  subject: "Hello",
-                  "header:List-Unsubscribe":
-                    "<https://example.com/unsubscribe>, <mailto:unsubscribe@example.com>",
-                  attachments:
-                    options.forwardedAttachments && messageId === "original"
-                      ? [
-                          {
-                            blobId: "original-file",
-                            name: "report.pdf",
-                            type: "application/pdf",
-                            size: 15,
-                          },
-                          {
-                            blobId: "original-inline",
-                            name: "chart.png",
-                            type: "image/png",
-                            size: 12,
-                            cid: "chart",
-                          },
-                        ]
-                      : [],
-                }),
-              ),
+              list: (
+                (args.ids as string[] | undefined) ??
+                Object.values(threads).map((emailIds) => emailIds[0])
+              ).map((messageId, index) => ({
+                id: messageId,
+                threadId: threadIdByEmailId.get(messageId) ?? "thread",
+                mailboxIds: { [options.draft ? "drafts" : "inbox"]: true },
+                keywords: options.draft ? { $draft: true } : {},
+                receivedAt: new Date(
+                  Date.parse("2026-10-01T12:00:00Z") - index * 60_000,
+                ).toISOString(),
+                from: [{ email: "owner@example.com" }],
+                to: [{ email: "to@example.com" }],
+                subject: "Hello",
+                "header:List-Unsubscribe":
+                  "<https://example.com/unsubscribe>, <mailto:unsubscribe@example.com>",
+                attachments:
+                  options.forwardedAttachments && messageId === "original"
+                    ? [
+                        {
+                          blobId: "original-file",
+                          name: "report.pdf",
+                          type: "application/pdf",
+                          size: 15,
+                        },
+                        {
+                          blobId: "original-inline",
+                          name: "chart.png",
+                          type: "image/png",
+                          size: 12,
+                          cid: "chart",
+                        },
+                      ]
+                    : [],
+              })),
             };
             break;
           case "Email/set":

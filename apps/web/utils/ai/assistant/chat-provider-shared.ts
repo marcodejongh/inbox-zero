@@ -1,6 +1,7 @@
 import type { ToolSet } from "ai";
 import type { Logger } from "@/utils/logger";
 import type { RuleReadState } from "./chat-rule-state";
+import { fastmailChatProviderConfig } from "./chat-provider-fastmail";
 import { googleChatProviderConfig } from "./chat-provider-google";
 import { microsoftChatProviderConfig } from "./chat-provider-microsoft";
 
@@ -42,6 +43,7 @@ export type AssistantChatProvider = AssistantChatProviderConfig & {
 const providerPolicies: Record<string, AssistantChatProvider> = {
   google: buildAssistantChatProvider(googleChatProviderConfig),
   microsoft: buildAssistantChatProvider(microsoftChatProviderConfig),
+  fastmail: buildAssistantChatProvider(fastmailChatProviderConfig),
 };
 
 export function getAssistantChatProvider(
