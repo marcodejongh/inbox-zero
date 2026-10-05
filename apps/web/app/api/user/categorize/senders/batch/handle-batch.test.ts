@@ -49,9 +49,10 @@ vi.mock("@/utils/redis/categorization-progress", () => ({
   ) => mockSaveCategorizationProgress(...args),
 }));
 
-function createRequest(body: unknown) {
+function createRequest(body: unknown, headers?: Record<string, string>) {
   return {
     json: async () => body,
+    headers: new Headers(headers),
     logger: createTestLogger(),
   } as unknown as RequestWithLogger;
 }
@@ -121,6 +122,37 @@ describe("handleBatchRequest", () => {
     expect(mockSaveCategorizationProgress).toHaveBeenCalledWith({
       emailAccountId: "account-1",
       incrementCompleted: 3,
+    });
+  });
+
+  it("leaves progress alone when a failed batch will be delivered again", async () => {
+    mockCategorizeWithAi.mockRejectedValue(new Error("Cannot load model"));
+
+    const response = await handleBatchRequest(
+      createRequest(
+        { emailAccountId: "account-1", senders },
+        { "Upstash-Retried": "1" },
+      ),
+    );
+
+    expect(response.status).toBe(500);
+    expect(mockSaveCategorizationProgress).not.toHaveBeenCalled();
+  });
+
+  it("counts the senders as failed when the last delivery attempt fails", async () => {
+    mockCategorizeWithAi.mockRejectedValue(new Error("Cannot load model"));
+
+    const response = await handleBatchRequest(
+      createRequest(
+        { emailAccountId: "account-1", senders },
+        { "Upstash-Retried": "2" },
+      ),
+    );
+
+    expect(response.status).toBe(500);
+    expect(mockSaveCategorizationProgress).toHaveBeenCalledExactlyOnceWith({
+      emailAccountId: "account-1",
+      incrementFailed: 3,
     });
   });
 });

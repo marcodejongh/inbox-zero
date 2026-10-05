@@ -1,11 +1,22 @@
 import { Client, type FlowControl, type HeadersInit } from "@upstash/qstash";
 import { after } from "next/server";
+import PQueue from "p-queue";
 import { getInternalApiHeaders, getInternalApiUrl } from "@/utils/internal-api";
 import { env } from "@/env";
 import { createScopedLogger } from "@/utils/logger";
 import { isSafeExternalHttpUrl } from "@inboxzero/network/safe-url";
+import { sleep } from "@/utils/sleep";
 
 const logger = createScopedLogger("upstash");
+
+// QStash reports the delivery attempt in this header; the fallback queue does
+// the same so handlers can tell a final attempt from one that will be retried.
+export const QSTASH_RETRIED_HEADER = "Upstash-Retried";
+
+const FALLBACK_QUEUE_RETRY_DELAY_MS = 15_000;
+
+// Stands in for QStash queue parallelism when QStash is not configured.
+const fallbackQueues = new Map<string, PQueue>();
 
 type PublishToQstashOptions = {
   destinationUrl?: string;
@@ -125,6 +136,7 @@ export async function publishToQstashQueue<T>({
   body,
   headers,
   deduplicationId,
+  retries,
 }: {
   queueName: string;
   parallelism: number;
@@ -132,6 +144,7 @@ export async function publishToQstashQueue<T>({
   body: T;
   headers?: HeadersInit;
   deduplicationId?: string;
+  retries?: number;
 }) {
   const client = getQstashClient();
   if (client) {
@@ -145,6 +158,7 @@ export async function publishToQstashQueue<T>({
         body,
         headers,
         deduplicationId,
+        retries,
       });
     } catch (error) {
       logger.error("Failed to publish to Qstash queue", {
@@ -156,10 +170,13 @@ export async function publishToQstashQueue<T>({
     }
   }
 
-  return publishToInternalApiInBackground<T>({
-    path,
+  return publishToFallbackQueue<T>({
+    queueName,
+    parallelism,
+    url: `${getInternalApiUrl()}${path}`,
     body,
     headers,
+    retries,
   });
 }
 
@@ -184,13 +201,10 @@ async function fallbackPublishToQstash<T>(
 ) {
   logger.warn("Qstash client not found");
 
-  const internalHeaders = createHeaders(headers);
-  internalHeaders.set("Content-Type", "application/json");
-  if (includeInternalApiHeaders) {
-    for (const [key, value] of Object.entries(getInternalApiHeaders())) {
-      internalHeaders.set(key, value);
-    }
-  }
+  const internalHeaders = createFallbackHeaders(
+    headers,
+    includeInternalApiHeaders,
+  );
 
   after(async () => {
     try {
@@ -203,6 +217,76 @@ async function fallbackPublishToQstash<T>(
       logger.error("Fallback QStash fetch failed", { url, error });
     }
   });
+}
+
+function publishToFallbackQueue<T>({
+  queueName,
+  parallelism,
+  url,
+  body,
+  headers,
+  retries = 0,
+}: {
+  queueName: string;
+  parallelism: number;
+  url: string;
+  body: T;
+  headers?: HeadersInit;
+  retries?: number;
+}) {
+  logger.warn("Qstash client not found");
+
+  const requestHeaders = createFallbackHeaders(headers, true);
+  const queue =
+    fallbackQueues.get(queueName) ?? new PQueue({ concurrency: parallelism });
+  fallbackQueues.set(queueName, queue);
+
+  after(async () => {
+    await queue.add(async () => {
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        // The slot stays held while waiting, so a struggling backend gets
+        // less traffic, not the same burst again.
+        if (attempt > 0)
+          await sleep(FALLBACK_QUEUE_RETRY_DELAY_MS * 4 ** (attempt - 1));
+
+        requestHeaders.set(QSTASH_RETRIED_HEADER, String(attempt));
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: requestHeaders,
+            body: JSON.stringify(body),
+          });
+          if (response.ok) return;
+          logger.warn("Fallback queue delivery failed", {
+            url,
+            queueName,
+            status: response.status,
+            attempt,
+            retries,
+          });
+        } catch (error) {
+          logger.error("Fallback QStash fetch failed", { url, error });
+        }
+      }
+    });
+
+    if (queue.size === 0 && queue.pending === 0)
+      fallbackQueues.delete(queueName);
+  });
+}
+
+function createFallbackHeaders(
+  headers: HeadersInit | undefined,
+  includeInternalApiHeaders: boolean,
+) {
+  const fallbackHeaders = createHeaders(headers);
+  fallbackHeaders.set("Content-Type", "application/json");
+  if (includeInternalApiHeaders) {
+    for (const [key, value] of Object.entries(getInternalApiHeaders())) {
+      fallbackHeaders.set(key, value);
+    }
+  }
+  return fallbackHeaders;
 }
 
 export async function listQueues() {

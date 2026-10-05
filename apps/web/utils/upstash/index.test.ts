@@ -48,6 +48,10 @@ async function loadUpstashModule({
     },
   }));
 
+  vi.doMock("@/utils/sleep", () => ({
+    sleep: vi.fn().mockResolvedValue(undefined),
+  }));
+
   vi.doMock("@/env", () => ({
     env: {
       QSTASH_TOKEN: qstashToken,
@@ -380,10 +384,83 @@ describe("publishToQstashQueue", () => {
 
     expect(mockQueueUpsert).not.toHaveBeenCalled();
     expect(mockQueueEnqueueJSON).not.toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(fetchMock).toHaveBeenCalledWith(
       "https://worker.example.com/api/task",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("keeps fallback deliveries within the queue's parallelism", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const fetchMock = vi.fn(async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      return new Response(null, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const upstash = await loadUpstashModule({ qstashToken: undefined });
+
+    await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        upstash.publishToQstashQueue({
+          queueName: "bounded",
+          parallelism: 2,
+          path: "/api/task",
+          body: { id: index },
+        }),
+      ),
+    );
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(8));
+    expect(peak).toBe(2);
+  });
+
+  it("redelivers a failed fallback delivery and numbers each attempt", async () => {
+    const attempts: (string | null)[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      attempts.push(new Headers(init.headers).get("Upstash-Retried"));
+      return new Response(null, { status: attempts.length < 3 ? 500 : 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const upstash = await loadUpstashModule({ qstashToken: undefined });
+
+    await upstash.publishToQstashQueue({
+      queueName: "retried",
+      parallelism: 1,
+      path: "/api/task",
+      body: { id: "a" },
+      retries: 2,
+    });
+
+    await vi.waitFor(() => expect(attempts).toEqual(["0", "1", "2"]));
+  });
+
+  it("stops redelivering once the retries are used up", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async () => new Response(null, { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const upstash = await loadUpstashModule({ qstashToken: undefined });
+
+    await upstash.publishToQstashQueue({
+      queueName: "exhausted",
+      parallelism: 1,
+      path: "/api/task",
+      body: { id: "a" },
+      retries: 1,
+    });
+    await upstash.publishToQstashQueue({
+      queueName: "exhausted",
+      parallelism: 1,
+      path: "/api/task",
+      body: { id: "b" },
+    });
+
+    // Two attempts for the retried job, then the queue moves on to the next.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
   });
 });

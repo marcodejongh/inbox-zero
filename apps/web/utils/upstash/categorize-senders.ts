@@ -7,6 +7,8 @@ const logger = createScopedLogger("upstash");
 
 const CATEGORIZE_SENDERS_PREFIX = "ai-categorize-senders";
 
+export const CATEGORIZE_SENDERS_BATCH_RETRIES = 2;
+
 const getCategorizeSendersQueueName = ({
   emailAccountId,
 }: {
@@ -42,6 +44,7 @@ export async function publishToAiCategorizeSendersQueue(
         queueName,
         parallelism: 3, // Allow up to 3 concurrent jobs from this queue
         path: "/api/user/categorize/senders/batch",
+        retries: CATEGORIZE_SENDERS_BATCH_RETRIES,
         body: {
           emailAccountId: body.emailAccountId,
           senders: senderChunk,
