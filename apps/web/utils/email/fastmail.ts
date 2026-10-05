@@ -502,6 +502,40 @@ export class FastmailProvider implements EmailProvider {
     collapseThreads = false,
   ) {
     await this.ensureMailboxCache();
+    const page = await this.queryEmailPage(filter, options, collapseThreads, {
+      properties: [...EMAIL_PROPERTIES],
+      fetchAllBodyValues: true,
+    });
+    return {
+      messages: page.emails.map((email) => ({
+        ...this.parseJMAPEmail(email),
+        historyId: page.state,
+      })),
+      nextPageToken: page.nextPageToken,
+    };
+  }
+
+  // Thread listings load every email of each thread afterwards, so fetching
+  // the matching emails' bodies here would download them twice.
+  private async queryThreadIds(
+    filter: Record<string, unknown>,
+    options: { maxResults?: number; pageToken?: string } = {},
+  ) {
+    const page = await this.queryEmailPage(filter, options, true, {
+      properties: ["threadId"],
+    });
+    return {
+      threadIds: page.emails.map((email) => email.threadId),
+      nextPageToken: page.nextPageToken,
+    };
+  }
+
+  private async queryEmailPage(
+    filter: Record<string, unknown>,
+    options: { maxResults?: number; pageToken?: string },
+    collapseThreads: boolean,
+    emailGetArguments: Record<string, unknown>,
+  ) {
     const anchor = options.pageToken?.startsWith("anchor:")
       ? options.pageToken.slice(7)
       : undefined;
@@ -540,8 +574,7 @@ export class FastmailProvider implements EmailProvider {
           {
             accountId: this.client.accountId,
             "#ids": { resultOf: "0", name: "Email/query", path: "/ids" },
-            properties: [...EMAIL_PROPERTIES],
-            fetchAllBodyValues: true,
+            ...emailGetArguments,
           },
           "1",
         ],
@@ -558,10 +591,8 @@ export class FastmailProvider implements EmailProvider {
       response.methodResponses[1],
     );
     return {
-      messages: result.list.map((email) => ({
-        ...this.parseJMAPEmail(email),
-        historyId: result.state,
-      })),
+      emails: result.list,
+      state: result.state,
       nextPageToken:
         query.ids.length &&
         (query.total === undefined
@@ -642,10 +673,8 @@ export class FastmailProvider implements EmailProvider {
   searchThreads: EmailProvider["searchThreads"] = async (options) => {
     const page = await this.searchMessages(options);
     return {
-      threads: await Promise.all(
-        [...new Set(page.messages.map((message) => message.threadId))].map(
-          (id) => this.getThread(id),
-        ),
+      threads: await this.loadThreads(
+        page.messages.map((message) => message.threadId),
       ),
       nextPageToken: page.nextPageToken,
     };
@@ -1396,15 +1425,49 @@ export class FastmailProvider implements EmailProvider {
     options?: Parameters<EmailProvider["getThread"]>[1],
   ): Promise<EmailThread> {
     options?.signal?.throwIfAborted();
-    const messages = (
-      await this.getMessagesBatch(await this.getThreadEmailIds(threadId))
-    )
-      .filter(
-        (message) =>
-          options?.includeDrafts || !message.labelIds?.includes("DRAFT"),
-      )
-      .sort((a, b) => Date.parse(a.date) - Date.parse(b.date));
-    return { id: threadId, messages, snippet: messages.at(-1)?.snippet ?? "" };
+    return (await this.loadThreads([threadId], options))[0];
+  }
+
+  // One Thread/get and one Email/get for the whole list; loading threads one
+  // by one costs two requests each and queues behind the concurrency limit.
+  private async loadThreads(
+    threadIds: string[],
+    options?: { includeDrafts?: boolean },
+  ): Promise<EmailThread[]> {
+    const ids = [...new Set(threadIds)];
+    const limit = this.batchLimit("maxObjectsInGet");
+    const emailIds: string[] = [];
+    for (let offset = 0; offset < ids.length; offset += limit) {
+      const response = await this.client.request([
+        [
+          "Thread/get",
+          {
+            accountId: this.client.accountId,
+            ids: ids.slice(offset, offset + limit),
+          },
+          "0",
+        ],
+      ]);
+      emailIds.push(
+        ...getResponseData<JMAPGetResponse<{ emailIds: string[] }>>(
+          response.methodResponses[0],
+        ).list.flatMap((thread) => thread.emailIds),
+      );
+    }
+    const messagesByThreadId = new Map<string, ParsedMessage[]>();
+    for (const message of await this.getMessagesBatch(emailIds)) {
+      if (!options?.includeDrafts && message.labelIds?.includes("DRAFT"))
+        continue;
+      const messages = messagesByThreadId.get(message.threadId) ?? [];
+      messages.push(message);
+      messagesByThreadId.set(message.threadId, messages);
+    }
+    return ids.map((id) => {
+      const messages = (messagesByThreadId.get(id) ?? []).sort(
+        (a, b) => Date.parse(a.date) - Date.parse(b.date),
+      );
+      return { id, messages, snippet: messages.at(-1)?.snippet ?? "" };
+    });
   }
 
   async getLabels(): Promise<EmailLabel[]> {
@@ -1647,14 +1710,11 @@ export class FastmailProvider implements EmailProvider {
       conditions.push({ operator: "NOT", conditions: [{ to: email }] });
     for (const email of options.excludeFromEmails ?? [])
       conditions.push({ operator: "NOT", conditions: [{ from: email }] });
-    const page = await this.queryEmails(
+    const page = await this.queryThreadIds(
       { operator: "AND", conditions },
       options,
-      true,
     );
-    return Promise.all(
-      page.messages.map((message) => this.getThread(message.threadId)),
-    );
+    return this.loadThreads(page.threadIds);
   }
 
   async archiveThread(threadId: string, _ownerEmail: string): Promise<void> {
@@ -2167,7 +2227,7 @@ export class FastmailProvider implements EmailProvider {
     participantEmail: string;
     maxThreads?: number;
   }): Promise<EmailThread[]> {
-    const page = await this.queryEmails(
+    const page = await this.queryThreadIds(
       {
         operator: "OR",
         conditions: [
@@ -2177,11 +2237,8 @@ export class FastmailProvider implements EmailProvider {
         ],
       },
       { maxResults: options.maxThreads ?? 5 },
-      true,
     );
-    return Promise.all(
-      page.messages.map((message) => this.getThread(message.threadId)),
-    );
+    return this.loadThreads(page.threadIds);
   }
 
   async getDrafts(options?: { maxResults?: number }): Promise<ParsedMessage[]> {
@@ -2349,11 +2406,10 @@ export class FastmailProvider implements EmailProvider {
     const query = options.query ?? {};
     const filter = await this.threadFilter(query);
     const maxResults = options.maxResults ?? query.limit ?? undefined;
-    const page = await this.queryEmails(
-      filter,
-      { ...options, maxResults },
-      true,
-    ).catch(async (error: unknown) => {
+    const page = await this.queryThreadIds(filter, {
+      ...options,
+      maxResults,
+    }).catch(async (error: unknown) => {
       if (!(error instanceof InvalidMailboxSyncCursorError)) throw error;
       // Rules archive or mark the anchor email read between pages, which drops
       // it from the filtered results. Resume from its date instead.
@@ -2364,20 +2420,15 @@ export class FastmailProvider implements EmailProvider {
       // `before` is exclusive; the extra second keeps unseen emails received
       // in the same second, at the cost of repeating ones already returned.
       const before = new Date(Number(anchor.internalDate) + 1000).toISOString();
-      return this.queryEmails(
+      return this.queryThreadIds(
         { operator: "AND", conditions: [filter, { before }] },
         { maxResults },
-        true,
       );
     });
     return {
-      threads: await Promise.all(
-        page.messages.map((message) =>
-          this.getThread(message.threadId, {
-            includeDrafts: query.type === "draft",
-          }),
-        ),
-      ),
+      threads: await this.loadThreads(page.threadIds, {
+        includeDrafts: query.type === "draft",
+      }),
       nextPageToken: page.nextPageToken,
     };
   }
