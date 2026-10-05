@@ -17,40 +17,56 @@ export function parseFastmailSearchQuery(
   const parseSequence = (grouped: boolean) => {
     const conditions: Filter[] = [];
     while (index < tokens.length && tokens[index] !== ")") {
-      const alternatives = parseOperand();
+      if (tokens[index] === "AND") {
+        index++;
+        continue;
+      }
+      const alternatives = [parseOperand()];
       while (tokens[index] === "OR") {
         index++;
-        alternatives.push(...parseOperand());
+        alternatives.push(parseOperand());
       }
-      if (alternatives.length > 1)
+      if (alternatives.length === 1) {
+        if (alternatives[0]) conditions.push(alternatives[0]);
+      } else if (alternatives.every((alternative) => alternative !== null)) {
         conditions.push({ operator: "OR", conditions: alternatives });
-      else conditions.push(...alternatives);
+      } else {
+        throw new SafeError(
+          "in:anywhere cannot be an OR alternative in Fastmail searches. Add it once outside the OR.",
+        );
+      }
     }
     if (grouped ? tokens[index] !== ")" : index < tokens.length)
       throw new SafeError("Unbalanced parentheses in Fastmail search.");
     return conditions;
   };
 
-  const parseOperand = (): Filter[] => {
+  // Null means the operand only widens the search scope (in:anywhere).
+  const parseOperand = (): Filter | null => {
     const token = tokens[index++];
     if (token === undefined || token === "OR" || token === ")")
       throw new SafeError(
         "OR needs a search term on both sides in Fastmail searches.",
       );
-    if (token === "(") {
+    if (token === "(" || token === "-(") {
+      if (tokens[index] === ")")
+        throw new SafeError("Fastmail search filters need a value.");
+      const scopeBeforeGroup = includeSpamTrash;
       const conditions = parseSequence(true);
       index++;
-      if (!conditions.length)
-        throw new SafeError("Fastmail search filters need a value.");
-      return [
+      if (!conditions.length) return null;
+      const group =
         conditions.length === 1
           ? conditions[0]
-          : { operator: "AND", conditions },
-      ];
+          : { operator: "AND", conditions };
+      if (token === "(") return group;
+      // Excluding trash or spam is not a request to search them.
+      includeSpamTrash = scopeBeforeGroup;
+      return { operator: "NOT", conditions: [group] };
     }
     const term = parseTerm(token, mailboxes, now);
     if (term.includeSpamTrash) includeSpamTrash = true;
-    return term.condition ? [term.condition] : [];
+    return term.condition ?? null;
   };
 
   const conditions = parseSequence(false);
@@ -188,6 +204,9 @@ function tokenize(query: string) {
       throw new SafeError(
         "Braces are not supported in Fastmail searches. Use OR between terms instead.",
       );
+    } else if (!quoted && character === "(" && token === "-") {
+      tokens.push("-(");
+      token = "";
     } else if (!quoted && character === "(") {
       if (token)
         throw new SafeError(

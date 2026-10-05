@@ -124,6 +124,46 @@ describe("Fastmail search query translation", () => {
     });
   });
 
+  it("negates a whole group without searching the trash it excludes", () => {
+    expect(
+      parseFastmailSearchQuery(
+        "is:unread -(from:a@example.com OR in:trash)",
+        mailboxes,
+        now,
+      ),
+    ).toEqual({
+      filter: {
+        operator: "AND",
+        conditions: [
+          { notKeyword: "$seen" },
+          {
+            operator: "NOT",
+            conditions: [
+              {
+                operator: "OR",
+                conditions: [
+                  { from: "a@example.com" },
+                  { inMailbox: "trash-id" },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      includeSpamTrash: false,
+    });
+  });
+
+  it.each([
+    "(in:anywhere) from:a@example.com",
+    "from:a@example.com AND in:anywhere",
+  ])("keeps the remaining terms when the scope is widened (%s)", (query) => {
+    expect(parseFastmailSearchQuery(query, mailboxes, now)).toEqual({
+      filter: { operator: "AND", conditions: [{ from: "a@example.com" }] },
+      includeSpamTrash: true,
+    });
+  });
+
   it("supports absolute date boundaries and text", () => {
     expect(
       parseFastmailSearchQuery(
@@ -160,6 +200,7 @@ describe("Fastmail search query translation", () => {
     "one OR",
     "OR two",
     "one OR OR two",
+    "in:anywhere OR from:a@example.com",
     "(one OR two",
     "one OR two)",
     "()",

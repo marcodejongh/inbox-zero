@@ -304,7 +304,7 @@ export class FastmailProvider implements EmailProvider {
         await this.archiveMessages(
           thread.messageIds.length
             ? thread.messageIds
-            : await this.getThreadEmailIds(thread.threadId),
+            : await this.getThreadEmailIds([thread.threadId]),
         );
         succeededThreadIds.push(thread.threadId);
       } catch {
@@ -394,7 +394,7 @@ export class FastmailProvider implements EmailProvider {
   markNotSpam: EmailProvider["markNotSpam"] = async (id) => {
     const inbox = await this.requireMailbox("inbox");
     const junk = await this.requireMailbox("junk");
-    await this.patchMessages(await this.getThreadEmailIds(id), {
+    await this.patchMessages(await this.getThreadEmailIds([id]), {
       [`mailboxIds/${inbox.id}`]: true,
       [`mailboxIds/${junk.id}`]: null,
     });
@@ -425,7 +425,7 @@ export class FastmailProvider implements EmailProvider {
   };
 
   unarchiveThread: EmailProvider["unarchiveThread"] = async (id) =>
-    this.unarchiveMessages(await this.getThreadEmailIds(id));
+    this.unarchiveMessages(await this.getThreadEmailIds([id]));
 
   untrashMessages: EmailProvider["untrashMessages"] = async (ids) => {
     const trash = await this.requireMailbox("trash");
@@ -437,7 +437,7 @@ export class FastmailProvider implements EmailProvider {
   };
 
   untrashThread: EmailProvider["untrashThread"] = async (id) =>
-    this.untrashMessages(await this.getThreadEmailIds(id));
+    this.untrashMessages(await this.getThreadEmailIds([id]));
 
   updateLabel: EmailProvider["updateLabel"] = async (id, update) => {
     if (update.color)
@@ -520,8 +520,9 @@ export class FastmailProvider implements EmailProvider {
   private async queryThreadIds(
     filter: Record<string, unknown>,
     options: { maxResults?: number; pageToken?: string } = {},
+    collapseThreads = true,
   ) {
-    const page = await this.queryEmailPage(filter, options, true, {
+    const page = await this.queryEmailPage(filter, options, collapseThreads, {
       properties: ["threadId"],
     });
     return {
@@ -604,6 +605,24 @@ export class FastmailProvider implements EmailProvider {
   }
 
   searchMessages: EmailProvider["searchMessages"] = async (options) => {
+    const filter = await this.searchFilter(options);
+    return filter ? this.queryEmails(filter, options) : { messages: [] };
+  };
+
+  searchThreads: EmailProvider["searchThreads"] = async (options) => {
+    const filter = await this.searchFilter(options);
+    if (!filter) return { threads: [] };
+    const page = await this.queryThreadIds(filter, options, false);
+    return {
+      threads: await this.loadThreads(page.threadIds),
+      nextPageToken: page.nextPageToken,
+    };
+  };
+
+  // Returns null when the search names a mailbox that does not exist.
+  private async searchFilter(
+    options: Parameters<EmailProvider["searchMessages"]>[0],
+  ): Promise<Record<string, unknown> | null> {
     const conditions: Record<string, unknown>[] = [];
     const search = options.mailboxSearch;
     const text = search?.text;
@@ -637,13 +656,13 @@ export class FastmailProvider implements EmailProvider {
     else if (mailbox && mailbox !== "all") {
       const role = mailbox === "spam" ? "junk" : mailbox;
       const folder = await this.getMailboxByRole(role);
-      if (!folder) return { messages: [] };
+      if (!folder) return null;
       conditions.push({ inMailbox: folder.id });
     }
     for (const id of options.labelIds ?? []) conditions.push({ inMailbox: id });
     if (options.labelName) {
       const label = await this.getMailboxByName(options.labelName);
-      if (!label) return { messages: [] };
+      if (!label) return null;
       conditions.push({ inMailbox: label.id });
     }
     const excludedRoles = [...(search?.excludedRoles ?? [])];
@@ -664,21 +683,8 @@ export class FastmailProvider implements EmailProvider {
           conditions: [{ inMailbox: folder.id }],
         });
     }
-    return this.queryEmails(
-      conditions.length ? { operator: "AND", conditions } : {},
-      options,
-    );
-  };
-
-  searchThreads: EmailProvider["searchThreads"] = async (options) => {
-    const page = await this.searchMessages(options);
-    return {
-      threads: await this.loadThreads(
-        page.messages.map((message) => message.threadId),
-      ),
-      nextPageToken: page.nextPageToken,
-    };
-  };
+    return conditions.length ? { operator: "AND", conditions } : {};
+  }
 
   searchContacts: EmailProvider["searchContacts"] = async (query) => {
     const capability = "urn:ietf:params:jmap:contacts";
@@ -1435,25 +1441,7 @@ export class FastmailProvider implements EmailProvider {
     options?: { includeDrafts?: boolean },
   ): Promise<EmailThread[]> {
     const ids = [...new Set(threadIds)];
-    const limit = this.batchLimit("maxObjectsInGet");
-    const emailIds: string[] = [];
-    for (let offset = 0; offset < ids.length; offset += limit) {
-      const response = await this.client.request([
-        [
-          "Thread/get",
-          {
-            accountId: this.client.accountId,
-            ids: ids.slice(offset, offset + limit),
-          },
-          "0",
-        ],
-      ]);
-      emailIds.push(
-        ...getResponseData<JMAPGetResponse<{ emailIds: string[] }>>(
-          response.methodResponses[0],
-        ).list.flatMap((thread) => thread.emailIds),
-      );
-    }
+    const emailIds = await this.getThreadEmailIds(ids);
     const messagesByThreadId = new Map<string, ParsedMessage[]>();
     for (const message of await this.getMessagesBatch(emailIds)) {
       if (!options?.includeDrafts && message.labelIds?.includes("DRAFT"))
@@ -1718,7 +1706,7 @@ export class FastmailProvider implements EmailProvider {
   }
 
   async archiveThread(threadId: string, _ownerEmail: string): Promise<void> {
-    await this.archiveMessages(await this.getThreadEmailIds(threadId));
+    await this.archiveMessages(await this.getThreadEmailIds([threadId]));
   }
 
   async archiveThreadWithLabel(
@@ -1726,7 +1714,10 @@ export class FastmailProvider implements EmailProvider {
     _ownerEmail: string,
     labelId?: string,
   ): Promise<void> {
-    await this.archiveMessages(await this.getThreadEmailIds(threadId), labelId);
+    await this.archiveMessages(
+      await this.getThreadEmailIds([threadId]),
+      labelId,
+    );
   }
 
   async archiveMessage(messageId: string): Promise<void> {
@@ -1794,7 +1785,7 @@ export class FastmailProvider implements EmailProvider {
     _ownerEmail: string,
     _actionSource: "user" | "automation",
   ): Promise<void> {
-    await this.trashMessages(await this.getThreadEmailIds(threadId));
+    await this.trashMessages(await this.getThreadEmailIds([threadId]));
   }
 
   async labelMessage({
@@ -1979,7 +1970,7 @@ export class FastmailProvider implements EmailProvider {
   async markSpam(threadId: string): Promise<void> {
     const junk = await this.requireMailbox("junk");
     const inbox = await this.requireMailbox("inbox");
-    await this.patchMessages(await this.getThreadEmailIds(threadId), {
+    await this.patchMessages(await this.getThreadEmailIds([threadId]), {
       [`mailboxIds/${junk.id}`]: true,
       [`mailboxIds/${inbox.id}`]: null,
     });
@@ -1991,7 +1982,7 @@ export class FastmailProvider implements EmailProvider {
 
   async markReadThread(threadId: string, read: boolean): Promise<void> {
     await this.markMessagesReadState(
-      await this.getThreadEmailIds(threadId),
+      await this.getThreadEmailIds([threadId]),
       read,
     );
   }
@@ -2021,7 +2012,7 @@ export class FastmailProvider implements EmailProvider {
   }
 
   async removeThreadLabel(threadId: string, labelId: string): Promise<void> {
-    await this.patchMessages(await this.getThreadEmailIds(threadId), {
+    await this.patchMessages(await this.getThreadEmailIds([threadId]), {
       [`mailboxIds/${labelId}`]: null,
     });
   }
@@ -2797,7 +2788,7 @@ export class FastmailProvider implements EmailProvider {
   ): Promise<void> {
     const mailbox = await this.getMailboxByName(folderName);
     if (!mailbox) throw new SafeError("Fastmail folder not found");
-    await this.patchMessages(await this.getThreadEmailIds(threadId), {
+    await this.patchMessages(await this.getThreadEmailIds([threadId]), {
       mailboxIds: { [mailbox.id]: true },
     });
   }
@@ -2810,17 +2801,27 @@ export class FastmailProvider implements EmailProvider {
     return created.id;
   }
 
-  private async getThreadEmailIds(threadId: string): Promise<string[]> {
-    const response = await this.client.request([
-      [
-        "Thread/get",
-        { accountId: this.client.accountId, ids: [threadId] },
-        "0",
-      ],
-    ]);
-    return getResponseData<JMAPGetResponse<{ emailIds: string[] }>>(
-      response.methodResponses[0],
-    ).list.flatMap((thread) => thread.emailIds);
+  private async getThreadEmailIds(threadIds: string[]): Promise<string[]> {
+    const limit = this.batchLimit("maxObjectsInGet");
+    const emailIds: string[] = [];
+    for (let offset = 0; offset < threadIds.length; offset += limit) {
+      const response = await this.client.request([
+        [
+          "Thread/get",
+          {
+            accountId: this.client.accountId,
+            ids: threadIds.slice(offset, offset + limit),
+          },
+          "0",
+        ],
+      ]);
+      emailIds.push(
+        ...getResponseData<JMAPGetResponse<{ emailIds: string[] }>>(
+          response.methodResponses[0],
+        ).list.flatMap((thread) => thread.emailIds),
+      );
+    }
+    return emailIds;
   }
 
   async getSignatures(): Promise<EmailSignature[]> {

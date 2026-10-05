@@ -242,6 +242,29 @@ describe("Fastmail mail operations", () => {
     });
   });
 
+  it("searches threads without downloading the matching emails twice", async () => {
+    const { provider, calls } = createProvider({
+      threads: { first: ["first-reply", "first-original"], second: ["only"] },
+    });
+
+    const page = await provider.searchThreads({
+      query: "from:a@example.com OR from:b@example.com",
+      maxResults: 20,
+    });
+
+    expect(page.threads.map((thread) => thread.id)).toEqual([
+      "first",
+      "second",
+    ]);
+    expect(page.threads[0].messages).toHaveLength(2);
+    expect(calls.filter(([name]) => name === "Thread/get")).toHaveLength(1);
+    expect(
+      calls
+        .filter(([name]) => name === "Email/get")
+        .map(([, args]) => (args.properties as string[]).length === 1),
+    ).toEqual([true, false]);
+  });
+
   it("continues thread paging after the anchor email left the result set", async () => {
     const { provider, calls, request } = createProvider();
     await provider.getLabels();

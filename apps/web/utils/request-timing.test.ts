@@ -36,7 +36,19 @@ describe("request timing", () => {
     });
   });
 
-  it("stays quiet for fast requests and outside a timed request", async () => {
+  it("stays quiet for fast requests", () => {
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const timer = startRequestTimer({ logger, requestName: "threads request" });
+
+    vi.advanceTimersByTime(2999);
+    timer.logSlowCompletion();
+    timer.stop();
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("ignores work measured outside the timed request", async () => {
     const logger = createTestLogger();
     const warn = vi.spyOn(logger, "warn");
     const timer = startRequestTimer({ logger, requestName: "threads request" });
@@ -45,9 +57,13 @@ describe("request timing", () => {
     await expect(measureRequestStage("stage", async () => "ok")).resolves.toBe(
       "ok",
     );
+    vi.advanceTimersByTime(3001);
     timer.logSlowCompletion();
     timer.stop();
 
-    expect(warn).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith("threads request completed slowly", {
+      durationMs: 3001,
+      stageDurationsMs: {},
+    });
   });
 });
