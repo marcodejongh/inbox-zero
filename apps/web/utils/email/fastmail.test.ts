@@ -41,6 +41,25 @@ describe("Fastmail mail operations", () => {
     });
   });
 
+  it.each([
+    "searchMessages",
+    "getMessagesWithPagination",
+  ] as const)("%s searches for either alternative of an OR query", async (method) => {
+    const { provider, calls } = createProvider();
+    const result = await provider[method]({
+      query: "from:a@example.com OR from:b@example.com",
+      maxResults: 20,
+    });
+    expect(result.messages).toHaveLength(1);
+    const query = calls.find(([name]) => name === "Email/query");
+    expect(JSON.stringify(query?.[1].filter)).toContain(
+      JSON.stringify({
+        operator: "OR",
+        conditions: [{ from: "a@example.com" }, { from: "b@example.com" }],
+      }),
+    );
+  });
+
   it("fetches inbox messages without requesting a forbidden parsed unsubscribe header", async () => {
     const { provider, calls } = createProvider();
 

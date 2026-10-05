@@ -57,6 +57,73 @@ describe("Fastmail search query translation", () => {
     });
   });
 
+  it("matches either side of an OR", () => {
+    expect(
+      parseFastmailSearchQuery(
+        "from:a@example.com OR from:b@example.com",
+        mailboxes,
+        now,
+      ).filter,
+    ).toEqual({
+      operator: "AND",
+      conditions: [
+        {
+          operator: "OR",
+          conditions: [{ from: "a@example.com" }, { from: "b@example.com" }],
+        },
+      ],
+    });
+  });
+
+  it("binds OR tighter than the surrounding terms", () => {
+    expect(
+      parseFastmailSearchQuery(
+        "is:unread subject:invoice OR subject:receipt OR -in:inbox has:attachment",
+        mailboxes,
+        now,
+      ).filter,
+    ).toEqual({
+      operator: "AND",
+      conditions: [
+        { notKeyword: "$seen" },
+        {
+          operator: "OR",
+          conditions: [
+            { subject: "invoice" },
+            { subject: "receipt" },
+            { operator: "NOT", conditions: [{ inMailbox: "inbox-id" }] },
+          ],
+        },
+        { hasAttachment: true },
+      ],
+    });
+  });
+
+  it("groups alternatives in parentheses", () => {
+    expect(
+      parseFastmailSearchQuery(
+        "(from:a@example.com is:unread) OR (subject:invoice) in:inbox",
+        mailboxes,
+        now,
+      ).filter,
+    ).toEqual({
+      operator: "AND",
+      conditions: [
+        {
+          operator: "OR",
+          conditions: [
+            {
+              operator: "AND",
+              conditions: [{ from: "a@example.com" }, { notKeyword: "$seen" }],
+            },
+            { subject: "invoice" },
+          ],
+        },
+        { inMailbox: "inbox-id" },
+      ],
+    });
+  });
+
   it("supports absolute date boundaries and text", () => {
     expect(
       parseFastmailSearchQuery(
@@ -90,7 +157,14 @@ describe("Fastmail search query translation", () => {
     "after:2026/02/31",
     'label:"Missing"',
     'subject:"unclosed',
-    "one OR two",
+    "one OR",
+    "OR two",
+    "one OR OR two",
+    "(one OR two",
+    "one OR two)",
+    "()",
+    "from:(a@example.com OR b@example.com)",
+    "{one two}",
   ])("rejects unsupported or malformed queries instead of silently changing their meaning (%s)", (query) => {
     expect(() => parseFastmailSearchQuery(query, mailboxes, now)).toThrow();
   });

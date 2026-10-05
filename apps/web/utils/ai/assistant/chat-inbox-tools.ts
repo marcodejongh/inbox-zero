@@ -487,18 +487,6 @@ const searchInboxBaseFields = {
   ),
 };
 
-const gmailSearchInboxInputSchema = z.object({
-  query: z
-    .string()
-    .trim()
-    .min(1)
-    .max(500)
-    .describe(
-      "Gmail search query. Use from:person@example.com for an exact sender search. Also supports: to:, subject:, in:inbox, is:unread, has:attachment, after:YYYY/MM/DD, before:YYYY/MM/DD, label:, newer_than:, older_than:.",
-    ),
-  ...searchInboxBaseFields,
-});
-
 const outlookSearchInboxInputSchema = z
   .object({
     query: z
@@ -543,61 +531,65 @@ const outlookSearchInboxInputSchema = z
     },
   );
 
-const gmailSearchInboxTool = ({
-  email,
-  emailAccountId,
-  provider,
-  logger,
-}: InboxToolOptions) =>
-  tool({
-    description:
-      "Search inbox messages and return concise message metadata. Returns at most 20 messages per call. If hasMore=true, more matches remain; for bulk or all-matching requests, keep calling searchInbox with nextPageToken until hasMore=false before reporting completion. totalReturned is only the number of messages returned by this call, so do not present it or a single search page as an exact mailbox, folder, or label count. If the tool returns an error or provider search feedback instead of messages, treat the lookup as inconclusive rather than evidence that the email is absent.",
-    inputSchema: gmailSearchInboxInputSchema,
-    execute: async (input) => {
-      trackToolCall({ tool: "search_inbox", email, logger });
+const querySearchInboxTool =
+  ({
+    queryDescription,
+    failureMessage,
+  }: {
+    queryDescription: string;
+    failureMessage: string;
+  }) =>
+  ({ email, emailAccountId, provider, logger }: InboxToolOptions) =>
+    tool({
+      description:
+        "Search inbox messages and return concise message metadata. Returns at most 20 messages per call. If hasMore=true, more matches remain; for bulk or all-matching requests, keep calling searchInbox with nextPageToken until hasMore=false before reporting completion. totalReturned is only the number of messages returned by this call, so do not present it or a single search page as an exact mailbox, folder, or label count. If the tool returns an error or provider search feedback instead of messages, treat the lookup as inconclusive rather than evidence that the email is absent.",
+      inputSchema: z.object({
+        query: z.string().trim().min(1).max(500).describe(queryDescription),
+        ...searchInboxBaseFields,
+      }),
+      execute: async (input) => {
+        trackToolCall({ tool: "search_inbox", email, logger });
 
-      const { query, limit, pageToken } = input;
+        const { query, limit, pageToken } = input;
 
-      try {
-        const emailProvider = await createEmailProvider({
-          emailAccountId,
-          provider,
-          logger,
-        });
+        try {
+          const emailProvider = await createEmailProvider({
+            emailAccountId,
+            provider,
+            logger,
+          });
 
-        const [searchResult, labels] = await Promise.all([
-          emailProvider.searchMessages({
-            query,
-            maxResults: limit ?? SEARCH_INBOX_MAX_RESULTS,
-            pageToken: pageToken ?? undefined,
-          }),
-          getLabelsForSearchResults({ emailProvider, logger }),
-        ]);
+          const [searchResult, labels] = await Promise.all([
+            emailProvider.searchMessages({
+              query,
+              maxResults: limit ?? SEARCH_INBOX_MAX_RESULTS,
+              pageToken: pageToken ?? undefined,
+            }),
+            getLabelsForSearchResults({ emailProvider, logger }),
+          ]);
 
-        return formatSearchInboxResult({
-          searchResult,
-          queryUsed: query,
-          labels,
-          taxonomyNamesKey: "labelNames",
-        });
-      } catch (error) {
-        // Provider failures are logged and flushed at the provider boundary.
-        const errorInfo = extractGmailErrorInfo(error);
-        const { retryable } = isGmailRetryableError(errorInfo);
-        return {
-          queryUsed: query,
-          error: "Failed to search inbox",
-          searchFeedback: {
-            status: errorInfo.status,
-            message: (
-              errorInfo.errorMessage || "Gmail search request failed"
-            ).slice(0, 300),
-            retryable,
-          },
-        };
-      }
-    },
-  });
+          return formatSearchInboxResult({
+            searchResult,
+            queryUsed: query,
+            labels,
+            taxonomyNamesKey: "labelNames",
+          });
+        } catch (error) {
+          // Provider failures are logged and flushed at the provider boundary.
+          const errorInfo = extractGmailErrorInfo(error);
+          const { retryable } = isGmailRetryableError(errorInfo);
+          return {
+            queryUsed: query,
+            error: "Failed to search inbox",
+            searchFeedback: {
+              status: errorInfo.status,
+              message: (errorInfo.errorMessage || failureMessage).slice(0, 300),
+              retryable,
+            },
+          };
+        }
+      },
+    });
 
 const outlookSearchInboxTool = ({
   email,
@@ -670,8 +662,17 @@ const outlookSearchInboxTool = ({
   });
 
 const searchInboxTools = {
-  google: gmailSearchInboxTool,
+  google: querySearchInboxTool({
+    queryDescription:
+      "Gmail search query. Use from:person@example.com for an exact sender search. Also supports: to:, subject:, in:inbox, is:unread, has:attachment, after:YYYY/MM/DD, before:YYYY/MM/DD, label:, newer_than:, older_than:.",
+    failureMessage: "Gmail search request failed",
+  }),
   microsoft: outlookSearchInboxTool,
+  fastmail: querySearchInboxTool({
+    queryDescription:
+      "Fastmail search query. Use from:person@example.com for an exact sender search. Also supports: to:, subject:, in:inbox, is:unread, has:attachment, after:YYYY/MM/DD, before:YYYY/MM/DD, label:, newer_than:, older_than:, OR between terms, and parentheses around whole terms. category: is not available.",
+    failureMessage: "Fastmail search request failed",
+  }),
 };
 
 export const searchInboxTool = (options: InboxToolOptions) =>

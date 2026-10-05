@@ -1450,6 +1450,37 @@ describe("chat inbox tools - bulk pagination guidance (INB-134)", () => {
     );
   });
 
+  it("describes Fastmail search syntax to Fastmail accounts", async () => {
+    const searchMessages = vi
+      .fn()
+      .mockRejectedValue(
+        new SafeError("Unsupported Fastmail search operator: category."),
+      );
+    (createEmailProvider as any).mockResolvedValue({
+      searchMessages,
+      getLabels: vi.fn().mockResolvedValue([]),
+    });
+    const toolInstance = searchInboxTool({
+      email: TEST_EMAIL,
+      emailAccountId: "email-account-1",
+      provider: "fastmail",
+      logger,
+    });
+
+    const contract = serializeToolContract(toolInstance);
+    expect(contract).toContain("Fastmail search query");
+    expect(contract).not.toContain("Gmail");
+
+    const result = await (toolInstance.execute as any)({
+      query: "category:promotions",
+      limit: 20,
+    });
+    expect(result.searchFeedback).toMatchObject({
+      message: "Unsupported Fastmail search operator: category.",
+      retryable: false,
+    });
+  });
+
   it("searchInbox keeps bare Outlook text queries as text", async () => {
     const searchMessages = vi.fn().mockResolvedValue({
       messages: [],
