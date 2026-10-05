@@ -1,5 +1,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
+import { createTestLogger } from "@/__tests__/helpers";
 import { checkJMAPErrors, createFastmailClient } from "@/utils/fastmail/client";
+import { runWithRequestTimer, startRequestTimer } from "@/utils/request-timing";
 
 vi.mock("@/utils/auth/save-tokens", () => ({ saveTokens: vi.fn() }));
 
@@ -89,5 +91,50 @@ describe("JMAP failures", () => {
       ),
     );
     expect(peak).toBe(2);
+  });
+
+  it("reports how long requests waited for a free slot", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/session"))
+        return Response.json({
+          capabilities: {
+            "urn:ietf:params:jmap:core": { maxConcurrentRequests: 1 },
+            "urn:ietf:params:jmap:mail": {},
+          },
+          primaryAccounts: { "urn:ietf:params:jmap:mail": "queued-account" },
+          apiUrl: "https://api.fastmail.com/jmap/api/",
+        });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return Response.json({ methodResponses: [], sessionState: "s" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const timer = startRequestTimer({
+      logger,
+      requestName: "threads request",
+      slowWarnAfterMs: -1,
+    });
+
+    await runWithRequestTimer(timer, async () => {
+      const client = await createFastmailClient("token");
+      await Promise.all(
+        Array.from({ length: 3 }, () =>
+          client.request([
+            ["Email/get", { accountId: "queued-account", ids: [] }, "0"],
+          ]),
+        ),
+      );
+    });
+    timer.logSlowCompletion();
+    timer.stop();
+
+    const { provider } = warn.mock.calls[0][1] as {
+      provider: { requests: number; queueWaitMs: number; requestMs: number };
+    };
+    expect(provider.requests).toBe(3);
+    // The second request waits for one, the third for two.
+    expect(provider.queueWaitMs).toBeGreaterThanOrEqual(40);
+    expect(provider.requestMs).toBeGreaterThanOrEqual(40);
   });
 });
