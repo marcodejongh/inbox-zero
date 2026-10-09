@@ -41,7 +41,10 @@ async function getFilings({
 }) {
   const where = {
     emailAccountId,
-    status: { not: "PROCESSING" as const },
+    OR: [
+      { status: { not: "PROCESSING" as const } },
+      { driveConnection: { provider: "paperless" } },
+    ],
   };
 
   const [filings, total] = await Promise.all([
@@ -52,6 +55,11 @@ async function getFilings({
         filename: true,
         folderPath: true,
         fileId: true,
+        webUrl: true,
+        errorMessage: true,
+        paperlessUploadStartedAt: true,
+        paperlessTaskId: true,
+        driveConnection: { select: { provider: true } },
         status: true,
         confidence: true,
         reasoning: true,

@@ -12,8 +12,12 @@ import type {
 import { DocumentFilingStatus } from "@/generated/prisma/enums";
 import { aiParseFilingReply } from "@/utils/ai/document-filing/parse-filing-reply";
 import { processFilingReply } from "./handle-filing-reply";
+import { savePaperlessAttachment } from "@/utils/paperless/save";
 
 vi.mock("@/utils/prisma");
+vi.mock("@/utils/paperless/save", () => ({
+  savePaperlessAttachment: vi.fn().mockResolvedValue({ status: "PROCESSING" }),
+}));
 vi.mock("@/utils/ai/document-filing/parse-filing-reply", () => ({
   aiParseFilingReply: vi.fn(),
 }));
@@ -65,11 +69,15 @@ describe("processFilingReply", () => {
             id: "filing-1",
             filename: "first.pdf",
             currentFolder: "Receipts",
+            destination: "cloud",
+            status: "FILED",
           },
           {
             id: "filing-2",
             filename: "second.pdf",
             currentFolder: "Invoices",
+            destination: "cloud",
+            status: "FILED",
           },
         ],
       }),
@@ -82,6 +90,44 @@ describe("processFilingReply", () => {
         feedbackAt: expect.any(Date),
       },
     });
+  });
+  it("uploads a pending Paperless filing only when the owner approves it", async () => {
+    const filing = getFilingBatch()[0];
+    filing.status = DocumentFilingStatus.PENDING;
+    filing.driveConnection.provider = "paperless";
+    prisma.documentFiling.findFirst.mockResolvedValue(filing);
+    prisma.documentFiling.findMany.mockResolvedValue([filing]);
+    prisma.emailAccount.findUniqueOrThrow.mockResolvedValue({
+      account: { provider: "fastmail" },
+    } as any);
+    vi.mocked(aiParseFilingReply).mockResolvedValue({
+      actions: [{ filingId: filing.id, action: "approve", folderPath: null }],
+      reply: "Processing started.",
+    });
+    await processFilingReply(getReplyParams());
+    expect(savePaperlessAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        emailAccountId,
+        provider: "fastmail",
+        messageId: filing.messageId,
+        attachmentId: filing.attachmentId,
+      }),
+    );
+  });
+  it("refuses AI-proposed moves of documents already in Paperless", async () => {
+    const filing = getFilingBatch()[0];
+    filing.driveConnection.provider = "paperless";
+    prisma.documentFiling.findFirst.mockResolvedValue(filing);
+    prisma.documentFiling.findMany.mockResolvedValue([filing]);
+    vi.mocked(aiParseFilingReply).mockResolvedValue({
+      actions: [
+        { filingId: filing.id, action: "move", folderPath: "Invoices" },
+      ],
+      reply: "Moved.",
+    });
+    await processFilingReply(getReplyParams());
+    expect(savePaperlessAttachment).not.toHaveBeenCalled();
+    expect(prisma.documentFiling.update).not.toHaveBeenCalled();
   });
 
   it("applies multiple actions to their matching filings", async () => {
@@ -234,12 +280,16 @@ function getReplyParams() {
   const sourceMessage = getMockParsedMessage({
     id: "source-1",
     threadId: "thread-1",
-    headers: { "message-id": "<source-1@example.com>" },
+    headers: {
+      ...getMockParsedMessage().headers,
+      "message-id": "<source-1@example.com>",
+    },
   });
   const notificationMessage = getMockParsedMessage({
     id: "notification-1",
     threadId: "thread-1",
     headers: {
+      ...getMockParsedMessage().headers,
       "in-reply-to": "<source-1@example.com>",
       "message-id": "<notification-1@example.com>",
     },
@@ -248,6 +298,7 @@ function getReplyParams() {
     id: "reply-1",
     threadId: "thread-1",
     headers: {
+      ...getMockParsedMessage().headers,
       from: userEmail,
       "in-reply-to": "<notification-1@example.com>",
     },
@@ -310,6 +361,14 @@ function getFiling({
     folderId: "folder-1",
     folderPath,
     fileId: `${id}-file`,
+    paperlessTaskId: null,
+    paperlessUploadStartedAt: null,
+    paperlessNotifyOnCompletion: false,
+    paperlessNotifiedChannelIds: [],
+    paperlessReconcileLeaseId: null,
+    paperlessReconcileLeaseUntil: null,
+    webUrl: null,
+    errorMessage: null,
     reasoning: null,
     confidence: 1,
     status: DocumentFilingStatus.FILED,
@@ -329,6 +388,7 @@ function getFiling({
       createdAt: now,
       updatedAt: now,
       provider: "google",
+      baseUrl: null,
       email: userEmail,
       accessToken: null,
       refreshToken: null,

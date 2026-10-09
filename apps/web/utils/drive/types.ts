@@ -3,6 +3,7 @@
 // ============================================================================
 
 export type DriveProviderType = "google" | "microsoft";
+export type FilingProviderType = DriveProviderType | "paperless";
 
 export interface DriveFolder {
   id: string;

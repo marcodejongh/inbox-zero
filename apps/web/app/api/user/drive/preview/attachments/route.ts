@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import prisma from "@/utils/prisma";
 import { withEmailProvider } from "@/utils/middleware";
 import { SafeError } from "@/utils/error";
+import { isPaperlessAttachment } from "@/utils/paperless/attachments";
 import { getFilableAttachments } from "@/utils/drive/filing-engine";
 import { extractNameFromEmail, extractEmailAddress } from "@/utils/email";
 import type { ParsedMessage } from "@/utils/types";
@@ -53,10 +54,11 @@ async function getAttachmentsData({
     select: {
       id: true,
       filingPrompt: true,
+      filingDestination: true,
       filingFolders: { select: { id: true } },
       driveConnections: {
         where: { isConnected: true },
-        select: { id: true },
+        select: { id: true, provider: true },
       },
     },
   });
@@ -71,11 +73,20 @@ async function getAttachmentsData({
     );
   }
 
-  if (emailAccount.filingFolders.length === 0) {
+  if (
+    emailAccount.filingDestination !== "paperless" &&
+    emailAccount.filingFolders.length === 0
+  ) {
     throw new SafeError("Please select at least one folder before previewing");
   }
 
-  if (emailAccount.driveConnections.length === 0) {
+  if (
+    !emailAccount.driveConnections.some((connection) =>
+      emailAccount.filingDestination === "paperless"
+        ? connection.provider === "paperless"
+        : connection.provider !== "paperless",
+    )
+  ) {
     throw new SafeError("No connected drives found");
   }
 
@@ -84,7 +95,11 @@ async function getAttachmentsData({
     maxResults: MAX_MESSAGES_TO_FETCH,
   });
 
-  const attachments = extractAttachmentPreviews(messages, MAX_ATTACHMENTS);
+  const attachments = extractAttachmentPreviews(
+    messages,
+    MAX_ATTACHMENTS,
+    emailAccount.filingDestination === "paperless",
+  );
 
   logger.info("Attachments preview ready", { count: attachments.length });
 
@@ -97,12 +112,14 @@ async function getAttachmentsData({
 function extractAttachmentPreviews(
   messages: ParsedMessage[],
   limit: number,
+  paperless: boolean,
 ): AttachmentPreviewItem[] {
   const result: AttachmentPreviewItem[] = [];
 
   for (const message of messages) {
     const extractable = getFilableAttachments(message);
     for (const attachment of extractable) {
+      if (paperless && !isPaperlessAttachment(attachment)) continue;
       result.push({
         messageId: message.id,
         threadId: message.threadId,

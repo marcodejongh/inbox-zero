@@ -6,5 +6,9 @@ import type {
 
 export function useFilingActivity({ limit, offset }: GetFilingsQuery) {
   const url = `/api/user/drive/filings?limit=${limit}&offset=${offset}`;
-  return useSWR<GetFilingsResponse>(url, { revalidateOnFocus: false });
+  return useSWR<GetFilingsResponse>(url, {
+    revalidateOnFocus: false,
+    refreshInterval: (data) =>
+      data?.filings.some((filing) => filing.status === "PROCESSING") ? 5000 : 0,
+  });
 }

@@ -20,13 +20,15 @@ export async function sendFilingMessagingNotifications({
   emailAccountId,
   filingId,
   senderEmail,
+  skipChannelIds = [],
   logger,
 }: {
   emailAccountId: string;
   filingId: string;
   senderEmail?: string | null;
+  skipChannelIds?: string[];
   logger: Logger;
-}): Promise<void> {
+}): Promise<{ successfulChannelIds: string[]; failedChannelIds: string[] }> {
   const log = logger.with({
     action: "sendFilingMessagingNotifications",
     filingId,
@@ -36,6 +38,7 @@ export async function sendFilingMessagingNotifications({
     where: {
       emailAccountId,
       isConnected: true,
+      id: { notIn: skipChannelIds },
       ...getMessagingRouteWhere(MessagingRoutePurpose.DOCUMENT_FILINGS),
     },
     select: {
@@ -55,7 +58,9 @@ export async function sendFilingMessagingNotifications({
     },
   });
 
-  if (channels.length === 0) return;
+  const successfulChannelIds: string[] = [];
+  const failedChannelIds: string[] = [];
+  if (channels.length === 0) return { successfulChannelIds, failedChannelIds };
 
   const filing = await prisma.documentFiling.findUnique({
     where: { id: filingId },
@@ -66,10 +71,14 @@ export async function sendFilingMessagingNotifications({
 
   if (!filing) {
     log.error("Filing not found for messaging notification");
-    return;
+    return {
+      successfulChannelIds,
+      failedChannelIds: channels.map((channel) => channel.id),
+    };
   }
 
-  const deliveryPromises: Promise<unknown>[] = [];
+  const deliveryPromises: { channelId: string; promise: Promise<unknown> }[] =
+    [];
 
   for (const channel of channels) {
     const route = getMessagingRoute(
@@ -95,21 +104,27 @@ export async function sendFilingMessagingNotifications({
           log.error("Slack destination resolution failed", { error });
           return null;
         });
-        if (!destination) continue;
+        if (!destination) {
+          failedChannelIds.push(channel.id);
+          continue;
+        }
 
-        if (filing.wasAsked) {
-          deliveryPromises.push(
-            sendDocumentAskToSlack({
+        if (filing.wasAsked && filing.status === "PENDING") {
+          deliveryPromises.push({
+            channelId: channel.id,
+            promise: sendDocumentAskToSlack({
               accessToken: channel.accessToken,
               channelId: destination,
               filename: filing.filename,
               reasoning: filing.reasoning,
               senderEmail,
+              paperless: filing.driveConnection.provider === "paperless",
             }),
-          );
+          });
         } else {
-          deliveryPromises.push(
-            sendDocumentFiledToSlack({
+          deliveryPromises.push({
+            channelId: channel.id,
+            promise: sendDocumentFiledToSlack({
               accessToken: channel.accessToken,
               channelId: destination,
               filename: filing.filename,
@@ -117,69 +132,85 @@ export async function sendFilingMessagingNotifications({
               driveProvider: filing.driveConnection.provider,
               senderEmail,
               fileId: filing.fileId,
+              webUrl: filing.webUrl,
             }),
-          );
+          });
         }
         break;
       }
       case MessagingProvider.TEAMS:
       case MessagingProvider.TELEGRAM: {
-        deliveryPromises.push(
-          sendAutomationMessage({
+        deliveryPromises.push({
+          channelId: channel.id,
+          promise: sendAutomationMessage({
             channel,
             route,
-            text: filing.wasAsked
-              ? formatDocumentAskText({
-                  filename: filing.filename,
-                  reasoning: filing.reasoning,
-                  senderEmail,
-                })
-              : formatDocumentFiledText({
-                  filename: filing.filename,
-                  folderPath: filing.folderPath,
-                  senderEmail,
-                }),
+            text:
+              filing.wasAsked && filing.status === "PENDING"
+                ? formatDocumentAskText({
+                    filename: filing.filename,
+                    reasoning: filing.reasoning,
+                    senderEmail,
+                    paperless: filing.driveConnection.provider === "paperless",
+                  })
+                : formatDocumentFiledText({
+                    filename: filing.filename,
+                    folderPath: filing.folderPath,
+                    senderEmail,
+                    webUrl: filing.webUrl,
+                  }),
             logger: log,
           }),
-        );
+        });
         break;
       }
     }
   }
 
-  const results = await Promise.allSettled(deliveryPromises);
-  const failures = results.filter((r) => r.status === "rejected");
-
-  for (const failure of failures) {
-    log.error("Filing notification failed", {
-      reason: (failure as PromiseRejectedResult).reason,
-    });
+  const results = await Promise.allSettled(
+    deliveryPromises.map((delivery) => delivery.promise),
+  );
+  for (const [index, result] of results.entries()) {
+    const channelId = deliveryPromises[index].channelId;
+    if (result.status === "fulfilled") {
+      successfulChannelIds.push(channelId);
+    } else {
+      failedChannelIds.push(channelId);
+      log.error("Filing notification failed", { reason: result.reason });
+    }
   }
+  return { successfulChannelIds, failedChannelIds };
 }
 
 function formatDocumentAskText({
   filename,
   reasoning,
   senderEmail,
+  paperless,
 }: {
   filename: string;
   reasoning: string | null;
   senderEmail?: string | null;
+  paperless?: boolean;
 }) {
   const fromPart = senderEmail ? ` from ${senderEmail}` : "";
   const reasonPart = reasoning ? ` — ${reasoning}` : "";
-  return `📄 Where should I file ${filename}${fromPart}?${reasonPart}`;
+  return paperless
+    ? `📄 Save ${filename}${fromPart} to Paperless?${reasonPart} Confirm Save or Skip in attachment filing activity.`
+    : `📄 Where should I file ${filename}${fromPart}?${reasonPart}`;
 }
 
 function formatDocumentFiledText({
   filename,
   folderPath,
   senderEmail,
+  webUrl,
 }: {
   filename: string;
   folderPath: string;
   senderEmail?: string | null;
+  webUrl?: string | null;
 }) {
   const fromPart = senderEmail ? ` from ${senderEmail}` : "";
-  return `📨 Filed ${filename}${fromPart} to ${folderPath}`;
+  return `📨 Filed ${filename}${fromPart} to ${folderPath}${webUrl ? `\n${webUrl}` : ""}`;
 }

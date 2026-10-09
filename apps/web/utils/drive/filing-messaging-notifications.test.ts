@@ -40,6 +40,99 @@ describe("sendFilingMessagingNotifications", () => {
     } as any);
   });
 
+  function channel(id: string, provider: MessagingProvider) {
+    return {
+      id,
+      provider,
+      isConnected: true,
+      accessToken: "token",
+      providerUserId: "user-1",
+      teamId: "team-1",
+      routes: [
+        {
+          purpose: MessagingRoutePurpose.DOCUMENT_FILINGS,
+          targetType: MessagingRouteTargetType.DIRECT_MESSAGE,
+          targetId: "destination-1",
+        },
+      ],
+    };
+  }
+
+  it("reports successful and failed channels independently", async () => {
+    prisma.messagingChannel.findMany.mockResolvedValue([
+      channel("slack-1", MessagingProvider.SLACK),
+      channel("teams-1", MessagingProvider.TEAMS),
+      channel("telegram-1", MessagingProvider.TELEGRAM),
+    ] as any);
+    vi.mocked(resolveSlackRouteDestination).mockResolvedValueOnce("C1");
+    vi.mocked(sendDocumentFiledToSlack).mockResolvedValueOnce(undefined);
+    vi.mocked(sendAutomationMessage).mockRejectedValueOnce(
+      new Error("Teams unavailable"),
+    );
+    vi.mocked(sendAutomationMessage).mockResolvedValueOnce({
+      messageId: "m1",
+      channelId: "destination-1",
+    });
+    expect(
+      await sendFilingMessagingNotifications({
+        emailAccountId: "email-account-1",
+        filingId: "filing-1",
+        logger,
+      }),
+    ).toEqual({
+      successfulChannelIds: ["slack-1", "telegram-1"],
+      failedChannelIds: ["teams-1"],
+    });
+  });
+  it("excludes already delivered channels when retrying", async () => {
+    prisma.messagingChannel.findMany.mockResolvedValue([
+      channel("teams-1", MessagingProvider.TEAMS),
+    ] as any);
+    vi.mocked(sendAutomationMessage).mockResolvedValueOnce({
+      messageId: "m1",
+      channelId: "destination-1",
+    });
+    expect(
+      await sendFilingMessagingNotifications({
+        emailAccountId: "email-account-1",
+        filingId: "filing-1",
+        logger,
+        skipChannelIds: ["slack-1", "telegram-1"],
+      }),
+    ).toEqual({ successfulChannelIds: ["teams-1"], failedChannelIds: [] });
+    expect(prisma.messagingChannel.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: { notIn: ["slack-1", "telegram-1"] },
+        }),
+      }),
+    );
+    expect(sendDocumentFiledToSlack).not.toHaveBeenCalled();
+  });
+  it("retries Slack destination failures while delivering to other channels", async () => {
+    prisma.messagingChannel.findMany.mockResolvedValue([
+      channel("slack-1", MessagingProvider.SLACK),
+      channel("teams-1", MessagingProvider.TEAMS),
+    ] as any);
+    vi.mocked(resolveSlackRouteDestination).mockRejectedValueOnce(
+      new Error("Slack unavailable"),
+    );
+    vi.mocked(sendAutomationMessage).mockResolvedValueOnce({
+      messageId: "m1",
+      channelId: "destination-1",
+    });
+    expect(
+      await sendFilingMessagingNotifications({
+        emailAccountId: "email-account-1",
+        filingId: "filing-1",
+        logger,
+      }),
+    ).toEqual({
+      successfulChannelIds: ["teams-1"],
+      failedChannelIds: ["slack-1"],
+    });
+  });
+
   it("skips Slack channels missing a provider user id", async () => {
     prisma.messagingChannel.findMany.mockResolvedValue([
       {

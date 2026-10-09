@@ -22,7 +22,7 @@ import {
   getFilableAttachments,
   processAttachment,
 } from "@/utils/drive/filing-engine";
-import type { DriveProviderType } from "@/utils/drive/types";
+import type { FilingProviderType } from "@/utils/drive/types";
 
 export const disconnectDriveAction = actionClient
   .metadata({ name: "disconnectDrive" })
@@ -38,6 +38,18 @@ export const disconnectDriveAction = actionClient
 
       if (!connection) {
         throw new SafeError("Drive connection not found");
+      }
+
+      if (connection.provider === "paperless") {
+        await prisma.driveConnection.update({
+          where: { id: connection.id, emailAccountId },
+          data: { isConnected: false, accessToken: null },
+        });
+        await prisma.emailAccount.updateMany({
+          where: { id: emailAccountId, filingDestination: "paperless" },
+          data: { filingEnabled: false },
+        });
+        return;
       }
 
       await prisma.driveConnection.delete({
@@ -190,6 +202,9 @@ export const moveFilingAction = actionClient
         throw new SafeError("Filing not found");
       }
 
+      if (filing.driveConnection.provider === "paperless")
+        throw new SafeError("Organize this document in Paperless.");
+
       if (!filing.fileId) {
         throw new SafeError("Filing has no associated file");
       }
@@ -251,8 +266,10 @@ export type FileAttachmentFiled = {
   filename: string;
   folderPath: string;
   fileId: string | null;
+  webUrl?: string | null;
+  status?: string;
   filedAt: string;
-  provider: DriveProviderType;
+  provider: FilingProviderType;
   skipped?: false;
 };
 
@@ -270,7 +287,7 @@ export const fileAttachmentAction = actionClient
   .action(
     async ({
       ctx: { emailAccountId, provider, logger },
-      parsedInput: { messageId, filename },
+      parsedInput: { messageId, filename, attachmentId },
     }): Promise<FileAttachmentResult> => {
       const emailAccount = await prisma.emailAccount.findUnique({
         where: { id: emailAccountId },
@@ -323,8 +340,10 @@ export const fileAttachmentAction = actionClient
       }
 
       const filableAttachments = getFilableAttachments(message);
-      const attachment = filableAttachments.find(
-        (a) => a.filename === filename,
+      const attachment = filableAttachments.find((a) =>
+        attachmentId
+          ? a.attachmentId === attachmentId
+          : a.filename === filename,
       );
 
       if (!attachment) {
@@ -366,8 +385,10 @@ export const fileAttachmentAction = actionClient
         filename: result.filing.filename,
         folderPath: result.filing.folderPath,
         fileId: result.filing.fileId,
+        webUrl: result.filing.webUrl,
+        status: result.filing.status,
         filedAt: new Date().toISOString(),
-        provider: result.filing.provider as DriveProviderType,
+        provider: result.filing.provider as FilingProviderType,
       };
     },
   );

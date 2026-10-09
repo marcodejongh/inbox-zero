@@ -55,6 +55,10 @@ vi.mock("@/utils/actions/mail", () => ({
   markReadThreadAction: vi.fn(),
 }));
 
+vi.mock("@/utils/actions/paperless", () => ({
+  savePaperlessAttachmentAction: vi.fn(),
+}));
+
 vi.mock("@/providers/ChatProvider", () => ({
   useChat: () => ({
     submitTextMessage: mockSubmitTextMessage,

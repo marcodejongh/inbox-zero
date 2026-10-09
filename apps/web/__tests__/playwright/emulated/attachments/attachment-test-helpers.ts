@@ -71,7 +71,7 @@ async function resetAttachmentState(client: Client) {
   );
   await client.query(
     `UPDATE "EmailAccount"
-     SET "filingEnabled" = false, "filingPrompt" = NULL
+     SET "filingEnabled" = false, "filingPrompt" = NULL, "filingDestination" = 'cloud'
      WHERE email = $1`,
     [PLAYWRIGHT_TEST_EMAIL],
   );

@@ -204,6 +204,7 @@ model EmailAccount {
   meetingRecorderRecapEmailEnabled    Boolean         @default(true)
   meetingRecorderFollowUpDraftEnabled Boolean         @default(true)
 
+  filingDestination           String  @default("cloud")
   filingEnabled               Boolean @default(false)
   filingPrompt                String?
   filingConfirmationSendEmail Boolean @default(true)
@@ -1812,7 +1813,8 @@ model DriveConnection {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  provider     String // "google" or "microsoft"
+  provider     String // "google", "microsoft", or "paperless"
+  baseUrl      String?
   email        String // can differ from emailAccount - e.g. connect work Drive to personal email
   accessToken  String?
   refreshToken String?
@@ -1859,11 +1861,19 @@ model DocumentFiling {
   filename     String
 
   // Result (after filing or prediction)
-  folderId   String? // null if AI suggests creating a new folder
-  folderPath String
-  fileId     String?
-  reasoning  String?
-  confidence Float?
+  folderId                    String? // null if AI suggests creating a new folder
+  folderPath                  String
+  fileId                      String?
+  reasoning                   String?
+  confidence                  Float?
+  paperlessTaskId             String?
+  paperlessUploadStartedAt    DateTime?
+  paperlessNotifyOnCompletion Boolean   @default(false)
+  paperlessNotifiedChannelIds  String[]  @default([])
+  paperlessReconcileLeaseId    String?
+  paperlessReconcileLeaseUntil DateTime?
+  webUrl                      String?
+  errorMessage                String?
 
   status DocumentFilingStatus @default(FILED)
 
@@ -1886,6 +1896,7 @@ model DocumentFiling {
   emailAccount      EmailAccount    @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
 
   @@unique([emailAccountId, messageId, attachmentId])
+  @@index([status, updatedAt])
   @@index([emailAccountId, status])
   @@index([emailAccountId, notificationBatchId])
   @@index([driveConnectionId])

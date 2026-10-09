@@ -28,6 +28,7 @@ import { getDriveFileUrl } from "@/utils/drive/url";
 import type { GetFilingsResponse } from "@/app/api/user/drive/filings/route";
 import { useDriveConnections } from "@/hooks/useDriveConnections";
 import type { GetDriveConnectionsResponse } from "@/app/api/user/drive/connections/route";
+import { PaperlessFilingStatus } from "@/components/drive/PaperlessFilingStatus";
 import { YesNoIndicator } from "@/components/drive/YesNoIndicator";
 import type { DriveProviderType } from "@/utils/drive/types";
 import {
@@ -36,7 +37,7 @@ import {
 } from "@/utils/actions/drive";
 import { useAccount } from "@/providers/EmailAccountProvider";
 
-export function FilingActivity() {
+export function FilingActivity({ paperless = false }: { paperless?: boolean }) {
   const { emailAccountId } = useAccount();
   const { data, isLoading, error, mutate } = useFilingActivity({
     limit: 10,
@@ -60,10 +61,14 @@ export function FilingActivity() {
               <TableHeader>
                 <TableRow>
                   <TableHead>File</TableHead>
-                  <TableHead>Folder</TableHead>
+                  <TableHead>{paperless ? "Destination" : "Folder"}</TableHead>
                   <TableHead className="w-[100px]">When</TableHead>
-                  <TableHead className="w-[80px] text-center">
-                    Correct?
+                  <TableHead
+                    className={
+                      paperless ? "min-w-[200px]" : "w-[80px] text-center"
+                    }
+                  >
+                    {paperless ? "Status" : "Correct?"}
                   </TableHead>
                   <TableHead className="w-[50px]" />
                 </TableRow>
@@ -115,12 +120,18 @@ function FilingRow({
 
   const connection = connections.find((c) => c.id === filing.driveConnectionId);
 
-  const driveUrl = filing.fileId
-    ? getDriveFileUrl(filing.fileId, connection?.provider as DriveProviderType)
-    : null;
+  const paperless = filing.driveConnection.provider === "paperless";
+  const driveUrl =
+    filing.webUrl ||
+    (!paperless && filing.fileId
+      ? getDriveFileUrl(
+          filing.fileId,
+          connection?.provider as DriveProviderType,
+        )
+      : null);
 
   const canGiveFeedback =
-    filing.status !== "PENDING" && filing.status !== "ERROR";
+    !paperless && filing.status !== "PENDING" && filing.status !== "ERROR";
 
   useEffect(() => {
     setVote(filing.feedbackPositive ?? null);
@@ -249,7 +260,7 @@ function FilingRow({
         </span>
       </TableCell>
       <TableCell className="break-words max-w-[200px]">
-        <FolderCell filing={filing} />
+        {paperless ? "Paperless" : <FolderCell filing={filing} />}
       </TableCell>
       <TableCell>
         <span className="text-muted-foreground text-xs">
@@ -257,64 +268,73 @@ function FilingRow({
         </span>
       </TableCell>
       <TableCell>
-        <div className="flex items-center justify-center">
-          {canGiveFeedback && !isSubmitting && otherFolders.length > 0 ? (
-            <DropdownMenu
-              onOpenChange={(open) => {
-                setDropdownOpen(open);
-                if (open) {
-                  voteBeforeDropdownRef.current = vote;
-                  setVote(false);
-                }
-              }}
-            >
-              <DropdownMenuTrigger asChild>
-                <div>
-                  <YesNoIndicator
-                    value={vote}
-                    onClick={handleFeedbackClick}
-                    dropdownTrigger="wrong"
-                    wrongActive={dropdownOpen}
-                  />
-                </div>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuLabel>
-                  Which folder does this file belong in?
-                </DropdownMenuLabel>
-                {otherFolders.map((folder) => (
+        {paperless ? (
+          <PaperlessFilingStatus
+            filingId={filing.id}
+            status={filing.status}
+            errorMessage={filing.errorMessage}
+            onUpdated={onFeedbackSaved}
+          />
+        ) : (
+          <div className="flex items-center justify-center">
+            {canGiveFeedback && !isSubmitting && otherFolders.length > 0 ? (
+              <DropdownMenu
+                onOpenChange={(open) => {
+                  setDropdownOpen(open);
+                  if (open) {
+                    voteBeforeDropdownRef.current = vote;
+                    setVote(false);
+                  }
+                }}
+              >
+                <DropdownMenuTrigger asChild>
+                  <div>
+                    <YesNoIndicator
+                      value={vote}
+                      onClick={handleFeedbackClick}
+                      dropdownTrigger="wrong"
+                      wrongActive={dropdownOpen}
+                    />
+                  </div>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuLabel>
+                    Which folder does this file belong in?
+                  </DropdownMenuLabel>
+                  {otherFolders.map((folder) => (
+                    <DropdownMenuItem
+                      key={folder.folderId}
+                      onClick={() =>
+                        handleMoveToFolder(
+                          folder.folderId,
+                          folder.folderName,
+                          folder.folderPath,
+                        )
+                      }
+                    >
+                      <FolderIcon className="size-4" />
+                      {folder.folderName}
+                    </DropdownMenuItem>
+                  ))}
                   <DropdownMenuItem
-                    key={folder.folderId}
-                    onClick={() =>
-                      handleMoveToFolder(
-                        folder.folderId,
-                        folder.folderName,
-                        folder.folderPath,
-                      )
-                    }
+                    onClick={() => setVote(voteBeforeDropdownRef.current)}
                   >
-                    <FolderIcon className="size-4" />
-                    {folder.folderName}
+                    Cancel
                   </DropdownMenuItem>
-                ))}
-                <DropdownMenuItem
-                  onClick={() => setVote(voteBeforeDropdownRef.current)}
-                >
-                  Cancel
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <YesNoIndicator
-              value={vote}
-              onClick={
-                canGiveFeedback && !isSubmitting
-                  ? handleFeedbackClick
-                  : undefined
-              }
-            />
-          )}
-        </div>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <YesNoIndicator
+                value={vote}
+                onClick={
+                  canGiveFeedback && !isSubmitting
+                    ? handleFeedbackClick
+                    : undefined
+                }
+              />
+            )}
+          </div>
+        )}
       </TableCell>
       <TableCell>
         {driveUrl && (
@@ -323,7 +343,7 @@ function FilingRow({
             target="_blank"
             rel="noopener noreferrer"
             className="text-muted-foreground hover:text-foreground"
-            aria-label={`Open ${filing.filename} in drive`}
+            aria-label={`Open ${filing.filename} in ${paperless ? "Paperless" : "drive"}`}
           >
             <ExternalLinkIcon className="size-4" />
           </a>

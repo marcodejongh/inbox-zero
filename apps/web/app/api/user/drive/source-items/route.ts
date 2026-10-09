@@ -34,6 +34,7 @@ async function getData({
     where: {
       emailAccountId,
       isConnected: true,
+      provider: { in: ["google", "microsoft"] },
     },
     select: {
       id: true,

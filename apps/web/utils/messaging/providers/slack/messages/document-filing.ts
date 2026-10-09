@@ -8,12 +8,14 @@ export type DocumentFiledBlocksParams = {
   driveProvider: string;
   senderEmail?: string | null;
   fileId?: string | null;
+  webUrl?: string | null;
 };
 
 export type DocumentAskBlocksParams = {
   filename: string;
   reasoning: string | null;
   senderEmail?: string | null;
+  paperless?: boolean;
 };
 
 export function buildDocumentFiledBlocks({
@@ -22,11 +24,13 @@ export function buildDocumentFiledBlocks({
   driveProvider,
   senderEmail,
   fileId,
+  webUrl,
 }: DocumentFiledBlocksParams): (KnownBlock | Block)[] {
   const fileLink =
-    fileId && (driveProvider === "google" || driveProvider === "microsoft")
+    webUrl ||
+    (fileId && (driveProvider === "google" || driveProvider === "microsoft")
       ? getDriveFileUrl(fileId, driveProvider as DriveProviderType)
-      : null;
+      : null);
 
   const fileDisplay = fileLink ? `<${fileLink}|${filename}>` : `*${filename}*`;
 
@@ -47,6 +51,7 @@ export function buildDocumentAskBlocks({
   filename,
   reasoning,
   senderEmail,
+  paperless,
 }: DocumentAskBlocksParams): (KnownBlock | Block)[] {
   const fromPart = senderEmail ? ` from *${senderEmail}*` : "";
   const reasonPart = reasoning ? ` — ${reasoning}` : "";
@@ -56,7 +61,9 @@ export function buildDocumentAskBlocks({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `📄 Where should I file *${filename}*${fromPart}?${reasonPart}`,
+        text: paperless
+          ? `📄 Save *${filename}*${fromPart} to Paperless?${reasonPart} Confirm Save or Skip in attachment filing activity.`
+          : `📄 Where should I file *${filename}*${fromPart}?${reasonPart}`,
       },
     },
   ];

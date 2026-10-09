@@ -98,6 +98,10 @@
   ],
   "crons": [
     {
+      "path": "/api/cron/paperless-filings",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/scheduled-actions",
       "schedule": "* * * * *"
     },

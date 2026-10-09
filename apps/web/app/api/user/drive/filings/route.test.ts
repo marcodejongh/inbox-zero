@@ -33,14 +33,20 @@ describe("GET /api/user/drive/filings", () => {
       expect.objectContaining({
         where: {
           emailAccountId: "email-account-1",
-          status: { not: "PROCESSING" },
+          OR: [
+            { status: { not: "PROCESSING" } },
+            { driveConnection: { provider: "paperless" } },
+          ],
         },
       }),
     );
     expect(prisma.documentFiling.count).toHaveBeenCalledWith({
       where: {
         emailAccountId: "email-account-1",
-        status: { not: "PROCESSING" },
+        OR: [
+          { status: { not: "PROCESSING" } },
+          { driveConnection: { provider: "paperless" } },
+        ],
       },
     });
     expect(body).toEqual({
